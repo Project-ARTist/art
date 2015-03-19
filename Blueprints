@@ -1,0 +1,152 @@
+LIBART_IMG_HOST_BASE_ADDRESS = "0x60000000"
+LIBART_IMG_TARGET_BASE_ADDRESS = "0x70000000"
+
+ART_COVERAGE = false
+
+art_target_defaults = {
+    host: {
+        // By default, host builds use clang for better warnings.
+        clang: true,
+        clang_cflags: [
+            // Bug: 15446488. We don't omit the frame pointer to work around
+            // clang/libunwind bugs that cause SEGVs in run-test-004-ThreadStress.
+            "-fno-omit-frame-pointer",
+        ],
+        cflags: [
+            "-DART_BASE_ADDRESS=" + LIBART_IMG_HOST_BASE_ADDRESS,
+            "-DART_DEFAULT_INSTRUCTION_SET_FEATURES=default",
+        ],
+    },
+    android: {
+        cflags: [
+            "-DART_TARGET",
+            "-DART_BASE_ADDRESS=" + LIBART_IMG_TARGET_BASE_ADDRESS,
+            // To use oprofile_android --callgraph, uncomment this and recompile with "mmm art -B -j16"
+            // "-fno-omit-frame-pointer", "-marm", "-mapcs",
+        ],
+        debug: {
+            cflags: [
+                // TODO: depends on ART_COVERAGE/NATIVE_COVERAGE
+                "-Wframe-larger-than=1728",
+            ],
+        },
+    },
+    linux: {
+        debug: {
+            cflags: [
+                // TODO: depends on ART_COVERAGE/NATIVE_COVERAGE/SANTIIZE_HOST
+                "-Wframe-larger-than=2700",
+            ],
+        },
+    },
+}
+
+art_arch_defaults = {
+    arm64: {
+        clang_cflags: [
+            // These are necessary for Clang ARM64 ART builds. TODO: remove.
+            "-DNVALGRIND",
+            // FIXME: upstream LLVM has a vectorizer bug that needs to be fixed
+            "-fno-vectorize",
+        ],
+    },
+}
+
+art_clang_cflags = [
+    // Warn about thread safety violations with clang.
+    "-Wthread-safety",
+    // Warn if switch fallthroughs aren't annotated.
+    "-Wimplicit-fallthrough",
+    // Enable float equality warnings.
+    "-Wfloat-equal",
+    // Enable warning of converting ints to void*.
+    "-Wint-to-void-pointer-cast",
+]
+
+art_cflags = [
+    // Base set of cflags used by all things ART.
+    "-fno-rtti",
+    "-std=gnu++11",
+    "-ggdb3",
+    "-Wall",
+    "-Werror",
+    "-Wextra",
+    "-Wstrict-aliasing",
+    "-fstrict-aliasing",
+    "-Wunreachable-code",
+    "-Wredundant-decls",
+    "-Wshadow",
+    "-Wunused",
+    "-fvisibility=protected",
+
+    // TODO: ART_DEFAULT_GC_TYPE environment variable?
+    "-DART_DEFAULT_GC_TYPE_IS_CMS",
+
+    // TODO: ART_IMT_SIZE envirnoment variable?
+    "-DIMT_SIZE=64",
+
+    // TODO: ART_USE_OPTIMIZING_COMPILER environment variable?
+    // "-DART_USE_OPTIMIZING_COMPILER=1",
+
+    // TODO: ART_HEAP_POISONING environment variable?
+    // "-DART_HEAP_POISONING=1",
+
+    // TODO: ART_USE_READ_BARRIER environment variable?
+    // "-DART_USE_READ_BARRIER=1",
+
+    // Missing declarations: too many at the moment, as we use "extern" quite a bit.
+    // "-Wmissing-declarations",
+
+    // GCC-only warnings.
+    "-Wunused-but-set-parameter",
+    // Suggest const: too many false positives, but good for a trial run.
+    //"-Wsuggest-attribute=const",
+    // Useless casts: too many, as we need to be 32/64 agnostic, but the compiler knows.
+    //"-Wuseless-cast",
+    // Zero-as-null: Have to convert all NULL and "diagnostic ignore" all includes like libnativehelper
+    // that are still stuck pre-C++11.
+    //"-Wzero-as-null-pointer-constant",
+    // Suggest final: Have to move to a more recent GCC.
+    //"-Wsuggest-final-types",
+
+    "-DART_BASE_ADDRESS_MIN_DELTA=-0x1000000",
+    "-DART_BASE_ADDRESS_MAX_DELTA=0x1000000",
+]
+
+art_debug_defaults = {
+    cflags: [
+        "-O2",
+        "-DDYNAMIC_ANNOTATIONS_ENABLED=1",
+        "-DVIXL_DEBUG",
+        "-UNDEBUG",
+    ],
+}
+
+art_release_defaults = {
+    cflags: [
+        "-O3",
+    ],
+}
+
+art_include_dirs = [
+    "external/gtest/include",
+    "external/valgrind/main/include",
+    "external/valgrind/main",
+    "external/vixl/src",
+    "external/zlib",
+]
+
+// Insert into each module:
+//    cflags: art_cflags,
+//    clang_cflags: art_clang_cflags,
+//    include_dirs: art_include_dirs,
+//    target: art_target_defaults,
+//    arch: art_arch_defaults,
+//    debug: art_debug_defaults,
+//    release: art_release_defaults,
+//    native_coverage: ART_COVERAGE,
+
+subdirs = [
+    "runtime",
+    "sigchainlib",
+]
