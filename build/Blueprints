@@ -1,0 +1,22 @@
+//
+// WARNING: Modifying this file will NOT automatically regenerate build.ninja.in!
+//
+// Before modifying this file make sure minibp is up to date:
+//    1) "repo sync build/soong" to make sure you have the latest build.ninja.in
+//    2) build minibp, which builds automicatically through the normal build steps. For example:
+//
+// After modifying this file regenerate build.ninja.in and build your changes:
+//    1) In your build directory, execute "../bootstrap.bash -r" to regenerate build.ninja.in
+//    2) Build again
+//
+
+bootstrap_go_package {
+    name: "soong-art",
+    pkgPath: "android/soong/art",
+    deps: [
+        "soong-cc",
+    ],
+    srcs: [
+        "art.go",
+    ],
+}

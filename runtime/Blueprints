@@ -101,14 +101,10 @@ gensrcs {
     output_extension: "operator_out.cc",
 }
 
-cc_library {
+art_cc_library {
     name: "libart",
     host_supported: true,
-    cflags: art_cflags + LIBART_CFLAGS,
-    clang_cflags: art_clang_cflags,
-    debug: art_debug_defaults,
-    release: art_release_defaults,
-    native_coverage: ART_COVERAGE,
+    cflags: LIBART_CFLAGS,
 
     srcs: [
         "atomic.cc", // TODO: "atomic.cc.arm"
@@ -299,16 +295,13 @@ cc_library {
     // on linux. Yet sdk on mac needs integrated assembler.
     clang_asflags: ["-no-integrated-as"],
 
-    target: art_target_defaults + {
+    target: {
         android: {
             srcs: [
                 "jdwp/jdwp_adb.cc",
                 "monitor_android.cc",
                 "runtime_android.cc",
                 "thread_android.cc",
-            ],
-            cflags: [
-                "-DART_DEFAULT_INSTRUCTION_SET_FEATURES=" + LIBART_TARGET_DEFAULT_INSTRUCTION_SET_FEATURES,
             ],
             shared_libs: [
                 "libdl",
@@ -355,7 +348,7 @@ cc_library {
         },
     },
 
-    arch: art_arch_defaults + {
+    arch: {
         arm: {
             srcs: [
                 "arch/arm/context_arm.cc", // TODO: "arch/arm/context_arm.cc.arm",
@@ -431,7 +424,6 @@ cc_library {
         },
     },
 
-    include_dirs: art_include_dirs,
     local_include_dirs: [
         "../cmdline",
         "../sigchainlib",
