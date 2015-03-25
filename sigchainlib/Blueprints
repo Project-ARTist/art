@@ -14,13 +14,11 @@
 // limitations under the License.
 //
 
-cc_library {
+art_cc_library {
     name: "libsigchain",
     host_supported: true,
     shared_libs: ["liblog"],
-    cflags: art_cflags,
-    clang_cflags: art_clang_cflags,
-    target: art_target_defaults + {
+    target: {
         android: {
             shared_libs: ["libdl"],
         },
@@ -28,14 +26,10 @@ cc_library {
             host_ldlibs: ["-ldl"],
         },
     },
-    arch: art_arch_defaults,
-    debug: art_debug_defaults,
-    release: art_release_defaults,
     static: {
         srcs: ["sigchain.cc"],
     },
     shared: {
         srcs: ["sigchain_dummy.cc"],
     },
-    native_coverage: ART_COVERAGE,
 }
