@@ -1,5 +1,7 @@
 subdirs = [
     "build",
+    "compiler",
+    "dex2oat",
     "runtime",
     "sigchainlib",
 ]
