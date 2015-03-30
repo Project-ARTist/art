@@ -102,13 +102,6 @@ func (a *artModule) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) cc.
 			// clang/libunwind bugs that cause SEGVs in run-test-004-ThreadStress.
 			flags.CFlags = append(flags.CFlags, "-fno-omit-frame-pointer")
 		}
-
-		if ctx.Debug() {
-			flags.CFlags = append(flags.CFlags,
-				// TODO: depends on ART_COVERAGE/NATIVE_COVERAGE/SANTIIZE_HOST
-				"-Wframe-larger-than=2700",
-			)
-		}
 	} else {
 		baseAddress = libartImgTargetBaseAddress
 		switch ctx.Arch().CpuVariant {
@@ -124,12 +117,16 @@ func (a *artModule) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) cc.
 			// To use oprofile_android --callgraph, uncomment this and recompile with "mmm art -B -j16"
 			// "-fno-omit-frame-pointer", "-marm", "-mapcs",
 		)
+	}
 
-		if ctx.Debug() {
-			flags.CFlags = append(flags.CFlags,
-				// TODO: depends on ART_COVERAGE/NATIVE_COVERAGE
-				"-Wframe-larger-than=1728",
-			)
+	if !ctx.Debug() {
+		if ctx.Device() {
+			// TODO: depends on ART_COVERAGE/NATIVE_COVERAGE
+			flags.CFlags = append(flags.CFlags, "-Wframe-larger-than=1728")
+		} else {
+			// Larger frame-size for host clang builds today
+			// TODO: depends on ART_COVERAGE/NATIVE_COVERAGE/SANTIIZE_HOST
+			flags.CFlags = append(flags.CFlags, "-Wframe-larger-than=2700")
 		}
 	}
 
@@ -187,11 +184,13 @@ func (a *artModule) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) cc.
 
 		"-DART_BASE_ADDRESS_MIN_DELTA=-0x1000000",
 		"-DART_BASE_ADDRESS_MAX_DELTA=0x1000000",
+
+		// Missing declarations: too many at the moment, as we use "extern" quite a bit.
+		// "-Wmissing-declarations",
 	)
 
 	flags.CFlags = append(flags.CFlags,
 		"-DART_BASE_ADDRESS="+baseAddress, // TODO: configurable?
-		// TODO: configure based on ctx.Arch()
 		"-DART_DEFAULT_INSTRUCTION_SET_FEATURES="+instructionSetFeatures,
 	)
 
@@ -217,26 +216,31 @@ func (a *artModule) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) cc.
 		"${SrcDir}/external/zlib",
 	)
 
-	// TODO: environment based cflags
-	flags.CFlags = append(flags.CFlags,
-		// TODO: ART_DEFAULT_GC_TYPE environment variable?
-		"-DART_DEFAULT_GC_TYPE_IS_CMS",
+	config := ctx.Config().(common.Config)
 
-		// TODO: ART_IMT_SIZE envirnoment variable?
-		"-DIMT_SIZE=64",
+	gcType := config.Getenv("ART_DEFAULT_GC_TYPE")
+	if gcType == "" {
+		gcType = "CMS"
+	}
+	flags.CFlags = append(flags.CFlags, "-DART_DEFAULT_GC_TYPE_IS_"+gcType)
 
-		// TODO: ART_USE_OPTIMIZING_COMPILER environment variable?
-		// "-DART_USE_OPTIMIZING_COMPILER=1",
+	imtSize := config.Getenv("ART_IMT_SIZE")
+	if imtSize == "" {
+		imtSize = "64"
+	}
+	flags.CFlags = append(flags.CFlags, "-DIMT_SIZE="+imtSize)
 
-		// TODO: ART_HEAP_POISONING environment variable?
-		// "-DART_HEAP_POISONING=1",
+	if config.Getenv("ART_USE_OPTIMIZING_COMPILER") == "true" {
+		flags.CFlags = append(flags.CFlags, "-DART_USE_OPTIMIZING_COMPILER=1")
+	}
 
-		// TODO: ART_USE_READ_BARRIER environment variable?
-		// "-DART_USE_READ_BARRIER=1",
+	if config.Getenv("ART_HEAP_POISONING") == "true" {
+		flags.CFlags = append(flags.CFlags, "-DART_HEAP_POISONING=1")
+	}
 
-		// Missing declarations: too many at the moment, as we use "extern" quite a bit.
-		// "-Wmissing-declarations",
-	)
+	if config.Getenv("ART_USE_READ_BARRIER") == "true" {
+		flags.CFlags = append(flags.CFlags, "-DART_USE_READ_BARRIER=1")
+	}
 
 	return flags
 }
