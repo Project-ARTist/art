@@ -67,9 +67,9 @@ func (a *artCCBinary) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) c
 	flags = a.CCBinary.Flags(ctx, flags)
 	flags = a.artModule.Flags(ctx, flags)
 
-	flags.IncludeDirs = append(flags.IncludeDirs,
-		"${SrcDir}/art/runtime",
-		"${SrcDir}/art/cmdline",
+	flags.CFlags = append(flags.CFlags,
+		"-I${SrcDir}/art/runtime",
+		"-I${SrcDir}/art/cmdline",
 	)
 
 	if ctx.Debug() {
@@ -82,7 +82,7 @@ func (a *artCCBinary) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) c
 	}
 
 	if ctx.Host() {
-		flags.LdLibs = append(flags.LdLibs, "-lpthread", "-ldl")
+		flags.LdFlags = append(flags.LdFlags, "-lpthread", "-ldl")
 	}
 
 	return flags
@@ -208,12 +208,12 @@ func (a *artModule) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) cc.
 	}
 
 	// TODO: these should all be replaced with exported includes
-	flags.IncludeDirs = append(flags.IncludeDirs,
-		"${SrcDir}/external/gtest/include",
-		"${SrcDir}/external/valgrind/main/include",
-		"${SrcDir}/external/valgrind/main",
-		"${SrcDir}/external/vixl/src",
-		"${SrcDir}/external/zlib",
+	flags.CFlags = append(flags.CFlags,
+		"-I${SrcDir}/external/gtest/include",
+		"-I${SrcDir}/external/valgrind/main/include",
+		"-I${SrcDir}/external/valgrind/main",
+		"-I${SrcDir}/external/vixl/src",
+		"-I${SrcDir}/external/zlib",
 	)
 
 	config := ctx.Config().(common.Config)
