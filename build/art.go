@@ -17,7 +17,6 @@ type artModule struct{}
 
 type artCCLibrary struct {
 	cc.CCLibrary
-	artModule
 }
 
 func ArtCCLibraryFactory() (blueprint.Module, []interface{}) {
@@ -29,15 +28,13 @@ func ArtCCLibraryFactory() (blueprint.Module, []interface{}) {
 	return cc.NewCCLibrary(&module.CCLibrary, module, common.HostAndDeviceSupported)
 }
 
-func (a *artCCLibrary) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) cc.CCFlags {
-	flags = a.CCLibrary.Flags(ctx, flags)
-	flags = a.artModule.Flags(ctx, flags)
-	return flags
+func (a *artCCLibrary) ModifyProperties(ctx common.AndroidBaseContext) {
+	a.CCLibrary.ModifyProperties(ctx)
+	artModifyProperties(ctx, &a.CCBase)
 }
 
 type artCCBinary struct {
 	cc.CCBinary
-	artModule
 }
 
 func ArtCCBinaryFactory() (blueprint.Module, []interface{}) {
@@ -46,31 +43,25 @@ func ArtCCBinaryFactory() (blueprint.Module, []interface{}) {
 	return cc.NewCCBinary(&module.CCBinary, module, common.HostAndDeviceSupported)
 }
 
-func (a *artCCBinary) DepNames(ctx common.AndroidBaseContext, depNames cc.CCDeps) cc.CCDeps {
-	depNames = a.CCBinary.DepNames(ctx, depNames)
-	depNames.WholeStaticLibs = append(depNames.WholeStaticLibs, "libsigchain")
+func (a *artCCBinary) ModifyProperties(ctx common.AndroidBaseContext) {
+	a.CCBinary.ModifyProperties(ctx)
+	artModifyProperties(ctx, &a.CCBase)
+
+	a.Properties.Whole_static_libs = append(a.Properties.Whole_static_libs, "libsigchain")
 
 	if ctx.Device() {
-		depNames.SharedLibs = append(depNames.SharedLibs, "libdl")
+		a.Properties.Shared_libs = append(a.Properties.Shared_libs, "libdl")
 	}
 
 	if ctx.Debug() {
-		depNames.SharedLibs = append(depNames.SharedLibs, "libartd")
+		a.Properties.Shared_libs = append(a.Properties.Shared_libs, "libartd")
 	} else {
-		depNames.SharedLibs = append(depNames.SharedLibs, "libart")
+		a.Properties.Shared_libs = append(a.Properties.Shared_libs, "libart")
 	}
 
-	return depNames
-}
-
-func (a *artCCBinary) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) cc.CCFlags {
-	flags = a.CCBinary.Flags(ctx, flags)
-	flags = a.artModule.Flags(ctx, flags)
-
-	flags.CFlags = append(flags.CFlags,
-		"-I${SrcDir}/art/runtime",
-		"-I${SrcDir}/art/cmdline",
-	)
+	a.Properties.Include_dirs = append(a.Properties.Include_dirs,
+		"art/runtime",
+		"art/cmdline")
 
 	if ctx.Debug() {
 		a.BinaryProperties.Stem = ctx.ModuleName() + "d"
@@ -78,29 +69,29 @@ func (a *artCCBinary) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) c
 
 	if !(ctx.Host() && runtime.GOOS == "darwin") {
 		// Mac OS linker doesn't understand --export-dynamic.
-		flags.LdFlags = append(flags.LdFlags, "-Wl,--export-dynamic")
+		a.Properties.Ldflags = append(a.Properties.Ldflags, "-Wl,--export-dynamic")
 	}
 
 	if ctx.Host() {
-		flags.LdFlags = append(flags.LdFlags, "-lpthread", "-ldl")
+		a.Properties.Ldflags = append(a.Properties.Ldflags, "-lpthread", "-ldl")
 	}
-
-	return flags
 }
 
-func (a *artModule) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) cc.CCFlags {
+func artModifyProperties(ctx common.AndroidBaseContext, base *cc.CCBase) {
 	var baseAddress string
 	var instructionSetFeatures string
 
 	if ctx.Host() {
 		baseAddress = libartImgHostBaseAddress
 		instructionSetFeatures = "default"
-		flags.Clang = true // TODO: allow this to be disabled in a Blueprints file?
+		if !ctx.ContainsProperty("clang") {
+			base.Properties.Clang = true
+		}
 
-		if flags.Clang {
+		if base.Properties.Clang {
 			// Bug: 15446488. We don't omit the frame pointer to work around
 			// clang/libunwind bugs that cause SEGVs in run-test-004-ThreadStress.
-			flags.CFlags = append(flags.CFlags, "-fno-omit-frame-pointer")
+			base.Properties.Cflags = append(base.Properties.Cflags, "-fno-omit-frame-pointer")
 		}
 	} else {
 		baseAddress = libartImgTargetBaseAddress
@@ -112,7 +103,7 @@ func (a *artModule) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) cc.
 		default:
 			instructionSetFeatures = "default"
 		}
-		flags.CFlags = append(flags.CFlags,
+		base.Properties.Cflags = append(base.Properties.Cflags,
 			"-DART_TARGET",
 			// To use oprofile_android --callgraph, uncomment this and recompile with "mmm art -B -j16"
 			// "-fno-omit-frame-pointer", "-marm", "-mapcs",
@@ -122,16 +113,16 @@ func (a *artModule) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) cc.
 	if !ctx.Debug() {
 		if ctx.Device() {
 			// TODO: depends on ART_COVERAGE/NATIVE_COVERAGE
-			flags.CFlags = append(flags.CFlags, "-Wframe-larger-than=1728")
+			base.Properties.Cflags = append(base.Properties.Cflags, "-Wframe-larger-than=1728")
 		} else {
 			// Larger frame-size for host clang builds today
 			// TODO: depends on ART_COVERAGE/NATIVE_COVERAGE/SANTIIZE_HOST
-			flags.CFlags = append(flags.CFlags, "-Wframe-larger-than=2700")
+			base.Properties.Cflags = append(base.Properties.Cflags, "-Wframe-larger-than=2700")
 		}
 	}
 
-	if ctx.Arch().ArchType == common.Arm64 && flags.Clang {
-		flags.CFlags = append(flags.CFlags,
+	if ctx.Arch().ArchType == common.Arm64 && base.Properties.Clang {
+		base.Properties.Cflags = append(base.Properties.Cflags,
 			// These are necessary for Clang ARM64 ART builds. TODO: remove.
 			"-DNVALGRIND",
 			// FIXME: upstream LLVM has a vectorizer bug that needs to be fixed
@@ -139,8 +130,8 @@ func (a *artModule) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) cc.
 		)
 	}
 
-	if flags.Clang {
-		flags.CFlags = append(flags.CFlags,
+	if base.Properties.Clang {
+		base.Properties.Cflags = append(base.Properties.Cflags,
 			// Warn about thread safety violations with clang.
 			"-Wthread-safety",
 			// Warn if switch fallthroughs aren't annotated.
@@ -151,7 +142,7 @@ func (a *artModule) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) cc.
 			"-Wint-to-void-pointer-cast",
 		)
 	} else {
-		flags.CFlags = append(flags.CFlags,
+		base.Properties.Cflags = append(base.Properties.Cflags,
 			// GCC-only warnings.
 			"-Wunused-but-set-parameter",
 			// Suggest const: too many false positives, but good for a trial run.
@@ -166,7 +157,7 @@ func (a *artModule) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) cc.
 		)
 	}
 
-	flags.CFlags = append(flags.CFlags,
+	base.Properties.Cflags = append(base.Properties.Cflags,
 		// Base set of cflags used by all things ART.
 		"-fno-rtti",
 		"-std=gnu++11",
@@ -189,31 +180,31 @@ func (a *artModule) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) cc.
 		// "-Wmissing-declarations",
 	)
 
-	flags.CFlags = append(flags.CFlags,
+	base.Properties.Cflags = append(base.Properties.Cflags,
 		"-DART_BASE_ADDRESS="+baseAddress, // TODO: configurable?
 		"-DART_DEFAULT_INSTRUCTION_SET_FEATURES="+instructionSetFeatures,
 	)
 
 	if ctx.Debug() {
-		flags.CFlags = append(flags.CFlags,
+		base.Properties.Cflags = append(base.Properties.Cflags,
 			"-O2",
 			"-DDYNAMIC_ANNOTATIONS_ENABLED=1",
 			"-DVIXL_DEBUG",
 			"-UNDEBUG",
 		)
 	} else {
-		flags.CFlags = append(flags.CFlags,
+		base.Properties.Cflags = append(base.Properties.Cflags,
 			"-O3",
 		)
 	}
 
 	// TODO: these should all be replaced with exported includes
-	flags.CFlags = append(flags.CFlags,
-		"-I${SrcDir}/external/gtest/include",
-		"-I${SrcDir}/external/valgrind/main/include",
-		"-I${SrcDir}/external/valgrind/main",
-		"-I${SrcDir}/external/vixl/src",
-		"-I${SrcDir}/external/zlib",
+	base.Properties.Include_dirs = append(base.Properties.Include_dirs,
+		"external/gtest/include",
+		"external/valgrind/main/include",
+		"external/valgrind/main",
+		"external/vixl/src",
+		"external/zlib",
 	)
 
 	config := ctx.Config().(common.Config)
@@ -222,25 +213,23 @@ func (a *artModule) Flags(ctx common.AndroidModuleContext, flags cc.CCFlags) cc.
 	if gcType == "" {
 		gcType = "CMS"
 	}
-	flags.CFlags = append(flags.CFlags, "-DART_DEFAULT_GC_TYPE_IS_"+gcType)
+	base.Properties.Cflags = append(base.Properties.Cflags, "-DART_DEFAULT_GC_TYPE_IS_"+gcType)
 
 	imtSize := config.Getenv("ART_IMT_SIZE")
 	if imtSize == "" {
 		imtSize = "64"
 	}
-	flags.CFlags = append(flags.CFlags, "-DIMT_SIZE="+imtSize)
+	base.Properties.Cflags = append(base.Properties.Cflags, "-DIMT_SIZE="+imtSize)
 
 	if config.Getenv("ART_USE_OPTIMIZING_COMPILER") == "true" {
-		flags.CFlags = append(flags.CFlags, "-DART_USE_OPTIMIZING_COMPILER=1")
+		base.Properties.Cflags = append(base.Properties.Cflags, "-DART_USE_OPTIMIZING_COMPILER=1")
 	}
 
 	if config.Getenv("ART_HEAP_POISONING") == "true" {
-		flags.CFlags = append(flags.CFlags, "-DART_HEAP_POISONING=1")
+		base.Properties.Cflags = append(base.Properties.Cflags, "-DART_HEAP_POISONING=1")
 	}
 
 	if config.Getenv("ART_USE_READ_BARRIER") == "true" {
-		flags.CFlags = append(flags.CFlags, "-DART_USE_READ_BARRIER=1")
+		base.Properties.Cflags = append(base.Properties.Cflags, "-DART_USE_READ_BARRIER=1")
 	}
-
-	return flags
 }
