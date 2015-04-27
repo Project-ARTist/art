@@ -140,7 +140,22 @@ func artModifyProperties(ctx common.AndroidBaseContext, base *cc.CCBase) {
 			"-Wfloat-equal",
 			// Enable warning of converting ints to void*.
 			"-Wint-to-void-pointer-cast",
+			// Enable warning of wrong unused annotations.
+			"-Wused-but-marked-unused",
+
+			// Enable warning for deprecated language features.
+			"-Wdeprecated",
+
+			// Enable warning for unreachable break & return.
+			"-Wunreachable-code-break",
+			"-Wunreachable-code-return",
 		)
+
+		if !(ctx.Host() && runtime.GOOS == "darwin") {
+			// Enable missing-noreturn only on non-Mac. As lots of things are not implemented for
+			// Apple, it's a pain.
+			base.Properties.Cflags = append(base.Properties.Cflags, "-Wmissing-noreturn")
+		}
 	} else {
 		base.Properties.Cflags = append(base.Properties.Cflags,
 			// GCC-only warnings.
@@ -201,6 +216,7 @@ func artModifyProperties(ctx common.AndroidBaseContext, base *cc.CCBase) {
 	// TODO: these should all be replaced with exported includes
 	base.Properties.Include_dirs = append(base.Properties.Include_dirs,
 		"external/gtest/include",
+		"external/icu/icu4c/source/common",
 		"external/valgrind/main/include",
 		"external/valgrind/main",
 		"external/vixl/src",
@@ -231,5 +247,9 @@ func artModifyProperties(ctx common.AndroidBaseContext, base *cc.CCBase) {
 
 	if config.Getenv("ART_USE_READ_BARRIER") == "true" {
 		base.Properties.Cflags = append(base.Properties.Cflags, "-DART_USE_READ_BARRIER=1")
+	}
+
+	if config.Getenv("ART_USE_TLAB") == "true" {
+		base.Properties.Cflags = append(base.Properties.Cflags, "-DART_USE_TLAB=1")
 	}
 }

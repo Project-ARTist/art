@@ -107,6 +107,7 @@ art_cc_library {
     cflags: LIBART_CFLAGS,
 
     srcs: [
+        "art_field.cc",
         "atomic.cc", // TODO: "atomic.cc.arm"
         "barrier.cc",
         "base/allocator.cc",
@@ -184,13 +185,16 @@ art_cc_library {
         "jit/jit_instrumentation.cc",
         "jni_internal.cc",
         "jobject_comparator.cc",
+        "linear_alloc.cc",
         "mem_map.cc",
         "memory_region.cc",
-        "mirror/art_field.cc",
+        "mirror/abstract_method.cc",
         "mirror/art_method.cc",
         "mirror/array.cc",
         "mirror/class.cc",
         "mirror/dex_cache.cc",
+        "mirror/field.cc",
+        "mirror/method.cc",
         "mirror/object.cc",
         "mirror/reference.cc",
         "mirror/stack_trace_element.cc",
@@ -208,6 +212,7 @@ art_cc_library {
         "native/java_lang_Object.cc",
         "native/java_lang_Runtime.cc",
         "native/java_lang_String.cc",
+        "native/java_lang_StringFactory.cc",
         "native/java_lang_System.cc",
         "native/java_lang_Thread.cc",
         "native/java_lang_Throwable.cc",
@@ -220,6 +225,7 @@ art_cc_library {
         "native/java_lang_reflect_Method.cc",
         "native/java_lang_reflect_Proxy.cc",
         "native/java_util_concurrent_atomic_AtomicLong.cc",
+        "native/libcore_util_CharsetUtils.cc",
         "native/org_apache_harmony_dalvik_ddmc_DdmServer.cc",
         "native/org_apache_harmony_dalvik_ddmc_DdmVmInternal.cc",
         "native/sun_misc_Unsafe.cc",
@@ -239,6 +245,7 @@ art_cc_library {
         "runtime_options.cc",
         "signal_catcher.cc",
         "stack.cc",
+        "stack_map.cc",
         "thread.cc",
         "thread_list.cc",
         "thread_pool.cc",
@@ -315,6 +322,7 @@ art_cc_library {
                 "libziparchive",
                 // the order matters here to get all symbols.
                 "libz",
+                "libbase",
             ],
         },
         host: {
@@ -332,8 +340,6 @@ art_cc_library {
             ],
             shared_libs: [
                 "libziparchive",
-            ],
-            static_libs: [
                 // For ashmem_create_region.
                 "libcutils",
             ],
