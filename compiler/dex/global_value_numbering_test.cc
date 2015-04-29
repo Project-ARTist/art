@@ -15,7 +15,6 @@
  */
 
 #include "base/logging.h"
-#include "dataflow_iterator.h"
 #include "dataflow_iterator-inl.h"
 #include "dex/mir_field_info.h"
 #include "global_value_numbering.h"
@@ -136,6 +135,7 @@ class GlobalValueNumberingTest : public testing::Test {
     { bb, static_cast<Instruction::Code>(kMirOpPhi), 0, 0u, 2u, { src1, src2 }, 1, { reg } }
 #define DEF_BINOP(bb, opcode, result, src1, src2) \
     { bb, opcode, 0u, 0u, 2, { src1, src2 }, 1, { result } }
+#define DEF_UNOP(bb, opcode, result, src) DEF_MOVE(bb, opcode, result, src)
 
   void DoPrepareIFields(const IFieldDef* defs, size_t count) {
     cu_.mir_graph->ifield_lowering_infos_.clear();
@@ -259,10 +259,8 @@ class GlobalValueNumberingTest : public testing::Test {
       mir->ssa_rep = &ssa_reps_[i];
       mir->ssa_rep->num_uses = def->num_uses;
       mir->ssa_rep->uses = const_cast<int32_t*>(def->uses);  // Not modified by LVN.
-      mir->ssa_rep->fp_use = nullptr;  // Not used by LVN.
       mir->ssa_rep->num_defs = def->num_defs;
       mir->ssa_rep->defs = const_cast<int32_t*>(def->defs);  // Not modified by LVN.
-      mir->ssa_rep->fp_def = nullptr;  // Not used by LVN.
       mir->dalvikInsn.opcode = def->opcode;
       mir->offset = i;  // LVN uses offset only for debug output
       mir->optimization_flags = 0u;
@@ -290,6 +288,15 @@ class GlobalValueNumberingTest : public testing::Test {
   template <size_t count>
   void PrepareVregToSsaMapExit(BasicBlockId bb_id, const int32_t (&map)[count]) {
     DoPrepareVregToSsaMapExit(bb_id, map, count);
+  }
+
+  template <size_t count>
+  void MarkAsWideSRegs(const int32_t (&sregs)[count]) {
+    for (int32_t sreg : sregs) {
+      cu_.mir_graph->reg_location_[sreg].wide = true;
+      cu_.mir_graph->reg_location_[sreg + 1].wide = true;
+      cu_.mir_graph->reg_location_[sreg + 1].high_word = true;
+    }
   }
 
   void PerformGVN() {
@@ -362,9 +369,11 @@ class GlobalValueNumberingTest : public testing::Test {
     cu_.access_flags = kAccStatic;  // Don't let "this" interfere with this test.
     allocator_.reset(ScopedArenaAllocator::Create(&cu_.arena_stack));
     // By default, the zero-initialized reg_location_[.] with ref == false tells LVN that
-    // 0 constants are integral, not references. Nothing else is used by LVN/GVN.
+    // 0 constants are integral, not references, and the values are all narrow.
+    // Nothing else is used by LVN/GVN. Tests can override the default values as needed.
     cu_.mir_graph->reg_location_ =
         cu_.arena.AllocArray<RegLocation>(kMaxSsaRegs, kArenaAllocRegAlloc);
+    cu_.mir_graph->num_ssa_regs_ = kMaxSsaRegs;
     // Bind all possible sregs to live vregs for test purposes.
     live_in_v_->SetInitialBits(kMaxSsaRegs);
     cu_.mir_graph->ssa_base_vregs_.reserve(kMaxSsaRegs);
@@ -912,14 +921,14 @@ TEST_F(GlobalValueNumberingTestDiamond, AliasingArrays) {
       DEF_IGET(6, Instruction::AGET_OBJECT, 3u, 200u, 201u),  // Same as at the left side.
 
       DEF_AGET(3, Instruction::AGET_WIDE, 4u, 300u, 301u),
-      DEF_CONST(5, Instruction::CONST_WIDE, 5u, 1000),
-      DEF_APUT(5, Instruction::APUT_WIDE, 5u, 300u, 301u),
-      DEF_AGET(6, Instruction::AGET_WIDE, 7u, 300u, 301u),  // Differs from the top and the CONST.
+      DEF_CONST(5, Instruction::CONST_WIDE, 6u, 1000),
+      DEF_APUT(5, Instruction::APUT_WIDE, 6u, 300u, 301u),
+      DEF_AGET(6, Instruction::AGET_WIDE, 8u, 300u, 301u),  // Differs from the top and the CONST.
 
-      DEF_AGET(3, Instruction::AGET_SHORT, 8u, 400u, 401u),
-      DEF_CONST(3, Instruction::CONST, 9u, 2000),
-      DEF_APUT(4, Instruction::APUT_SHORT, 9u, 400u, 401u),
-      DEF_APUT(5, Instruction::APUT_SHORT, 9u, 400u, 401u),
+      DEF_AGET(3, Instruction::AGET_SHORT, 10u, 400u, 401u),
+      DEF_CONST(3, Instruction::CONST, 11u, 2000),
+      DEF_APUT(4, Instruction::APUT_SHORT, 11u, 400u, 401u),
+      DEF_APUT(5, Instruction::APUT_SHORT, 11u, 400u, 401u),
       DEF_AGET(6, Instruction::AGET_SHORT, 12u, 400u, 401u),  // Differs from the top, == CONST.
 
       DEF_AGET(3, Instruction::AGET_CHAR, 13u, 500u, 501u),
@@ -941,6 +950,8 @@ TEST_F(GlobalValueNumberingTestDiamond, AliasingArrays) {
   };
 
   PrepareMIRs(mirs);
+  static const int32_t wide_sregs[] = { 4, 6, 8 };
+  MarkAsWideSRegs(wide_sregs);
   PerformGVN();
   ASSERT_EQ(arraysize(mirs), value_names_.size());
   EXPECT_EQ(value_names_[0], value_names_[1]);
@@ -1059,6 +1070,12 @@ TEST_F(GlobalValueNumberingTestDiamond, PhiWide) {
   };
 
   PrepareMIRs(mirs);
+  for (size_t i = 0u; i != arraysize(mirs); ++i) {
+    if ((mirs_[i].ssa_rep->defs[0] % 2) == 0) {
+      const int32_t wide_sregs[] = { mirs_[i].ssa_rep->defs[0] };
+      MarkAsWideSRegs(wide_sregs);
+    }
+  }
   PerformGVN();
   ASSERT_EQ(arraysize(mirs), value_names_.size());
   EXPECT_EQ(value_names_[0], value_names_[7]);
@@ -1495,27 +1512,27 @@ TEST_F(GlobalValueNumberingTestLoop, AliasingArrays) {
   static const MIRDef mirs[] = {
       // NOTE: MIRs here are ordered by unique tests. They will be put into appropriate blocks.
       DEF_AGET(3, Instruction::AGET_WIDE, 0u, 100u, 101u),
-      DEF_AGET(4, Instruction::AGET_WIDE, 1u, 100u, 101u),   // Same as at the top.
-      DEF_AGET(5, Instruction::AGET_WIDE, 2u, 100u, 101u),   // Same as at the top.
+      DEF_AGET(4, Instruction::AGET_WIDE, 2u, 100u, 101u),   // Same as at the top.
+      DEF_AGET(5, Instruction::AGET_WIDE, 4u, 100u, 101u),   // Same as at the top.
 
-      DEF_AGET(3, Instruction::AGET_BYTE, 3u, 200u, 201u),
-      DEF_AGET(4, Instruction::AGET_BYTE, 4u, 200u, 201u),  // Differs from top...
-      DEF_APUT(4, Instruction::APUT_BYTE, 5u, 200u, 201u),  // Because of this IPUT.
-      DEF_AGET(5, Instruction::AGET_BYTE, 6u, 200u, 201u),  // Differs from top and the loop AGET.
+      DEF_AGET(3, Instruction::AGET_BYTE, 6u, 200u, 201u),
+      DEF_AGET(4, Instruction::AGET_BYTE, 7u, 200u, 201u),  // Differs from top...
+      DEF_APUT(4, Instruction::APUT_BYTE, 8u, 200u, 201u),  // Because of this IPUT.
+      DEF_AGET(5, Instruction::AGET_BYTE, 9u, 200u, 201u),  // Differs from top and the loop AGET.
 
-      DEF_AGET(3, Instruction::AGET, 7u, 300u, 301u),
-      DEF_APUT(4, Instruction::APUT, 8u, 300u, 301u),   // Because of this IPUT...
-      DEF_AGET(4, Instruction::AGET, 9u, 300u, 301u),   // Differs from top.
-      DEF_AGET(5, Instruction::AGET, 10u, 300u, 301u),  // Differs from top but == the loop AGET.
+      DEF_AGET(3, Instruction::AGET, 10u, 300u, 301u),
+      DEF_APUT(4, Instruction::APUT, 11u, 300u, 301u),  // Because of this IPUT...
+      DEF_AGET(4, Instruction::AGET, 12u, 300u, 301u),   // Differs from top.
+      DEF_AGET(5, Instruction::AGET, 13u, 300u, 301u),  // Differs from top but == the loop AGET.
 
-      DEF_CONST(3, Instruction::CONST, 11u, 3000),
-      DEF_APUT(3, Instruction::APUT_CHAR, 11u, 400u, 401u),
-      DEF_APUT(3, Instruction::APUT_CHAR, 11u, 400u, 402u),
-      DEF_AGET(4, Instruction::AGET_CHAR, 14u, 400u, 401u),  // Differs from 11u and 16u.
-      DEF_AGET(4, Instruction::AGET_CHAR, 15u, 400u, 402u),  // Same as 14u.
-      DEF_CONST(4, Instruction::CONST, 16u, 4000),
-      DEF_APUT(4, Instruction::APUT_CHAR, 16u, 400u, 401u),
-      DEF_APUT(4, Instruction::APUT_CHAR, 16u, 400u, 402u),
+      DEF_CONST(3, Instruction::CONST, 14u, 3000),
+      DEF_APUT(3, Instruction::APUT_CHAR, 14u, 400u, 401u),
+      DEF_APUT(3, Instruction::APUT_CHAR, 14u, 400u, 402u),
+      DEF_AGET(4, Instruction::AGET_CHAR, 15u, 400u, 401u),  // Differs from 11u and 16u.
+      DEF_AGET(4, Instruction::AGET_CHAR, 16u, 400u, 402u),  // Same as 14u.
+      DEF_CONST(4, Instruction::CONST, 17u, 4000),
+      DEF_APUT(4, Instruction::APUT_CHAR, 17u, 400u, 401u),
+      DEF_APUT(4, Instruction::APUT_CHAR, 17u, 400u, 402u),
       DEF_AGET(5, Instruction::AGET_CHAR, 19u, 400u, 401u),  // Differs from 11u and 14u...
       DEF_AGET(5, Instruction::AGET_CHAR, 20u, 400u, 402u),  // and same as the CONST 16u.
 
@@ -1533,6 +1550,8 @@ TEST_F(GlobalValueNumberingTestLoop, AliasingArrays) {
   };
 
   PrepareMIRs(mirs);
+  static const int32_t wide_sregs[] = { 0, 2, 4 };
+  MarkAsWideSRegs(wide_sregs);
   PerformGVN();
   ASSERT_EQ(arraysize(mirs), value_names_.size());
   EXPECT_EQ(value_names_[0], value_names_[1]);
@@ -2311,6 +2330,97 @@ TEST_F(GlobalValueNumberingTestDiamond, DivZeroCheckDiamond) {
   ASSERT_EQ(arraysize(expected_ignore_div_zero_check), mir_count_);
   for (size_t i = 0u; i != mir_count_; ++i) {
     int expected = expected_ignore_div_zero_check[i] ? MIR_IGNORE_DIV_ZERO_CHECK : 0u;
+    EXPECT_EQ(expected, mirs_[i].optimization_flags) << i;
+  }
+}
+
+TEST_F(GlobalValueNumberingTestDiamond, CheckCastDiamond) {
+  static const MIRDef mirs[] = {
+      DEF_UNOP(3u, Instruction::INSTANCE_OF, 0u, 100u),
+      DEF_UNOP(3u, Instruction::INSTANCE_OF, 1u, 200u),
+      DEF_IFZ(3u, Instruction::IF_NEZ, 0u),
+      DEF_INVOKE1(4u, Instruction::CHECK_CAST, 100u),
+      DEF_INVOKE1(5u, Instruction::CHECK_CAST, 100u),
+      DEF_INVOKE1(5u, Instruction::CHECK_CAST, 200u),
+      DEF_INVOKE1(5u, Instruction::CHECK_CAST, 100u),
+      DEF_INVOKE1(6u, Instruction::CHECK_CAST, 100u),
+  };
+
+  static const bool expected_ignore_check_cast[] = {
+      false,  // instance-of
+      false,  // instance-of
+      false,  // if-nez
+      false,  // Not eliminated, fall-through branch.
+      true,   // Eliminated.
+      false,  // Not eliminated, different value.
+      false,  // Not eliminated, different type.
+      false,  // Not eliminated, bottom block.
+  };
+
+  PrepareMIRs(mirs);
+  mirs_[0].dalvikInsn.vC = 1234;  // type for instance-of
+  mirs_[1].dalvikInsn.vC = 1234;  // type for instance-of
+  mirs_[3].dalvikInsn.vB = 1234;  // type for check-cast
+  mirs_[4].dalvikInsn.vB = 1234;  // type for check-cast
+  mirs_[5].dalvikInsn.vB = 1234;  // type for check-cast
+  mirs_[6].dalvikInsn.vB = 4321;  // type for check-cast
+  mirs_[7].dalvikInsn.vB = 1234;  // type for check-cast
+  PerformGVN();
+  PerformGVNCodeModifications();
+  ASSERT_EQ(arraysize(expected_ignore_check_cast), mir_count_);
+  for (size_t i = 0u; i != mir_count_; ++i) {
+    int expected = expected_ignore_check_cast[i] ? MIR_IGNORE_CHECK_CAST : 0u;
+    EXPECT_EQ(expected, mirs_[i].optimization_flags) << i;
+  }
+}
+
+TEST_F(GlobalValueNumberingTest, CheckCastDominators) {
+  const BBDef bbs[] = {
+      DEF_BB(kNullBlock, DEF_SUCC0(), DEF_PRED0()),
+      DEF_BB(kEntryBlock, DEF_SUCC1(3), DEF_PRED0()),
+      DEF_BB(kExitBlock, DEF_SUCC0(), DEF_PRED1(7)),
+      DEF_BB(kDalvikByteCode, DEF_SUCC2(4, 5), DEF_PRED1(1)),  // Block #3, top of the diamond.
+      DEF_BB(kDalvikByteCode, DEF_SUCC1(7), DEF_PRED1(3)),     // Block #4, left side.
+      DEF_BB(kDalvikByteCode, DEF_SUCC1(6), DEF_PRED1(3)),     // Block #5, right side.
+      DEF_BB(kDalvikByteCode, DEF_SUCC1(7), DEF_PRED1(5)),     // Block #6, right side.
+      DEF_BB(kDalvikByteCode, DEF_SUCC1(2), DEF_PRED2(4, 6)),  // Block #7, bottom.
+  };
+  static const MIRDef mirs[] = {
+      DEF_UNOP(3u, Instruction::INSTANCE_OF, 0u, 100u),
+      DEF_UNOP(3u, Instruction::INSTANCE_OF, 1u, 200u),
+      DEF_IFZ(3u, Instruction::IF_NEZ, 0u),
+      DEF_INVOKE1(4u, Instruction::CHECK_CAST, 100u),
+      DEF_INVOKE1(6u, Instruction::CHECK_CAST, 100u),
+      DEF_INVOKE1(6u, Instruction::CHECK_CAST, 200u),
+      DEF_INVOKE1(6u, Instruction::CHECK_CAST, 100u),
+      DEF_INVOKE1(7u, Instruction::CHECK_CAST, 100u),
+  };
+
+  static const bool expected_ignore_check_cast[] = {
+      false,  // instance-of
+      false,  // instance-of
+      false,  // if-nez
+      false,  // Not eliminated, fall-through branch.
+      true,   // Eliminated.
+      false,  // Not eliminated, different value.
+      false,  // Not eliminated, different type.
+      false,  // Not eliminated, bottom block.
+  };
+
+  PrepareBasicBlocks(bbs);
+  PrepareMIRs(mirs);
+  mirs_[0].dalvikInsn.vC = 1234;  // type for instance-of
+  mirs_[1].dalvikInsn.vC = 1234;  // type for instance-of
+  mirs_[3].dalvikInsn.vB = 1234;  // type for check-cast
+  mirs_[4].dalvikInsn.vB = 1234;  // type for check-cast
+  mirs_[5].dalvikInsn.vB = 1234;  // type for check-cast
+  mirs_[6].dalvikInsn.vB = 4321;  // type for check-cast
+  mirs_[7].dalvikInsn.vB = 1234;  // type for check-cast
+  PerformGVN();
+  PerformGVNCodeModifications();
+  ASSERT_EQ(arraysize(expected_ignore_check_cast), mir_count_);
+  for (size_t i = 0u; i != mir_count_; ++i) {
+    int expected = expected_ignore_check_cast[i] ? MIR_IGNORE_CHECK_CAST : 0u;
     EXPECT_EQ(expected, mirs_[i].optimization_flags) << i;
   }
 }

@@ -18,6 +18,7 @@
 
 #include <memory>
 
+#include "gc/accounting/heap_bitmap-inl.h"
 #include "gc/accounting/space_bitmap-inl.h"
 #include "base/logging.h"
 #include "base/mutex-inl.h"
@@ -35,6 +36,15 @@ namespace space {
 class ValgrindLargeObjectMapSpace FINAL : public LargeObjectMapSpace {
  public:
   explicit ValgrindLargeObjectMapSpace(const std::string& name) : LargeObjectMapSpace(name) {
+  }
+
+  ~ValgrindLargeObjectMapSpace() OVERRIDE {
+    // Keep valgrind happy if there is any large objects such as dex cache arrays which aren't
+    // freed since they are held live by the class linker.
+    MutexLock mu(Thread::Current(), lock_);
+    for (auto& m : mem_maps_) {
+      delete m.second;
+    }
   }
 
   virtual mirror::Object* Alloc(Thread* self, size_t num_bytes, size_t* bytes_allocated,
@@ -114,12 +124,22 @@ mirror::Object* LargeObjectMapSpace::Alloc(Thread* self, size_t num_bytes,
   std::string error_msg;
   MemMap* mem_map = MemMap::MapAnonymous("large object space allocation", nullptr, num_bytes,
                                          PROT_READ | PROT_WRITE, true, false, &error_msg);
-  if (UNLIKELY(mem_map == NULL)) {
+  if (UNLIKELY(mem_map == nullptr)) {
     LOG(WARNING) << "Large object allocation failed: " << error_msg;
-    return NULL;
+    return nullptr;
+  }
+  mirror::Object* const obj = reinterpret_cast<mirror::Object*>(mem_map->Begin());
+  if (kIsDebugBuild) {
+    ReaderMutexLock mu2(Thread::Current(), *Locks::heap_bitmap_lock_);
+    auto* heap = Runtime::Current()->GetHeap();
+    auto* live_bitmap = heap->GetLiveBitmap();
+    auto* space_bitmap = live_bitmap->GetContinuousSpaceBitmap(obj);
+    CHECK(space_bitmap == nullptr) << obj << " overlaps with bitmap " << *space_bitmap;
+    auto* obj_end = reinterpret_cast<mirror::Object*>(mem_map->End());
+    space_bitmap = live_bitmap->GetContinuousSpaceBitmap(obj_end - 1);
+    CHECK(space_bitmap == nullptr) << obj_end << " overlaps with bitmap " << *space_bitmap;
   }
   MutexLock mu(self, lock_);
-  mirror::Object* obj = reinterpret_cast<mirror::Object*>(mem_map->Begin());
   large_objects_.push_back(obj);
   mem_maps_.Put(obj, mem_map);
   const size_t allocation_size = mem_map->BaseSize();
@@ -186,7 +206,7 @@ void LargeObjectMapSpace::Walk(DlMallocSpace::WalkCallback callback, void* arg) 
   for (auto it = mem_maps_.begin(); it != mem_maps_.end(); ++it) {
     MemMap* mem_map = it->second;
     callback(mem_map->Begin(), mem_map->End(), mem_map->Size(), arg);
-    callback(NULL, NULL, 0, arg);
+    callback(nullptr, nullptr, 0, arg);
   }
 }
 
@@ -296,7 +316,7 @@ FreeListSpace* FreeListSpace::Create(const std::string& name, uint8_t* requested
   std::string error_msg;
   MemMap* mem_map = MemMap::MapAnonymous(name.c_str(), requested_begin, size,
                                          PROT_READ | PROT_WRITE, true, false, &error_msg);
-  CHECK(mem_map != NULL) << "Failed to allocate large object space mem map: " << error_msg;
+  CHECK(mem_map != nullptr) << "Failed to allocate large object space mem map: " << error_msg;
   return new FreeListSpace(name, mem_map, mem_map->Begin(), mem_map->End());
 }
 

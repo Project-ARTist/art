@@ -47,8 +47,6 @@ class HGraphBuilder : public ValueObject {
         exit_block_(nullptr),
         current_block_(nullptr),
         graph_(graph),
-        constant0_(nullptr),
-        constant1_(nullptr),
         dex_file_(dex_file),
         dex_compilation_unit_(dex_compilation_unit),
         compiler_driver_(driver),
@@ -67,8 +65,6 @@ class HGraphBuilder : public ValueObject {
         exit_block_(nullptr),
         current_block_(nullptr),
         graph_(graph),
-        constant0_(nullptr),
-        constant1_(nullptr),
         dex_file_(nullptr),
         dex_compilation_unit_(nullptr),
         compiler_driver_(nullptr),
@@ -94,16 +90,10 @@ class HGraphBuilder : public ValueObject {
   // branches.
   void ComputeBranchTargets(const uint16_t* start,
                             const uint16_t* end,
-                            size_t* number_of_dex_instructions,
-                            size_t* number_of_block,
                             size_t* number_of_branches);
   void MaybeUpdateCurrentBlock(size_t index);
   HBasicBlock* FindBlockStartingAt(int32_t index) const;
 
-  HIntConstant* GetIntConstant0();
-  HIntConstant* GetIntConstant1();
-  HIntConstant* GetIntConstant(int32_t constant);
-  HLongConstant* GetLongConstant(int64_t constant);
   void InitializeLocals(uint16_t count);
   HLocal* GetLocalAt(int register_index) const;
   void UpdateLocal(int register_index, HInstruction* instruction) const;
@@ -225,19 +215,14 @@ class HGraphBuilder : public ValueObject {
                              HInstruction* value, int32_t case_value_int,
                              int32_t target_offset, uint32_t dex_pc);
 
-  bool SkipCompilation(size_t number_of_dex_instructions,
-                       size_t number_of_blocks,
-                       size_t number_of_branches);
+  bool SkipCompilation(const DexFile::CodeItem& code_item, size_t number_of_branches);
 
   void MaybeRecordStat(MethodCompilationStat compilation_stat);
 
+  mirror::Class* GetOutermostCompilingClass() const;
+
   // Returns whether `type_index` points to the outer-most compiling method's class.
-  bool IsCompilingClass(uint16_t type_index) const {
-    uint32_t referrer_index = outer_compilation_unit_->GetDexMethodIndex();
-    const DexFile::MethodId& method_id =
-        outer_compilation_unit_->GetDexFile()->GetMethodId(referrer_index);
-    return method_id.class_idx_ == type_index;
-  }
+  bool IsOutermostCompilingClass(uint16_t type_index) const;
 
   ArenaAllocator* const arena_;
 
@@ -252,9 +237,6 @@ class HGraphBuilder : public ValueObject {
   HBasicBlock* exit_block_;
   HBasicBlock* current_block_;
   HGraph* const graph_;
-
-  HIntConstant* constant0_;
-  HIntConstant* constant1_;
 
   // The dex file where the method being compiled is.
   const DexFile* const dex_file_;

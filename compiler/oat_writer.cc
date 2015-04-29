@@ -18,370 +18,34 @@
 
 #include <zlib.h>
 
+#include "arch/arm64/instruction_set_features_arm64.h"
 #include "base/allocator.h"
 #include "base/bit_vector.h"
 #include "base/stl_util.h"
 #include "base/unix_file/fd_file.h"
 #include "class_linker.h"
 #include "compiled_class.h"
+#include "compiled_method.h"
 #include "dex_file-inl.h"
 #include "dex/verification_results.h"
+#include "driver/compiler_driver.h"
+#include "driver/compiler_options.h"
 #include "gc/space/space.h"
 #include "image_writer.h"
+#include "linker/relative_patcher.h"
 #include "mirror/art_method-inl.h"
 #include "mirror/array.h"
 #include "mirror/class_loader.h"
+#include "mirror/dex_cache-inl.h"
 #include "mirror/object-inl.h"
 #include "os.h"
 #include "output_stream.h"
 #include "safe_map.h"
 #include "scoped_thread_state_change.h"
 #include "handle_scope-inl.h"
-#include "utils/arm/assembler_thumb2.h"
-#include "utils/arm64/assembler_arm64.h"
 #include "verifier/method_verifier.h"
 
 namespace art {
-
-class OatWriter::RelativeCallPatcher {
- public:
-  virtual ~RelativeCallPatcher() { }
-
-  // Reserve space for relative call thunks if needed, return adjusted offset.
-  // After all methods have been processed it's call one last time with compiled_method == nullptr.
-  virtual uint32_t ReserveSpace(uint32_t offset, const CompiledMethod* compiled_method) = 0;
-
-  // Write relative call thunks if needed, return adjusted offset.
-  virtual uint32_t WriteThunks(OutputStream* out, uint32_t offset) = 0;
-
-  // Patch method code. The input displacement is relative to the patched location,
-  // the patcher may need to adjust it if the correct base is different.
-  virtual void Patch(std::vector<uint8_t>* code, uint32_t literal_offset, uint32_t patch_offset,
-                     uint32_t target_offset) = 0;
-
- protected:
-  RelativeCallPatcher() { }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(RelativeCallPatcher);
-};
-
-class OatWriter::NoRelativeCallPatcher FINAL : public RelativeCallPatcher {
- public:
-  NoRelativeCallPatcher() { }
-
-  uint32_t ReserveSpace(uint32_t offset,
-                        const CompiledMethod* compiled_method ATTRIBUTE_UNUSED) OVERRIDE {
-    return offset;  // No space reserved; no patches expected.
-  }
-
-  uint32_t WriteThunks(OutputStream* out ATTRIBUTE_UNUSED, uint32_t offset) OVERRIDE {
-    return offset;  // No thunks added; no patches expected.
-  }
-
-  void Patch(std::vector<uint8_t>* code ATTRIBUTE_UNUSED, uint32_t literal_offset ATTRIBUTE_UNUSED,
-             uint32_t patch_offset ATTRIBUTE_UNUSED,
-             uint32_t target_offset ATTRIBUTE_UNUSED) OVERRIDE {
-    LOG(FATAL) << "Unexpected relative patch.";
-  }
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(NoRelativeCallPatcher);
-};
-
-class OatWriter::X86RelativeCallPatcher FINAL : public RelativeCallPatcher {
- public:
-  X86RelativeCallPatcher() { }
-
-  uint32_t ReserveSpace(uint32_t offset,
-                        const CompiledMethod* compiled_method ATTRIBUTE_UNUSED) OVERRIDE {
-    return offset;  // No space reserved; no limit on relative call distance.
-  }
-
-  uint32_t WriteThunks(OutputStream* out ATTRIBUTE_UNUSED, uint32_t offset) OVERRIDE {
-    return offset;  // No thunks added; no limit on relative call distance.
-  }
-
-  void Patch(std::vector<uint8_t>* code, uint32_t literal_offset, uint32_t patch_offset,
-             uint32_t target_offset) OVERRIDE {
-    DCHECK_LE(literal_offset + 4u, code->size());
-    // Unsigned arithmetic with its well-defined overflow behavior is just fine here.
-    uint32_t displacement = target_offset - patch_offset;
-    displacement -= kPcDisplacement;  // The base PC is at the end of the 4-byte patch.
-
-    typedef __attribute__((__aligned__(1))) int32_t unaligned_int32_t;
-    reinterpret_cast<unaligned_int32_t*>(&(*code)[literal_offset])[0] = displacement;
-  }
-
- private:
-  // PC displacement from patch location; x86 PC for relative calls points to the next
-  // instruction and the patch location is 4 bytes earlier.
-  static constexpr int32_t kPcDisplacement = 4;
-
-  DISALLOW_COPY_AND_ASSIGN(X86RelativeCallPatcher);
-};
-
-class OatWriter::ArmBaseRelativeCallPatcher : public RelativeCallPatcher {
- public:
-  ArmBaseRelativeCallPatcher(OatWriter* writer,
-                             InstructionSet instruction_set, std::vector<uint8_t> thunk_code,
-                             uint32_t max_positive_displacement, uint32_t max_negative_displacement)
-      : writer_(writer), instruction_set_(instruction_set), thunk_code_(thunk_code),
-        max_positive_displacement_(max_positive_displacement),
-        max_negative_displacement_(max_negative_displacement),
-        thunk_locations_(), current_thunk_to_write_(0u), unprocessed_patches_() {
-  }
-
-  uint32_t ReserveSpace(uint32_t offset, const CompiledMethod* compiled_method) OVERRIDE {
-    // NOTE: The final thunk can be reserved from InitCodeMethodVisitor::EndClass() while it
-    // may be written early by WriteCodeMethodVisitor::VisitMethod() for a deduplicated chunk
-    // of code. To avoid any alignment discrepancies for the final chunk, we always align the
-    // offset after reserving of writing any chunk.
-    if (UNLIKELY(compiled_method == nullptr)) {
-      uint32_t aligned_offset = CompiledMethod::AlignCode(offset, instruction_set_);
-      bool needs_thunk = ReserveSpaceProcessPatches(aligned_offset);
-      if (needs_thunk) {
-        thunk_locations_.push_back(aligned_offset);
-        offset = CompiledMethod::AlignCode(aligned_offset + thunk_code_.size(), instruction_set_);
-      }
-      return offset;
-    }
-    DCHECK(compiled_method->GetQuickCode() != nullptr);
-    uint32_t quick_code_size = compiled_method->GetQuickCode()->size();
-    uint32_t quick_code_offset = compiled_method->AlignCode(offset) + sizeof(OatQuickMethodHeader);
-    uint32_t next_aligned_offset = compiled_method->AlignCode(quick_code_offset + quick_code_size);
-    if (!unprocessed_patches_.empty() &&
-        next_aligned_offset - unprocessed_patches_.front().second > max_positive_displacement_) {
-      bool needs_thunk = ReserveSpaceProcessPatches(next_aligned_offset);
-      if (needs_thunk) {
-        // A single thunk will cover all pending patches.
-        unprocessed_patches_.clear();
-        uint32_t thunk_location = compiled_method->AlignCode(offset);
-        thunk_locations_.push_back(thunk_location);
-        offset = CompiledMethod::AlignCode(thunk_location + thunk_code_.size(), instruction_set_);
-      }
-    }
-    for (const LinkerPatch& patch : compiled_method->GetPatches()) {
-      if (patch.Type() == kLinkerPatchCallRelative) {
-        unprocessed_patches_.emplace_back(patch.TargetMethod(),
-                                          quick_code_offset + patch.LiteralOffset());
-      }
-    }
-    return offset;
-  }
-
-  uint32_t WriteThunks(OutputStream* out, uint32_t offset) OVERRIDE {
-    if (current_thunk_to_write_ == thunk_locations_.size()) {
-      return offset;
-    }
-    uint32_t aligned_offset = CompiledMethod::AlignCode(offset, instruction_set_);
-    if (UNLIKELY(aligned_offset == thunk_locations_[current_thunk_to_write_])) {
-      ++current_thunk_to_write_;
-      uint32_t aligned_code_delta = aligned_offset - offset;
-      if (aligned_code_delta != 0u && !writer_->WriteCodeAlignment(out, aligned_code_delta)) {
-        return 0u;
-      }
-      if (!out->WriteFully(thunk_code_.data(), thunk_code_.size())) {
-        return 0u;
-      }
-      writer_->size_relative_call_thunks_ += thunk_code_.size();
-      uint32_t thunk_end_offset = aligned_offset + thunk_code_.size();
-      // Align after writing chunk, see the ReserveSpace() above.
-      offset = CompiledMethod::AlignCode(thunk_end_offset, instruction_set_);
-      aligned_code_delta = offset - thunk_end_offset;
-      if (aligned_code_delta != 0u && !writer_->WriteCodeAlignment(out, aligned_code_delta)) {
-        return 0u;
-      }
-    }
-    return offset;
-  }
-
- protected:
-  uint32_t CalculateDisplacement(uint32_t patch_offset, uint32_t target_offset) {
-    // Unsigned arithmetic with its well-defined overflow behavior is just fine here.
-    uint32_t displacement = target_offset - patch_offset;
-    // NOTE: With unsigned arithmetic we do mean to use && rather than || below.
-    if (displacement > max_positive_displacement_ && displacement < -max_negative_displacement_) {
-      // Unwritten thunks have higher offsets, check if it's within range.
-      DCHECK(current_thunk_to_write_ == thunk_locations_.size() ||
-             thunk_locations_[current_thunk_to_write_] > patch_offset);
-      if (current_thunk_to_write_ != thunk_locations_.size() &&
-          thunk_locations_[current_thunk_to_write_] - patch_offset < max_positive_displacement_) {
-        displacement = thunk_locations_[current_thunk_to_write_] - patch_offset;
-      } else {
-        // We must have a previous thunk then.
-        DCHECK_NE(current_thunk_to_write_, 0u);
-        DCHECK_LT(thunk_locations_[current_thunk_to_write_ - 1], patch_offset);
-        displacement = thunk_locations_[current_thunk_to_write_ - 1] - patch_offset;
-        DCHECK(displacement >= -max_negative_displacement_);
-      }
-    }
-    return displacement;
-  }
-
- private:
-  bool ReserveSpaceProcessPatches(uint32_t next_aligned_offset) {
-    // Process as many patches as possible, stop only on unresolved targets or calls too far back.
-    while (!unprocessed_patches_.empty()) {
-      uint32_t patch_offset = unprocessed_patches_.front().second;
-      auto it = writer_->method_offset_map_.find(unprocessed_patches_.front().first);
-      if (it == writer_->method_offset_map_.end()) {
-        // If still unresolved, check if we have a thunk within range.
-        DCHECK(thunk_locations_.empty() || thunk_locations_.back() <= patch_offset);
-        if (thunk_locations_.empty() ||
-            patch_offset - thunk_locations_.back() > max_negative_displacement_) {
-          return next_aligned_offset - patch_offset > max_positive_displacement_;
-        }
-      } else if (it->second >= patch_offset) {
-        DCHECK_LE(it->second - patch_offset, max_positive_displacement_);
-      } else {
-        // When calling back, check if we have a thunk that's closer than the actual target.
-        uint32_t target_offset = (thunk_locations_.empty() || it->second > thunk_locations_.back())
-            ? it->second
-            : thunk_locations_.back();
-        DCHECK_GT(patch_offset, target_offset);
-        if (patch_offset - target_offset > max_negative_displacement_) {
-          return true;
-        }
-      }
-      unprocessed_patches_.pop_front();
-    }
-    return false;
-  }
-
-  OatWriter* const writer_;
-  const InstructionSet instruction_set_;
-  const std::vector<uint8_t> thunk_code_;
-  const uint32_t max_positive_displacement_;
-  const uint32_t max_negative_displacement_;
-  std::vector<uint32_t> thunk_locations_;
-  size_t current_thunk_to_write_;
-
-  // ReserveSpace() tracks unprocessed patches.
-  typedef std::pair<MethodReference, uint32_t> UnprocessedPatch;
-  std::deque<UnprocessedPatch> unprocessed_patches_;
-
-  DISALLOW_COPY_AND_ASSIGN(ArmBaseRelativeCallPatcher);
-};
-
-class OatWriter::Thumb2RelativeCallPatcher FINAL : public ArmBaseRelativeCallPatcher {
- public:
-  explicit Thumb2RelativeCallPatcher(OatWriter* writer)
-      : ArmBaseRelativeCallPatcher(writer, kThumb2, CompileThunkCode(),
-                                   kMaxPositiveDisplacement, kMaxNegativeDisplacement) {
-  }
-
-  void Patch(std::vector<uint8_t>* code, uint32_t literal_offset, uint32_t patch_offset,
-             uint32_t target_offset) OVERRIDE {
-    DCHECK_LE(literal_offset + 4u, code->size());
-    DCHECK_EQ(literal_offset & 1u, 0u);
-    DCHECK_EQ(patch_offset & 1u, 0u);
-    DCHECK_EQ(target_offset & 1u, 1u);  // Thumb2 mode bit.
-    uint32_t displacement = CalculateDisplacement(patch_offset, target_offset & ~1u);
-    displacement -= kPcDisplacement;  // The base PC is at the end of the 4-byte patch.
-    DCHECK_EQ(displacement & 1u, 0u);
-    DCHECK((displacement >> 24) == 0u || (displacement >> 24) == 255u);  // 25-bit signed.
-    uint32_t signbit = (displacement >> 31) & 0x1;
-    uint32_t i1 = (displacement >> 23) & 0x1;
-    uint32_t i2 = (displacement >> 22) & 0x1;
-    uint32_t imm10 = (displacement >> 12) & 0x03ff;
-    uint32_t imm11 = (displacement >> 1) & 0x07ff;
-    uint32_t j1 = i1 ^ (signbit ^ 1);
-    uint32_t j2 = i2 ^ (signbit ^ 1);
-    uint32_t value = (signbit << 26) | (j1 << 13) | (j2 << 11) | (imm10 << 16) | imm11;
-    value |= 0xf000d000;  // BL
-
-    uint8_t* addr = &(*code)[literal_offset];
-    // Check that we're just overwriting an existing BL.
-    DCHECK_EQ(addr[1] & 0xf8, 0xf0);
-    DCHECK_EQ(addr[3] & 0xd0, 0xd0);
-    // Write the new BL.
-    addr[0] = (value >> 16) & 0xff;
-    addr[1] = (value >> 24) & 0xff;
-    addr[2] = (value >> 0) & 0xff;
-    addr[3] = (value >> 8) & 0xff;
-  }
-
- private:
-  static std::vector<uint8_t> CompileThunkCode() {
-    // The thunk just uses the entry point in the ArtMethod. This works even for calls
-    // to the generic JNI and interpreter trampolines.
-    arm::Thumb2Assembler assembler;
-    assembler.LoadFromOffset(
-        arm::kLoadWord, arm::PC, arm::R0,
-        mirror::ArtMethod::EntryPointFromQuickCompiledCodeOffset(kArmPointerSize).Int32Value());
-    assembler.bkpt(0);
-    std::vector<uint8_t> thunk_code(assembler.CodeSize());
-    MemoryRegion code(thunk_code.data(), thunk_code.size());
-    assembler.FinalizeInstructions(code);
-    return thunk_code;
-  }
-
-  // PC displacement from patch location; Thumb2 PC is always at instruction address + 4.
-  static constexpr int32_t kPcDisplacement = 4;
-
-  // Maximum positive and negative displacement measured from the patch location.
-  // (Signed 25 bit displacement with the last bit 0 has range [-2^24, 2^24-2] measured from
-  // the Thumb2 PC pointing right after the BL, i.e. 4 bytes later than the patch location.)
-  static constexpr uint32_t kMaxPositiveDisplacement = (1u << 24) - 2 + kPcDisplacement;
-  static constexpr uint32_t kMaxNegativeDisplacement = (1u << 24) - kPcDisplacement;
-
-  DISALLOW_COPY_AND_ASSIGN(Thumb2RelativeCallPatcher);
-};
-
-class OatWriter::Arm64RelativeCallPatcher FINAL : public ArmBaseRelativeCallPatcher {
- public:
-  explicit Arm64RelativeCallPatcher(OatWriter* writer)
-      : ArmBaseRelativeCallPatcher(writer, kArm64, CompileThunkCode(),
-                                   kMaxPositiveDisplacement, kMaxNegativeDisplacement) {
-  }
-
-  void Patch(std::vector<uint8_t>* code, uint32_t literal_offset, uint32_t patch_offset,
-             uint32_t target_offset) OVERRIDE {
-    DCHECK_LE(literal_offset + 4u, code->size());
-    DCHECK_EQ(literal_offset & 3u, 0u);
-    DCHECK_EQ(patch_offset & 3u, 0u);
-    DCHECK_EQ(target_offset & 3u, 0u);
-    uint32_t displacement = CalculateDisplacement(patch_offset, target_offset & ~1u);
-    DCHECK_EQ(displacement & 3u, 0u);
-    DCHECK((displacement >> 27) == 0u || (displacement >> 27) == 31u);  // 28-bit signed.
-    uint32_t value = (displacement & 0x0fffffffu) >> 2;
-    value |= 0x94000000;  // BL
-
-    uint8_t* addr = &(*code)[literal_offset];
-    // Check that we're just overwriting an existing BL.
-    DCHECK_EQ(addr[3] & 0xfc, 0x94);
-    // Write the new BL.
-    addr[0] = (value >> 0) & 0xff;
-    addr[1] = (value >> 8) & 0xff;
-    addr[2] = (value >> 16) & 0xff;
-    addr[3] = (value >> 24) & 0xff;
-  }
-
- private:
-  static std::vector<uint8_t> CompileThunkCode() {
-    // The thunk just uses the entry point in the ArtMethod. This works even for calls
-    // to the generic JNI and interpreter trampolines.
-    arm64::Arm64Assembler assembler;
-    Offset offset(mirror::ArtMethod::EntryPointFromQuickCompiledCodeOffset(
-        kArm64PointerSize).Int32Value());
-    assembler.JumpTo(ManagedRegister(arm64::X0), offset, ManagedRegister(arm64::IP0));
-    // Ensure we emit the literal pool.
-    assembler.EmitSlowPaths();
-    std::vector<uint8_t> thunk_code(assembler.CodeSize());
-    MemoryRegion code(thunk_code.data(), thunk_code.size());
-    assembler.FinalizeInstructions(code);
-    return thunk_code;
-  }
-
-  // Maximum positive and negative displacement measured from the patch location.
-  // (Signed 28 bit displacement with the last bit 0 has range [-2^27, 2^27-4] measured from
-  // the ARM64 PC pointing to the BL.)
-  static constexpr uint32_t kMaxPositiveDisplacement = (1u << 27) - 4u;
-  static constexpr uint32_t kMaxNegativeDisplacement = (1u << 27);
-
-  DISALLOW_COPY_AND_ASSIGN(Arm64RelativeCallPatcher);
-};
 
 #define DCHECK_OFFSET() \
   DCHECK_EQ(static_cast<off_t>(file_offset + relative_offset), out->Seek(0, kSeekCurrent)) \
@@ -409,7 +73,7 @@ OatWriter::OatWriter(const std::vector<const DexFile*>& dex_files,
     image_file_location_oat_begin_(image_file_location_oat_begin),
     image_patch_delta_(image_patch_delta),
     key_value_store_(key_value_store),
-    oat_header_(NULL),
+    oat_header_(nullptr),
     size_dex_file_alignment_(0),
     size_executable_offset_alignment_(0),
     size_oat_header_(0),
@@ -427,6 +91,7 @@ OatWriter::OatWriter(const std::vector<const DexFile*>& dex_files,
     size_code_(0),
     size_code_alignment_(0),
     size_relative_call_thunks_(0),
+    size_misc_thunks_(0),
     size_mapping_table_(0),
     size_vmap_table_(0),
     size_gc_map_(0),
@@ -442,23 +107,10 @@ OatWriter::OatWriter(const std::vector<const DexFile*>& dex_files,
     method_offset_map_() {
   CHECK(key_value_store != nullptr);
 
-  switch (compiler_driver_->GetInstructionSet()) {
-    case kX86:
-    case kX86_64:
-      relative_call_patcher_.reset(new X86RelativeCallPatcher);
-      break;
-    case kArm:
-      // Fall through: we generate Thumb2 code for "arm".
-    case kThumb2:
-      relative_call_patcher_.reset(new Thumb2RelativeCallPatcher(this));
-      break;
-    case kArm64:
-      relative_call_patcher_.reset(new Arm64RelativeCallPatcher(this));
-      break;
-    default:
-      relative_call_patcher_.reset(new NoRelativeCallPatcher);
-      break;
-  }
+  InstructionSet instruction_set = compiler_driver_->GetInstructionSet();
+  const InstructionSetFeatures* features = compiler_driver_->GetInstructionSetFeatures();
+  relative_patcher_ = linker::RelativePatcher::Create(instruction_set, features,
+                                                      &method_offset_map_);
 
   size_t offset;
   {
@@ -674,7 +326,7 @@ class OatWriter::InitOatClassesMethodVisitor : public DexMethodVisitor {
     ClassReference class_ref(dex_file_, class_def_index_);
     CompiledClass* compiled_class = writer_->compiler_driver_->GetCompiledClass(class_ref);
     mirror::Class::Status status;
-    if (compiled_class != NULL) {
+    if (compiled_class != nullptr) {
       status = compiled_class->GetStatus();
     } else if (writer_->compiler_driver_->GetVerificationResults()->IsClassRejected(class_ref)) {
       status = mirror::Class::kStatusError;
@@ -698,15 +350,17 @@ class OatWriter::InitOatClassesMethodVisitor : public DexMethodVisitor {
 class OatWriter::InitCodeMethodVisitor : public OatDexMethodVisitor {
  public:
   InitCodeMethodVisitor(OatWriter* writer, size_t offset)
-    : OatDexMethodVisitor(writer, offset) {
-    writer_->absolute_patch_locations_.reserve(
+    : OatDexMethodVisitor(writer, offset),
+      text_absolute_patch_locations_(writer->GetAbsolutePatchLocationsFor(".text")),
+      debuggable_(writer->GetCompilerDriver()->GetCompilerOptions().GetDebuggable()) {
+    text_absolute_patch_locations_->reserve(
         writer_->compiler_driver_->GetNonRelativeLinkerPatchCount());
   }
 
   bool EndClass() {
     OatDexMethodVisitor::EndClass();
     if (oat_class_index_ == writer_->oat_classes_.size()) {
-      offset_ = writer_->relative_call_patcher_->ReserveSpace(offset_, nullptr);
+      offset_ = writer_->relative_patcher_->ReserveSpaceEnd(offset_);
     }
     return true;
   }
@@ -722,36 +376,35 @@ class OatWriter::InitCodeMethodVisitor : public OatDexMethodVisitor {
 
       const SwapVector<uint8_t>* quick_code = compiled_method->GetQuickCode();
       CHECK(quick_code != nullptr);
-      offset_ = writer_->relative_call_patcher_->ReserveSpace(offset_, compiled_method);
-      offset_ = compiled_method->AlignCode(offset_);
-      DCHECK_ALIGNED_PARAM(offset_,
-                           GetInstructionSetAlignment(compiled_method->GetInstructionSet()));
       uint32_t code_size = quick_code->size() * sizeof(uint8_t);
       CHECK_NE(code_size, 0U);
       uint32_t thumb_offset = compiled_method->CodeDelta();
-      quick_code_offset = offset_ + sizeof(OatQuickMethodHeader) + thumb_offset;
 
+      // Deduplicate code arrays if we are not producing debuggable code.
       bool deduped = false;
-
-      // Deduplicate code arrays.
-      auto lb = dedupe_map_.lower_bound(compiled_method);
-      if (lb != dedupe_map_.end() && !dedupe_map_.key_comp()(compiled_method, lb->first)) {
-        quick_code_offset = lb->second;
-        deduped = true;
+      if (debuggable_) {
+        quick_code_offset = NewQuickCodeOffset(compiled_method, it, thumb_offset);
       } else {
-        dedupe_map_.PutBefore(lb, compiled_method, quick_code_offset);
+        auto lb = dedupe_map_.lower_bound(compiled_method);
+        if (lb != dedupe_map_.end() && !dedupe_map_.key_comp()(compiled_method, lb->first)) {
+          quick_code_offset = lb->second;
+          deduped = true;
+        } else {
+          quick_code_offset = NewQuickCodeOffset(compiled_method, it, thumb_offset);
+          dedupe_map_.PutBefore(lb, compiled_method, quick_code_offset);
+        }
       }
 
       MethodReference method_ref(dex_file_, it.GetMemberIndex());
-      auto method_lb = writer_->method_offset_map_.lower_bound(method_ref);
-      if (method_lb != writer_->method_offset_map_.end() &&
-          !writer_->method_offset_map_.key_comp()(method_ref, method_lb->first)) {
+      auto method_lb = writer_->method_offset_map_.map.lower_bound(method_ref);
+      if (method_lb != writer_->method_offset_map_.map.end() &&
+          !writer_->method_offset_map_.map.key_comp()(method_ref, method_lb->first)) {
         // TODO: Should this be a hard failure?
         LOG(WARNING) << "Multiple definitions of "
             << PrettyMethod(method_ref.dex_method_index, *method_ref.dex_file)
             << ((method_lb->second != quick_code_offset) ? "; OFFSET MISMATCH" : "");
       } else {
-        writer_->method_offset_map_.PutBefore(method_lb, method_ref, quick_code_offset);
+        writer_->method_offset_map_.map.PutBefore(method_lb, method_ref, quick_code_offset);
       }
 
       // Update quick method header.
@@ -790,31 +443,28 @@ class OatWriter::InitCodeMethodVisitor : public OatDexMethodVisitor {
         if (!compiled_method->GetPatches().empty()) {
           uintptr_t base_loc = offset_ - code_size - writer_->oat_header_->GetExecutableOffset();
           for (const LinkerPatch& patch : compiled_method->GetPatches()) {
-            if (patch.Type() != kLinkerPatchCallRelative) {
-              writer_->absolute_patch_locations_.push_back(base_loc + patch.LiteralOffset());
+            if (!patch.IsPcRelative()) {
+              text_absolute_patch_locations_->push_back(base_loc + patch.LiteralOffset());
             }
           }
         }
       }
 
-      if (writer_->compiler_driver_->GetCompilerOptions().GetIncludeDebugSymbols()) {
+      if (writer_->compiler_driver_->GetCompilerOptions().GetIncludeDebugSymbols() ||
+          writer_->compiler_driver_->GetCompilerOptions().GetIncludeCFI()) {
         // Record debug information for this function if we are doing that.
-
-        std::string name = PrettyMethod(it.GetMemberIndex(), *dex_file_, true);
-        if (deduped) {
-          // TODO We should place the DEDUPED tag on the first instance of a deduplicated symbol
-          // so that it will show up in a debuggerd crash report.
-          name += " [ DEDUPED ]";
-        }
-
         const uint32_t quick_code_start = quick_code_offset -
-            writer_->oat_header_->GetExecutableOffset();
-        const DexFile::CodeItem *code_item = it.GetMethodCodeItem();
-        writer_->method_info_.push_back(DebugInfo(name,
-              dex_file_->GetSourceFile(dex_file_->GetClassDef(class_def_index_)),
-              quick_code_start, quick_code_start + code_size,
-              code_item == nullptr ? nullptr : dex_file_->GetDebugInfoStream(code_item),
-              compiled_method));
+            writer_->oat_header_->GetExecutableOffset() - thumb_offset;
+        writer_->method_info_.push_back(DebugInfo {
+            dex_file_,
+            class_def_index_,
+            it.GetMemberIndex(),
+            it.GetMethodAccessFlags(),
+            it.GetMethodCodeItem(),
+            deduped,
+            quick_code_start,
+            quick_code_start + code_size,
+            compiled_method});
       }
 
       if (kIsDebugBuild) {
@@ -823,7 +473,7 @@ class OatWriter::InitCodeMethodVisitor : public OatDexMethodVisitor {
         ClassReference class_ref(dex_file_, class_def_index_);
         CompiledClass* compiled_class = compiler_driver->GetCompiledClass(class_ref);
         mirror::Class::Status status;
-        if (compiled_class != NULL) {
+        if (compiled_class != nullptr) {
           status = compiled_class->GetStatus();
         } else if (compiler_driver->GetVerificationResults()->IsClassRejected(class_ref)) {
           status = mirror::Class::kStatusError;
@@ -851,9 +501,57 @@ class OatWriter::InitCodeMethodVisitor : public OatDexMethodVisitor {
   }
 
  private:
+  struct CodeOffsetsKeyComparator {
+    bool operator()(const CompiledMethod* lhs, const CompiledMethod* rhs) const {
+      if (lhs->GetQuickCode() != rhs->GetQuickCode()) {
+        return lhs->GetQuickCode() < rhs->GetQuickCode();
+      }
+      // If the code is the same, all other fields are likely to be the same as well.
+      if (UNLIKELY(lhs->GetMappingTable() != rhs->GetMappingTable())) {
+        return lhs->GetMappingTable() < rhs->GetMappingTable();
+      }
+      if (UNLIKELY(lhs->GetVmapTable() != rhs->GetVmapTable())) {
+        return lhs->GetVmapTable() < rhs->GetVmapTable();
+      }
+      if (UNLIKELY(lhs->GetGcMap() != rhs->GetGcMap())) {
+        return lhs->GetGcMap() < rhs->GetGcMap();
+      }
+      const auto& lhs_patches = lhs->GetPatches();
+      const auto& rhs_patches = rhs->GetPatches();
+      if (UNLIKELY(lhs_patches.size() != rhs_patches.size())) {
+        return lhs_patches.size() < rhs_patches.size();
+      }
+      auto rit = rhs_patches.begin();
+      for (const LinkerPatch& lpatch : lhs_patches) {
+        if (UNLIKELY(!(lpatch == *rit))) {
+          return lpatch < *rit;
+        }
+        ++rit;
+      }
+      return false;
+    }
+  };
+
+  uint32_t NewQuickCodeOffset(CompiledMethod* compiled_method,
+                              const ClassDataItemIterator& it,
+                              uint32_t thumb_offset) {
+    offset_ = writer_->relative_patcher_->ReserveSpace(
+              offset_, compiled_method, MethodReference(dex_file_, it.GetMemberIndex()));
+    offset_ = compiled_method->AlignCode(offset_);
+    DCHECK_ALIGNED_PARAM(offset_,
+                         GetInstructionSetAlignment(compiled_method->GetInstructionSet()));
+    return offset_ + sizeof(OatQuickMethodHeader) + thumb_offset;
+  }
+
   // Deduplication is already done on a pointer basis by the compiler driver,
   // so we can simply compare the pointers to find out if things are duplicated.
   SafeMap<const CompiledMethod*, uint32_t, CodeOffsetsKeyComparator> dedupe_map_;
+
+  // Patch locations for the .text section.
+  std::vector<uintptr_t>* const text_absolute_patch_locations_;
+
+  // Cache of compiler's --debuggable option.
+  const bool debuggable_;
 };
 
 template <typename DataAccess>
@@ -978,7 +676,7 @@ class OatWriter::WriteCodeMethodVisitor : public OatDexMethodVisitor {
     bool result = OatDexMethodVisitor::EndClass();
     if (oat_class_index_ == writer_->oat_classes_.size()) {
       DCHECK(result);  // OatDexMethodVisitor::EndClass() never fails.
-      offset_ = writer_->relative_call_patcher_->WriteThunks(out_, offset_);
+      offset_ = writer_->relative_patcher_->WriteThunks(out_, offset_);
       if (UNLIKELY(offset_ == 0u)) {
         PLOG(ERROR) << "Failed to write final relative call thunks";
         result = false;
@@ -992,7 +690,7 @@ class OatWriter::WriteCodeMethodVisitor : public OatDexMethodVisitor {
     OatClass* oat_class = writer_->oat_classes_[oat_class_index_];
     const CompiledMethod* compiled_method = oat_class->GetCompiledMethod(class_def_method_index);
 
-    if (compiled_method != NULL) {  // ie. not an abstract method
+    if (compiled_method != nullptr) {  // ie. not an abstract method
       size_t file_offset = file_offset_;
       OutputStream* out = out_;
 
@@ -1000,33 +698,32 @@ class OatWriter::WriteCodeMethodVisitor : public OatDexMethodVisitor {
       if (quick_code != nullptr) {
         // Need a wrapper if we create a copy for patching.
         ArrayRef<const uint8_t> wrapped(*quick_code);
-
-        offset_ = writer_->relative_call_patcher_->WriteThunks(out, offset_);
-        if (offset_ == 0u) {
-          ReportWriteFailure("relative call thunk", it);
-          return false;
-        }
-        uint32_t aligned_offset = compiled_method->AlignCode(offset_);
-        uint32_t aligned_code_delta = aligned_offset - offset_;
-        if (aligned_code_delta != 0) {
-          if (!writer_->WriteCodeAlignment(out, aligned_code_delta)) {
-            ReportWriteFailure("code alignment padding", it);
-            return false;
-          }
-          offset_ += aligned_code_delta;
-          DCHECK_OFFSET_();
-        }
-        DCHECK_ALIGNED_PARAM(offset_,
-                             GetInstructionSetAlignment(compiled_method->GetInstructionSet()));
         uint32_t code_size = quick_code->size() * sizeof(uint8_t);
         CHECK_NE(code_size, 0U);
 
         // Deduplicate code arrays.
         const OatMethodOffsets& method_offsets = oat_class->method_offsets_[method_offsets_index_];
-        DCHECK(method_offsets.code_offset_ < offset_ || method_offsets.code_offset_ ==
-                   offset_ + sizeof(OatQuickMethodHeader) + compiled_method->CodeDelta())
-            << PrettyMethod(it.GetMemberIndex(), *dex_file_);
         if (method_offsets.code_offset_ >= offset_) {
+          offset_ = writer_->relative_patcher_->WriteThunks(out, offset_);
+          if (offset_ == 0u) {
+            ReportWriteFailure("relative call thunk", it);
+            return false;
+          }
+          uint32_t aligned_offset = compiled_method->AlignCode(offset_);
+          uint32_t aligned_code_delta = aligned_offset - offset_;
+          if (aligned_code_delta != 0) {
+            if (!writer_->WriteCodeAlignment(out, aligned_code_delta)) {
+              ReportWriteFailure("code alignment padding", it);
+              return false;
+            }
+            offset_ += aligned_code_delta;
+            DCHECK_OFFSET_();
+          }
+          DCHECK_ALIGNED_PARAM(offset_,
+                               GetInstructionSetAlignment(compiled_method->GetInstructionSet()));
+          DCHECK_EQ(method_offsets.code_offset_,
+                    offset_ + sizeof(OatQuickMethodHeader) + compiled_method->CodeDelta())
+              << PrettyMethod(it.GetMemberIndex(), *dex_file_);
           const OatQuickMethodHeader& method_header =
               oat_class->method_headers_[method_offsets_index_];
           writer_->oat_header_->UpdateChecksum(&method_header, sizeof(method_header));
@@ -1039,15 +736,21 @@ class OatWriter::WriteCodeMethodVisitor : public OatDexMethodVisitor {
           DCHECK_OFFSET_();
 
           if (!compiled_method->GetPatches().empty()) {
-            patched_code_ = std::vector<uint8_t>(quick_code->begin(), quick_code->end());
+            patched_code_.assign(quick_code->begin(), quick_code->end());
             wrapped = ArrayRef<const uint8_t>(patched_code_);
             for (const LinkerPatch& patch : compiled_method->GetPatches()) {
               if (patch.Type() == kLinkerPatchCallRelative) {
                 // NOTE: Relative calls across oat files are not supported.
                 uint32_t target_offset = GetTargetOffset(patch);
                 uint32_t literal_offset = patch.LiteralOffset();
-                writer_->relative_call_patcher_->Patch(&patched_code_, literal_offset,
+                writer_->relative_patcher_->PatchCall(&patched_code_, literal_offset,
                                                        offset_ + literal_offset, target_offset);
+              } else if (patch.Type() == kLinkerPatchDexCacheArray) {
+                uint32_t target_offset = GetDexCacheOffset(patch);
+                uint32_t literal_offset = patch.LiteralOffset();
+                writer_->relative_patcher_->PatchDexCacheReference(&patched_code_, patch,
+                                                                   offset_ + literal_offset,
+                                                                   target_offset);
               } else if (patch.Type() == kLinkerPatchCall) {
                 uint32_t target_offset = GetTargetOffset(patch);
                 PatchCodeAddress(&patched_code_, patch.LiteralOffset(), target_offset);
@@ -1102,9 +805,9 @@ class OatWriter::WriteCodeMethodVisitor : public OatDexMethodVisitor {
   }
 
   uint32_t GetTargetOffset(const LinkerPatch& patch) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-    auto target_it = writer_->method_offset_map_.find(patch.TargetMethod());
+    auto target_it = writer_->method_offset_map_.map.find(patch.TargetMethod());
     uint32_t target_offset =
-        (target_it != writer_->method_offset_map_.end()) ? target_it->second : 0u;
+        (target_it != writer_->method_offset_map_.map.end()) ? target_it->second : 0u;
     // If there's no compiled code, point to the correct trampoline.
     if (UNLIKELY(target_offset == 0)) {
       mirror::ArtMethod* target = GetTargetMethod(patch);
@@ -1132,6 +835,18 @@ class OatWriter::WriteCodeMethodVisitor : public OatDexMethodVisitor {
     mirror::Class* type = dex_cache->GetResolvedType(patch.TargetTypeIndex());
     CHECK(type != nullptr);
     return type;
+  }
+
+  uint32_t GetDexCacheOffset(const LinkerPatch& patch) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    if (writer_->image_writer_ != nullptr) {
+      auto* element = writer_->image_writer_->GetDexCacheArrayElementImageAddress(
+              patch.TargetDexCacheDexFile(), patch.TargetDexCacheElementOffset());
+      const uint8_t* oat_data = writer_->image_writer_->GetOatFileBegin() + file_offset_;
+      return reinterpret_cast<const uint8_t*>(element) - oat_data;
+    } else {
+      LOG(FATAL) << "Unimplemented.";
+      UNREACHABLE();
+    }
   }
 
   void PatchObjectAddress(std::vector<uint8_t>* code, uint32_t offset, mirror::Object* object)
@@ -1178,7 +893,7 @@ class OatWriter::WriteMapMethodVisitor : public OatDexMethodVisitor {
     OatClass* oat_class = writer_->oat_classes_[oat_class_index_];
     const CompiledMethod* compiled_method = oat_class->GetCompiledMethod(class_def_method_index);
 
-    if (compiled_method != NULL) {  // ie. not an abstract method
+    if (compiled_method != nullptr) {  // ie. not an abstract method
       size_t file_offset = file_offset_;
       OutputStream* out = out_;
 
@@ -1225,7 +940,7 @@ bool OatWriter::VisitDexMethods(DexMethodVisitor* visitor) {
       }
       const DexFile::ClassDef& class_def = dex_file->GetClassDef(class_def_index);
       const uint8_t* class_data = dex_file->GetClassData(class_def);
-      if (class_data != NULL) {  // ie not an empty class, such as a marker interface
+      if (class_data != nullptr) {  // ie not an empty class, such as a marker interface
         ClassDataItemIterator it(*dex_file, class_data);
         while (it.HasNextStaticField()) {
           it.Next();
@@ -1272,7 +987,7 @@ size_t OatWriter::InitOatDexFiles(size_t offset) {
   // create the OatDexFiles
   for (size_t i = 0; i != dex_files_->size(); ++i) {
     const DexFile* dex_file = (*dex_files_)[i];
-    CHECK(dex_file != NULL);
+    CHECK(dex_file != nullptr);
     OatDexFile* oat_dex_file = new OatDexFile(offset, *dex_file);
     oat_dex_files_.push_back(oat_dex_file);
     offset += oat_dex_file->SizeOf();
@@ -1472,6 +1187,7 @@ bool OatWriter::Write(OutputStream* out) {
     DO_STAT(size_code_);
     DO_STAT(size_code_alignment_);
     DO_STAT(size_relative_call_thunks_);
+    DO_STAT(size_misc_thunks_);
     DO_STAT(size_mapping_table_);
     DO_STAT(size_vmap_table_);
     DO_STAT(size_gc_map_);
@@ -1630,6 +1346,10 @@ size_t OatWriter::WriteCodeDexFiles(OutputStream* out,
 
   #undef VISIT
 
+  size_code_alignment_ += relative_patcher_->CodeAlignmentSize();
+  size_relative_call_thunks_ += relative_patcher_->RelativeCallThunksSize();
+  size_misc_thunks_ += relative_patcher_->MiscThunksSize();
+
   return relative_offset;
 }
 
@@ -1643,6 +1363,15 @@ bool OatWriter::WriteCodeAlignment(OutputStream* out, uint32_t aligned_code_delt
   }
   size_code_alignment_ += aligned_code_delta;
   return true;
+}
+
+std::pair<bool, uint32_t> OatWriter::MethodOffsetMap::FindMethodOffset(MethodReference ref) {
+  auto it = map.find(ref);
+  if (it == map.end()) {
+    return std::pair<bool, uint32_t>(false, 0u);
+  } else {
+    return std::pair<bool, uint32_t>(true, it->second);
+  }
 }
 
 OatWriter::OatDexFile::OatDexFile(size_t offset, const DexFile& dex_file) {
@@ -1742,13 +1471,13 @@ OatWriter::OatClass::OatClass(size_t offset,
     oat_method_offsets_offset_from_oat_class += sizeof(method_bitmap_size_);
     oat_method_offsets_offset_from_oat_class += method_bitmap_size_;
   } else {
-    method_bitmap_ = NULL;
+    method_bitmap_ = nullptr;
     method_bitmap_size_ = 0;
   }
 
   for (size_t i = 0; i < num_methods; i++) {
     CompiledMethod* compiled_method = compiled_methods_[i];
-    if (compiled_method == NULL) {
+    if (compiled_method == nullptr) {
       oat_method_offsets_offsets_from_oat_class_[i] = 0;
     } else {
       oat_method_offsets_offsets_from_oat_class_[i] = oat_method_offsets_offset_from_oat_class;

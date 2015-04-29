@@ -19,6 +19,7 @@ LOCAL_PATH := $(call my-dir)
 include art/build/Android.common_build.mk
 
 LIBART_COMMON_SRC_FILES := \
+  art_field.cc \
   atomic.cc.arm \
   barrier.cc \
   base/allocator.cc \
@@ -96,13 +97,16 @@ LIBART_COMMON_SRC_FILES := \
   jit/jit_instrumentation.cc \
   jni_internal.cc \
   jobject_comparator.cc \
+  linear_alloc.cc \
   mem_map.cc \
   memory_region.cc \
-  mirror/art_field.cc \
+  mirror/abstract_method.cc \
   mirror/art_method.cc \
   mirror/array.cc \
   mirror/class.cc \
   mirror/dex_cache.cc \
+  mirror/field.cc \
+  mirror/method.cc \
   mirror/object.cc \
   mirror/reference.cc \
   mirror/stack_trace_element.cc \
@@ -120,6 +124,7 @@ LIBART_COMMON_SRC_FILES := \
   native/java_lang_Object.cc \
   native/java_lang_Runtime.cc \
   native/java_lang_String.cc \
+  native/java_lang_StringFactory.cc \
   native/java_lang_System.cc \
   native/java_lang_Thread.cc \
   native/java_lang_Throwable.cc \
@@ -132,6 +137,7 @@ LIBART_COMMON_SRC_FILES := \
   native/java_lang_reflect_Method.cc \
   native/java_lang_reflect_Proxy.cc \
   native/java_util_concurrent_atomic_AtomicLong.cc \
+  native/libcore_util_CharsetUtils.cc \
   native/org_apache_harmony_dalvik_ddmc_DdmServer.cc \
   native/org_apache_harmony_dalvik_ddmc_DdmVmInternal.cc \
   native/sun_misc_Unsafe.cc \
@@ -151,6 +157,7 @@ LIBART_COMMON_SRC_FILES := \
   runtime_options.cc \
   signal_catcher.cc \
   stack.cc \
+  stack_map.cc \
   thread.cc \
   thread_list.cc \
   thread_pool.cc \
@@ -461,7 +468,7 @@ $$(ENUM_OPERATOR_OUT_GEN): $$(GENERATED_SRC_DIR)/%_operator_out.cc : $(LOCAL_PAT
   ifeq ($$(art_target_or_host),target)
     LOCAL_SHARED_LIBRARIES += libdl
     # ZipArchive support, the order matters here to get all symbols.
-    LOCAL_STATIC_LIBRARIES := libziparchive libz
+    LOCAL_STATIC_LIBRARIES := libziparchive libz libbase
     # For android::FileMap used by libziparchive.
     LOCAL_SHARED_LIBRARIES += libutils
     # For liblog, atrace, properties, ashmem, set_sched_policy and socket_peer_is_trusted.
@@ -469,7 +476,7 @@ $$(ENUM_OPERATOR_OUT_GEN): $$(GENERATED_SRC_DIR)/%_operator_out.cc : $(LOCAL_PAT
   else # host
     LOCAL_SHARED_LIBRARIES += libziparchive-host
     # For ashmem_create_region.
-    LOCAL_STATIC_LIBRARIES += libcutils
+    LOCAL_SHARED_LIBRARIES += libcutils
   endif
   LOCAL_ADDITIONAL_DEPENDENCIES := art/build/Android.common_build.mk
   LOCAL_ADDITIONAL_DEPENDENCIES += $$(LOCAL_PATH)/Android.mk

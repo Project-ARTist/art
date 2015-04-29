@@ -18,6 +18,7 @@
 #define ART_COMPILER_COMMON_COMPILER_TEST_H_
 
 #include <list>
+#include <unordered_set>
 #include <vector>
 
 #include "common_runtime_test.h"
@@ -56,6 +57,18 @@ class CommonCompilerTest : public CommonRuntimeTest {
 
   virtual void SetUpRuntimeOptions(RuntimeOptions *options);
 
+  // Get the set of image classes given to the compiler-driver in SetUp. Note: the compiler
+  // driver assumes ownership of the set, so the test should properly release the set.
+  virtual std::unordered_set<std::string>* GetImageClasses();
+
+  // Get the set of compiled classes given to the compiler-driver in SetUp. Note: the compiler
+  // driver assumes ownership of the set, so the test should properly release the set.
+  virtual std::unordered_set<std::string>* GetCompiledClasses();
+
+  // Get the set of compiled methods given to the compiler-driver in SetUp. Note: the compiler
+  // driver assumes ownership of the set, so the test should properly release the set.
+  virtual std::unordered_set<std::string>* GetCompiledMethods();
+
   virtual void TearDown();
 
   void CompileClass(mirror::ClassLoader* class_loader, const char* class_name)
@@ -78,7 +91,6 @@ class CommonCompilerTest : public CommonRuntimeTest {
   std::unique_ptr<CompilerOptions> compiler_options_;
   std::unique_ptr<VerificationResults> verification_results_;
   std::unique_ptr<DexFileToMethodInlinerMap> method_inliner_map_;
-  std::unique_ptr<CompilerCallbacks> callbacks_;
   std::unique_ptr<CompilerDriver> compiler_driver_;
   std::unique_ptr<CumulativeLogger> timer_;
   std::unique_ptr<const InstructionSetFeatures> instruction_set_features_;

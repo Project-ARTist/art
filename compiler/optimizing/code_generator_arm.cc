@@ -41,12 +41,6 @@ static bool ExpectedPairLayout(Location location) {
 
 static constexpr int kCurrentMethodStackOffset = 0;
 
-static constexpr Register kRuntimeParameterCoreRegisters[] = { R0, R1, R2, R3 };
-static constexpr size_t kRuntimeParameterCoreRegistersLength =
-    arraysize(kRuntimeParameterCoreRegisters);
-static constexpr SRegister kRuntimeParameterFpuRegisters[] = { S0, S1, S2, S3 };
-static constexpr size_t kRuntimeParameterFpuRegistersLength =
-    arraysize(kRuntimeParameterFpuRegisters);
 // We unconditionally allocate R5 to ensure we can do long operations
 // with baseline.
 static constexpr Register kCoreSavedRegisterForBaseline = R5;
@@ -58,18 +52,6 @@ static constexpr SRegister kFpuCalleeSaves[] =
 // D31 cannot be split into two S registers, and the register allocator only works on
 // S registers. Therefore there is no need to block it.
 static constexpr DRegister DTMP = D31;
-
-class InvokeRuntimeCallingConvention : public CallingConvention<Register, SRegister> {
- public:
-  InvokeRuntimeCallingConvention()
-      : CallingConvention(kRuntimeParameterCoreRegisters,
-                          kRuntimeParameterCoreRegistersLength,
-                          kRuntimeParameterFpuRegisters,
-                          kRuntimeParameterFpuRegistersLength) {}
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(InvokeRuntimeCallingConvention);
-};
 
 #define __ reinterpret_cast<ArmAssembler*>(codegen->GetAssembler())->
 #define QUICK_ENTRY_POINT(x) QUICK_ENTRYPOINT_OFFSET(kArmWordSize, x).Int32Value()
@@ -159,8 +141,10 @@ class BoundsCheckSlowPathARM : public SlowPathCodeARM {
     codegen->EmitParallelMoves(
         index_location_,
         Location::RegisterLocation(calling_convention.GetRegisterAt(0)),
+        Primitive::kPrimInt,
         length_location_,
-        Location::RegisterLocation(calling_convention.GetRegisterAt(1)));
+        Location::RegisterLocation(calling_convention.GetRegisterAt(1)),
+        Primitive::kPrimInt);
     arm_codegen->InvokeRuntime(
         QUICK_ENTRY_POINT(pThrowArrayBounds), instruction_, instruction_->GetDexPc(), this);
   }
@@ -192,7 +176,6 @@ class LoadClassSlowPathARM : public SlowPathCodeARM {
 
     InvokeRuntimeCallingConvention calling_convention;
     __ LoadImmediate(calling_convention.GetRegisterAt(0), cls_->GetTypeIndex());
-    arm_codegen->LoadCurrentMethod(calling_convention.GetRegisterAt(1));
     int32_t entry_point_offset = do_clinit_
         ? QUICK_ENTRY_POINT(pInitializeStaticStorage)
         : QUICK_ENTRY_POINT(pInitializeType);
@@ -238,7 +221,6 @@ class LoadStringSlowPathARM : public SlowPathCodeARM {
     SaveLiveRegisters(codegen, locations);
 
     InvokeRuntimeCallingConvention calling_convention;
-    arm_codegen->LoadCurrentMethod(calling_convention.GetRegisterAt(1));
     __ LoadImmediate(calling_convention.GetRegisterAt(0), instruction_->GetStringIndex());
     arm_codegen->InvokeRuntime(
         QUICK_ENTRY_POINT(pResolveString), instruction_, instruction_->GetDexPc(), this);
@@ -280,8 +262,10 @@ class TypeCheckSlowPathARM : public SlowPathCodeARM {
     codegen->EmitParallelMoves(
         class_to_check_,
         Location::RegisterLocation(calling_convention.GetRegisterAt(0)),
+        Primitive::kPrimNot,
         object_class_,
-        Location::RegisterLocation(calling_convention.GetRegisterAt(1)));
+        Location::RegisterLocation(calling_convention.GetRegisterAt(1)),
+        Primitive::kPrimNot);
 
     if (instruction_->IsInstanceOf()) {
       arm_codegen->InvokeRuntime(
@@ -303,6 +287,26 @@ class TypeCheckSlowPathARM : public SlowPathCodeARM {
   uint32_t dex_pc_;
 
   DISALLOW_COPY_AND_ASSIGN(TypeCheckSlowPathARM);
+};
+
+class DeoptimizationSlowPathARM : public SlowPathCodeARM {
+ public:
+  explicit DeoptimizationSlowPathARM(HInstruction* instruction)
+    : instruction_(instruction) {}
+
+  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+    __ Bind(GetEntryLabel());
+    SaveLiveRegisters(codegen, instruction_->GetLocations());
+    DCHECK(instruction_->IsDeoptimize());
+    HDeoptimize* deoptimize = instruction_->AsDeoptimize();
+    uint32_t dex_pc = deoptimize->GetDexPc();
+    CodeGeneratorARM* arm_codegen = down_cast<CodeGeneratorARM*>(codegen);
+    arm_codegen->InvokeRuntime(QUICK_ENTRY_POINT(pDeoptimize), instruction_, dex_pc, this);
+  }
+
+ private:
+  HInstruction* const instruction_;
+  DISALLOW_COPY_AND_ASSIGN(DeoptimizationSlowPathARM);
 };
 
 #undef __
@@ -511,6 +515,14 @@ void CodeGeneratorARM::ComputeSpillMask() {
   }
 }
 
+static dwarf::Reg DWARFReg(Register reg) {
+  return dwarf::Reg::ArmCore(static_cast<int>(reg));
+}
+
+static dwarf::Reg DWARFReg(SRegister reg) {
+  return dwarf::Reg::ArmFp(static_cast<int>(reg));
+}
+
 void CodeGeneratorARM::GenerateFrameEntry() {
   bool skip_overflow_check =
       IsLeafMethod() && !FrameNeedsStackCheck(GetFrameSize(), InstructionSet::kArm);
@@ -529,12 +541,19 @@ void CodeGeneratorARM::GenerateFrameEntry() {
 
   // PC is in the list of callee-save to mimic Quick, but we need to push
   // LR at entry instead.
-  __ PushList((core_spill_mask_ & (~(1 << PC))) | 1 << LR);
+  uint32_t push_mask = (core_spill_mask_ & (~(1 << PC))) | 1 << LR;
+  __ PushList(push_mask);
+  __ cfi().AdjustCFAOffset(kArmWordSize * POPCOUNT(push_mask));
+  __ cfi().RelOffsetForMany(DWARFReg(R0), 0, push_mask, kArmWordSize);
   if (fpu_spill_mask_ != 0) {
     SRegister start_register = SRegister(LeastSignificantBit(fpu_spill_mask_));
     __ vpushs(start_register, POPCOUNT(fpu_spill_mask_));
+    __ cfi().AdjustCFAOffset(kArmWordSize * POPCOUNT(fpu_spill_mask_));
+    __ cfi().RelOffsetForMany(DWARFReg(S0), 0, fpu_spill_mask_, kArmWordSize);
   }
-  __ AddConstant(SP, -(GetFrameSize() - FrameEntrySpillSize()));
+  int adjust = GetFrameSize() - FrameEntrySpillSize();
+  __ AddConstant(SP, -adjust);
+  __ cfi().AdjustCFAOffset(adjust);
   __ StoreToOffset(kStoreWord, R0, SP, 0);
 }
 
@@ -543,12 +562,19 @@ void CodeGeneratorARM::GenerateFrameExit() {
     __ bx(LR);
     return;
   }
-  __ AddConstant(SP, GetFrameSize() - FrameEntrySpillSize());
+  __ cfi().RememberState();
+  int adjust = GetFrameSize() - FrameEntrySpillSize();
+  __ AddConstant(SP, adjust);
+  __ cfi().AdjustCFAOffset(-adjust);
   if (fpu_spill_mask_ != 0) {
     SRegister start_register = SRegister(LeastSignificantBit(fpu_spill_mask_));
     __ vpops(start_register, POPCOUNT(fpu_spill_mask_));
+    __ cfi().AdjustCFAOffset(-kArmPointerSize * POPCOUNT(fpu_spill_mask_));
+    __ cfi().RestoreMany(DWARFReg(SRegister(0)), fpu_spill_mask_);
   }
   __ PopList(core_spill_mask_);
+  __ cfi().RestoreState();
+  __ cfi().DefCFAOffset(GetFrameSize());
 }
 
 void CodeGeneratorARM::Bind(HBasicBlock* block) {
@@ -560,7 +586,6 @@ Location CodeGeneratorARM::GetStackLocation(HLoadLocal* load) const {
     case Primitive::kPrimLong:
     case Primitive::kPrimDouble:
       return Location::DoubleStackSlot(GetStackSlot(load->GetLocal()));
-      break;
 
     case Primitive::kPrimInt:
     case Primitive::kPrimNot:
@@ -573,13 +598,14 @@ Location CodeGeneratorARM::GetStackLocation(HLoadLocal* load) const {
     case Primitive::kPrimShort:
     case Primitive::kPrimVoid:
       LOG(FATAL) << "Unexpected type " << load->GetType();
+      UNREACHABLE();
   }
 
   LOG(FATAL) << "Unreachable";
-  return Location();
+  UNREACHABLE();
 }
 
-Location InvokeDexCallingConventionVisitor::GetNextLocation(Primitive::Type type) {
+Location InvokeDexCallingConventionVisitorARM::GetNextLocation(Primitive::Type type) {
   switch (type) {
     case Primitive::kPrimBoolean:
     case Primitive::kPrimByte:
@@ -654,7 +680,7 @@ Location InvokeDexCallingConventionVisitor::GetNextLocation(Primitive::Type type
   return Location();
 }
 
-Location InvokeDexCallingConventionVisitor::GetReturnLocation(Primitive::Type type) {
+Location InvokeDexCallingConventionVisitorARM::GetReturnLocation(Primitive::Type type) {
   switch (type) {
     case Primitive::kPrimBoolean:
     case Primitive::kPrimByte:
@@ -681,7 +707,6 @@ Location InvokeDexCallingConventionVisitor::GetReturnLocation(Primitive::Type ty
       return Location();
   }
   UNREACHABLE();
-  return Location();
 }
 
 void CodeGeneratorARM::Move32(Location destination, Location source) {
@@ -727,8 +752,10 @@ void CodeGeneratorARM::Move64(Location destination, Location source) {
       EmitParallelMoves(
           Location::RegisterLocation(source.AsRegisterPairHigh<Register>()),
           Location::RegisterLocation(destination.AsRegisterPairHigh<Register>()),
+          Primitive::kPrimInt,
           Location::RegisterLocation(source.AsRegisterPairLow<Register>()),
-          Location::RegisterLocation(destination.AsRegisterPairLow<Register>()));
+          Location::RegisterLocation(destination.AsRegisterPairLow<Register>()),
+          Primitive::kPrimInt);
     } else if (source.IsFpuRegister()) {
       UNIMPLEMENTED(FATAL);
     } else {
@@ -766,8 +793,10 @@ void CodeGeneratorARM::Move64(Location destination, Location source) {
       EmitParallelMoves(
           Location::StackSlot(source.GetStackIndex()),
           Location::StackSlot(destination.GetStackIndex()),
+          Primitive::kPrimInt,
           Location::StackSlot(source.GetHighStackIndex(kArmWordSize)),
-          Location::StackSlot(destination.GetHighStackIndex(kArmWordSize)));
+          Location::StackSlot(destination.GetHighStackIndex(kArmWordSize)),
+          Primitive::kPrimInt);
     }
   }
 }
@@ -883,7 +912,7 @@ void InstructionCodeGeneratorARM::VisitGoto(HGoto* got) {
   HInstruction* previous = got->GetPrevious();
 
   HLoopInformation* info = block->GetLoopInformation();
-  if (info != nullptr && info->IsBackEdge(block) && info->HasSuspendCheck()) {
+  if (info != nullptr && info->IsBackEdge(*block) && info->HasSuspendCheck()) {
     codegen_->ClearSpillSlotsFromLoopPhisInStackMap(info->GetSuspendCheck());
     GenerateSuspendCheck(info->GetSuspendCheck(), successor);
     return;
@@ -903,30 +932,19 @@ void LocationsBuilderARM::VisitExit(HExit* exit) {
 
 void InstructionCodeGeneratorARM::VisitExit(HExit* exit) {
   UNUSED(exit);
-  if (kIsDebugBuild) {
-    __ Comment("Unreachable");
-    __ bkpt(0);
-  }
 }
 
-void LocationsBuilderARM::VisitIf(HIf* if_instr) {
-  LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(if_instr, LocationSummary::kNoCall);
-  HInstruction* cond = if_instr->InputAt(0);
-  if (!cond->IsCondition() || cond->AsCondition()->NeedsMaterialization()) {
-    locations->SetInAt(0, Location::RequiresRegister());
-  }
-}
-
-void InstructionCodeGeneratorARM::VisitIf(HIf* if_instr) {
-  HInstruction* cond = if_instr->InputAt(0);
+void InstructionCodeGeneratorARM::GenerateTestAndBranch(HInstruction* instruction,
+                                                        Label* true_target,
+                                                        Label* false_target,
+                                                        Label* always_true_target) {
+  HInstruction* cond = instruction->InputAt(0);
   if (cond->IsIntConstant()) {
     // Constant condition, statically compared against 1.
     int32_t cond_value = cond->AsIntConstant()->GetValue();
     if (cond_value == 1) {
-      if (!codegen_->GoesToNextBlock(if_instr->GetBlock(),
-                                     if_instr->IfTrueSuccessor())) {
-        __ b(codegen_->GetLabelOf(if_instr->IfTrueSuccessor()));
+      if (always_true_target != nullptr) {
+        __ b(always_true_target);
       }
       return;
     } else {
@@ -935,10 +953,10 @@ void InstructionCodeGeneratorARM::VisitIf(HIf* if_instr) {
   } else {
     if (!cond->IsCondition() || cond->AsCondition()->NeedsMaterialization()) {
       // Condition has been materialized, compare the output to 0
-      DCHECK(if_instr->GetLocations()->InAt(0).IsRegister());
-      __ cmp(if_instr->GetLocations()->InAt(0).AsRegister<Register>(),
+      DCHECK(instruction->GetLocations()->InAt(0).IsRegister());
+      __ cmp(instruction->GetLocations()->InAt(0).AsRegister<Register>(),
              ShifterOperand(0));
-      __ b(codegen_->GetLabelOf(if_instr->IfTrueSuccessor()), NE);
+      __ b(true_target, NE);
     } else {
       // Condition has not been materialized, use its inputs as the
       // comparison and its condition as the branch condition.
@@ -960,16 +978,55 @@ void InstructionCodeGeneratorARM::VisitIf(HIf* if_instr) {
           __ cmp(left, ShifterOperand(temp));
         }
       }
-      __ b(codegen_->GetLabelOf(if_instr->IfTrueSuccessor()),
-           ARMCondition(cond->AsCondition()->GetCondition()));
+      __ b(true_target, ARMCondition(cond->AsCondition()->GetCondition()));
     }
   }
-  if (!codegen_->GoesToNextBlock(if_instr->GetBlock(),
-                                 if_instr->IfFalseSuccessor())) {
-    __ b(codegen_->GetLabelOf(if_instr->IfFalseSuccessor()));
+  if (false_target != nullptr) {
+    __ b(false_target);
   }
 }
 
+void LocationsBuilderARM::VisitIf(HIf* if_instr) {
+  LocationSummary* locations =
+      new (GetGraph()->GetArena()) LocationSummary(if_instr, LocationSummary::kNoCall);
+  HInstruction* cond = if_instr->InputAt(0);
+  if (!cond->IsCondition() || cond->AsCondition()->NeedsMaterialization()) {
+    locations->SetInAt(0, Location::RequiresRegister());
+  }
+}
+
+void InstructionCodeGeneratorARM::VisitIf(HIf* if_instr) {
+  Label* true_target = codegen_->GetLabelOf(if_instr->IfTrueSuccessor());
+  Label* false_target = codegen_->GetLabelOf(if_instr->IfFalseSuccessor());
+  Label* always_true_target = true_target;
+  if (codegen_->GoesToNextBlock(if_instr->GetBlock(),
+                                if_instr->IfTrueSuccessor())) {
+    always_true_target = nullptr;
+  }
+  if (codegen_->GoesToNextBlock(if_instr->GetBlock(),
+                                if_instr->IfFalseSuccessor())) {
+    false_target = nullptr;
+  }
+  GenerateTestAndBranch(if_instr, true_target, false_target, always_true_target);
+}
+
+void LocationsBuilderARM::VisitDeoptimize(HDeoptimize* deoptimize) {
+  LocationSummary* locations = new (GetGraph()->GetArena())
+      LocationSummary(deoptimize, LocationSummary::kCallOnSlowPath);
+  HInstruction* cond = deoptimize->InputAt(0);
+  DCHECK(cond->IsCondition());
+  if (cond->AsCondition()->NeedsMaterialization()) {
+    locations->SetInAt(0, Location::RequiresRegister());
+  }
+}
+
+void InstructionCodeGeneratorARM::VisitDeoptimize(HDeoptimize* deoptimize) {
+  SlowPathCodeARM* slow_path = new (GetGraph()->GetArena())
+      DeoptimizationSlowPathARM(deoptimize);
+  codegen_->AddSlowPath(slow_path);
+  Label* slow_path_entry = slow_path->GetEntryLabel();
+  GenerateTestAndBranch(deoptimize, slow_path_entry, nullptr, slow_path_entry);
+}
 
 void LocationsBuilderARM::VisitCondition(HCondition* comp) {
   LocationSummary* locations =
@@ -1155,6 +1212,14 @@ void InstructionCodeGeneratorARM::VisitDoubleConstant(HDoubleConstant* constant)
   UNUSED(constant);
 }
 
+void LocationsBuilderARM::VisitMemoryBarrier(HMemoryBarrier* memory_barrier) {
+  memory_barrier->SetLocations(nullptr);
+}
+
+void InstructionCodeGeneratorARM::VisitMemoryBarrier(HMemoryBarrier* memory_barrier) {
+  GenerateMemoryBarrier(memory_barrier->GetBarrierKind());
+}
+
 void LocationsBuilderARM::VisitReturnVoid(HReturnVoid* ret) {
   ret->SetLocations(nullptr);
 }
@@ -1176,6 +1241,10 @@ void InstructionCodeGeneratorARM::VisitReturn(HReturn* ret) {
 }
 
 void LocationsBuilderARM::VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) {
+  // When we do not run baseline, explicit clinit checks triggered by static
+  // invokes must have been pruned by art::PrepareForRegisterAllocation.
+  DCHECK(codegen_->IsBaseline() || !invoke->IsStaticWithExplicitClinitCheck());
+
   IntrinsicLocationsBuilderARM intrinsic(GetGraph()->GetArena(),
                                          codegen_->GetInstructionSetFeatures());
   if (intrinsic.TryDispatch(invoke)) {
@@ -1200,6 +1269,10 @@ static bool TryGenerateIntrinsicCode(HInvoke* invoke, CodeGeneratorARM* codegen)
 }
 
 void InstructionCodeGeneratorARM::VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) {
+  // When we do not run baseline, explicit clinit checks triggered by static
+  // invokes must have been pruned by art::PrepareForRegisterAllocation.
+  DCHECK(codegen_->IsBaseline() || !invoke->IsStaticWithExplicitClinitCheck());
+
   if (TryGenerateIntrinsicCode(invoke, codegen_)) {
     return;
   }
@@ -1215,8 +1288,8 @@ void LocationsBuilderARM::HandleInvoke(HInvoke* invoke) {
       new (GetGraph()->GetArena()) LocationSummary(invoke, LocationSummary::kCall);
   locations->AddTemp(Location::RegisterLocation(R0));
 
-  InvokeDexCallingConventionVisitor calling_convention_visitor;
-  for (size_t i = 0; i < invoke->InputCount(); i++) {
+  InvokeDexCallingConventionVisitorARM calling_convention_visitor;
+  for (size_t i = 0; i < invoke->GetNumberOfArguments(); i++) {
     HInstruction* input = invoke->InputAt(i);
     locations->SetInAt(i, calling_convention_visitor.GetNextLocation(input->GetType()));
   }
@@ -1392,9 +1465,14 @@ void LocationsBuilderARM::VisitTypeConversion(HTypeConversion* conversion) {
   LocationSummary* locations =
       new (GetGraph()->GetArena()) LocationSummary(conversion, call_kind);
 
+  // The Java language does not allow treating boolean as an integral type but
+  // our bit representation makes it safe.
+
   switch (result_type) {
     case Primitive::kPrimByte:
       switch (input_type) {
+        case Primitive::kPrimBoolean:
+          // Boolean input is a result of code transformations.
         case Primitive::kPrimShort:
         case Primitive::kPrimInt:
         case Primitive::kPrimChar:
@@ -1411,6 +1489,8 @@ void LocationsBuilderARM::VisitTypeConversion(HTypeConversion* conversion) {
 
     case Primitive::kPrimShort:
       switch (input_type) {
+        case Primitive::kPrimBoolean:
+          // Boolean input is a result of code transformations.
         case Primitive::kPrimByte:
         case Primitive::kPrimInt:
         case Primitive::kPrimChar:
@@ -1455,6 +1535,8 @@ void LocationsBuilderARM::VisitTypeConversion(HTypeConversion* conversion) {
 
     case Primitive::kPrimLong:
       switch (input_type) {
+        case Primitive::kPrimBoolean:
+          // Boolean input is a result of code transformations.
         case Primitive::kPrimByte:
         case Primitive::kPrimShort:
         case Primitive::kPrimInt:
@@ -1491,6 +1573,8 @@ void LocationsBuilderARM::VisitTypeConversion(HTypeConversion* conversion) {
 
     case Primitive::kPrimChar:
       switch (input_type) {
+        case Primitive::kPrimBoolean:
+          // Boolean input is a result of code transformations.
         case Primitive::kPrimByte:
         case Primitive::kPrimShort:
         case Primitive::kPrimInt:
@@ -1507,6 +1591,8 @@ void LocationsBuilderARM::VisitTypeConversion(HTypeConversion* conversion) {
 
     case Primitive::kPrimFloat:
       switch (input_type) {
+        case Primitive::kPrimBoolean:
+          // Boolean input is a result of code transformations.
         case Primitive::kPrimByte:
         case Primitive::kPrimShort:
         case Primitive::kPrimInt:
@@ -1540,6 +1626,8 @@ void LocationsBuilderARM::VisitTypeConversion(HTypeConversion* conversion) {
 
     case Primitive::kPrimDouble:
       switch (input_type) {
+        case Primitive::kPrimBoolean:
+          // Boolean input is a result of code transformations.
         case Primitive::kPrimByte:
         case Primitive::kPrimShort:
         case Primitive::kPrimInt:
@@ -1586,6 +1674,8 @@ void InstructionCodeGeneratorARM::VisitTypeConversion(HTypeConversion* conversio
   switch (result_type) {
     case Primitive::kPrimByte:
       switch (input_type) {
+        case Primitive::kPrimBoolean:
+          // Boolean input is a result of code transformations.
         case Primitive::kPrimShort:
         case Primitive::kPrimInt:
         case Primitive::kPrimChar:
@@ -1601,6 +1691,8 @@ void InstructionCodeGeneratorARM::VisitTypeConversion(HTypeConversion* conversio
 
     case Primitive::kPrimShort:
       switch (input_type) {
+        case Primitive::kPrimBoolean:
+          // Boolean input is a result of code transformations.
         case Primitive::kPrimByte:
         case Primitive::kPrimInt:
         case Primitive::kPrimChar:
@@ -1658,6 +1750,8 @@ void InstructionCodeGeneratorARM::VisitTypeConversion(HTypeConversion* conversio
 
     case Primitive::kPrimLong:
       switch (input_type) {
+        case Primitive::kPrimBoolean:
+          // Boolean input is a result of code transformations.
         case Primitive::kPrimByte:
         case Primitive::kPrimShort:
         case Primitive::kPrimInt:
@@ -1696,6 +1790,8 @@ void InstructionCodeGeneratorARM::VisitTypeConversion(HTypeConversion* conversio
 
     case Primitive::kPrimChar:
       switch (input_type) {
+        case Primitive::kPrimBoolean:
+          // Boolean input is a result of code transformations.
         case Primitive::kPrimByte:
         case Primitive::kPrimShort:
         case Primitive::kPrimInt:
@@ -1711,6 +1807,8 @@ void InstructionCodeGeneratorARM::VisitTypeConversion(HTypeConversion* conversio
 
     case Primitive::kPrimFloat:
       switch (input_type) {
+        case Primitive::kPrimBoolean:
+          // Boolean input is a result of code transformations.
         case Primitive::kPrimByte:
         case Primitive::kPrimShort:
         case Primitive::kPrimInt:
@@ -1777,6 +1875,8 @@ void InstructionCodeGeneratorARM::VisitTypeConversion(HTypeConversion* conversio
 
     case Primitive::kPrimDouble:
       switch (input_type) {
+        case Primitive::kPrimBoolean:
+          // Boolean input is a result of code transformations.
         case Primitive::kPrimByte:
         case Primitive::kPrimShort:
         case Primitive::kPrimInt:
@@ -2082,16 +2182,32 @@ void InstructionCodeGeneratorARM::VisitMul(HMul* mul) {
 }
 
 void LocationsBuilderARM::VisitDiv(HDiv* div) {
-  LocationSummary::CallKind call_kind = div->GetResultType() == Primitive::kPrimLong
-      ? LocationSummary::kCall
-      : LocationSummary::kNoCall;
+  LocationSummary::CallKind call_kind = LocationSummary::kNoCall;
+  if (div->GetResultType() == Primitive::kPrimLong) {
+    // pLdiv runtime call.
+    call_kind = LocationSummary::kCall;
+  } else if (div->GetResultType() == Primitive::kPrimInt &&
+             !codegen_->GetInstructionSetFeatures().HasDivideInstruction()) {
+    // pIdivmod runtime call.
+    call_kind = LocationSummary::kCall;
+  }
+
   LocationSummary* locations = new (GetGraph()->GetArena()) LocationSummary(div, call_kind);
 
   switch (div->GetResultType()) {
     case Primitive::kPrimInt: {
-      locations->SetInAt(0, Location::RequiresRegister());
-      locations->SetInAt(1, Location::RequiresRegister());
-      locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
+      if (codegen_->GetInstructionSetFeatures().HasDivideInstruction()) {
+        locations->SetInAt(0, Location::RequiresRegister());
+        locations->SetInAt(1, Location::RequiresRegister());
+        locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
+      } else {
+        InvokeRuntimeCallingConvention calling_convention;
+        locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
+        locations->SetInAt(1, Location::RegisterLocation(calling_convention.GetRegisterAt(1)));
+        // Note: divrem will compute both the quotient and the remainder as the pair R0 and R1, but
+        //       we only need the former.
+        locations->SetOut(Location::RegisterLocation(R0));
+      }
       break;
     }
     case Primitive::kPrimLong: {
@@ -2124,9 +2240,18 @@ void InstructionCodeGeneratorARM::VisitDiv(HDiv* div) {
 
   switch (div->GetResultType()) {
     case Primitive::kPrimInt: {
-      __ sdiv(out.AsRegister<Register>(),
-              first.AsRegister<Register>(),
-              second.AsRegister<Register>());
+      if (codegen_->GetInstructionSetFeatures().HasDivideInstruction()) {
+        __ sdiv(out.AsRegister<Register>(),
+                first.AsRegister<Register>(),
+                second.AsRegister<Register>());
+      } else {
+        InvokeRuntimeCallingConvention calling_convention;
+        DCHECK_EQ(calling_convention.GetRegisterAt(0), first.AsRegister<Register>());
+        DCHECK_EQ(calling_convention.GetRegisterAt(1), second.AsRegister<Register>());
+        DCHECK_EQ(R0, out.AsRegister<Register>());
+
+        codegen_->InvokeRuntime(QUICK_ENTRY_POINT(pIdivmod), div, div->GetDexPc(), nullptr);
+      }
       break;
     }
 
@@ -2164,17 +2289,32 @@ void InstructionCodeGeneratorARM::VisitDiv(HDiv* div) {
 
 void LocationsBuilderARM::VisitRem(HRem* rem) {
   Primitive::Type type = rem->GetResultType();
-  LocationSummary::CallKind call_kind = type == Primitive::kPrimInt
-      ? LocationSummary::kNoCall
-      : LocationSummary::kCall;
+
+  // Most remainders are implemented in the runtime.
+  LocationSummary::CallKind call_kind = LocationSummary::kCall;
+  if (rem->GetResultType() == Primitive::kPrimInt &&
+      codegen_->GetInstructionSetFeatures().HasDivideInstruction()) {
+    // Have hardware divide instruction for int, do it with three instructions.
+    call_kind = LocationSummary::kNoCall;
+  }
+
   LocationSummary* locations = new (GetGraph()->GetArena()) LocationSummary(rem, call_kind);
 
   switch (type) {
     case Primitive::kPrimInt: {
-      locations->SetInAt(0, Location::RequiresRegister());
-      locations->SetInAt(1, Location::RequiresRegister());
-      locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
-      locations->AddTemp(Location::RequiresRegister());
+      if (codegen_->GetInstructionSetFeatures().HasDivideInstruction()) {
+        locations->SetInAt(0, Location::RequiresRegister());
+        locations->SetInAt(1, Location::RequiresRegister());
+        locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
+        locations->AddTemp(Location::RequiresRegister());
+      } else {
+        InvokeRuntimeCallingConvention calling_convention;
+        locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
+        locations->SetInAt(1, Location::RegisterLocation(calling_convention.GetRegisterAt(1)));
+        // Note: divrem will compute both the quotient and the remainder as the pair R0 and R1, but
+        //       we only need the latter.
+        locations->SetOut(Location::RegisterLocation(R1));
+      }
       break;
     }
     case Primitive::kPrimLong: {
@@ -2219,16 +2359,25 @@ void InstructionCodeGeneratorARM::VisitRem(HRem* rem) {
   Primitive::Type type = rem->GetResultType();
   switch (type) {
     case Primitive::kPrimInt: {
-      Register reg1 = first.AsRegister<Register>();
-      Register reg2 = second.AsRegister<Register>();
-      Register temp = locations->GetTemp(0).AsRegister<Register>();
+      if (codegen_->GetInstructionSetFeatures().HasDivideInstruction()) {
+        Register reg1 = first.AsRegister<Register>();
+        Register reg2 = second.AsRegister<Register>();
+        Register temp = locations->GetTemp(0).AsRegister<Register>();
 
-      // temp = reg1 / reg2  (integer division)
-      // temp = temp * reg2
-      // dest = reg1 - temp
-      __ sdiv(temp, reg1, reg2);
-      __ mul(temp, temp, reg2);
-      __ sub(out.AsRegister<Register>(), reg1, ShifterOperand(temp));
+        // temp = reg1 / reg2  (integer division)
+        // temp = temp * reg2
+        // dest = reg1 - temp
+        __ sdiv(temp, reg1, reg2);
+        __ mul(temp, temp, reg2);
+        __ sub(out.AsRegister<Register>(), reg1, ShifterOperand(temp));
+      } else {
+        InvokeRuntimeCallingConvention calling_convention;
+        DCHECK_EQ(calling_convention.GetRegisterAt(0), first.AsRegister<Register>());
+        DCHECK_EQ(calling_convention.GetRegisterAt(1), second.AsRegister<Register>());
+        DCHECK_EQ(R1, out.AsRegister<Register>());
+
+        codegen_->InvokeRuntime(QUICK_ENTRY_POINT(pIdivmod), rem, rem->GetDexPc(), nullptr);
+      }
       break;
     }
 
@@ -2303,10 +2452,8 @@ void InstructionCodeGeneratorARM::VisitDivZeroCheck(HDivZeroCheck* instruction) 
 void LocationsBuilderARM::HandleShift(HBinaryOperation* op) {
   DCHECK(op->IsShl() || op->IsShr() || op->IsUShr());
 
-  LocationSummary::CallKind call_kind = op->GetResultType() == Primitive::kPrimLong
-      ? LocationSummary::kCall
-      : LocationSummary::kNoCall;
-  LocationSummary* locations = new (GetGraph()->GetArena()) LocationSummary(op, call_kind);
+  LocationSummary* locations =
+      new (GetGraph()->GetArena()) LocationSummary(op, LocationSummary::kNoCall);
 
   switch (op->GetResultType()) {
     case Primitive::kPrimInt: {
@@ -2316,12 +2463,10 @@ void LocationsBuilderARM::HandleShift(HBinaryOperation* op) {
       break;
     }
     case Primitive::kPrimLong: {
-      InvokeRuntimeCallingConvention calling_convention;
-      locations->SetInAt(0, Location::RegisterPairLocation(
-          calling_convention.GetRegisterAt(0), calling_convention.GetRegisterAt(1)));
-      locations->SetInAt(1, Location::RegisterLocation(calling_convention.GetRegisterAt(2)));
-      // The runtime helper puts the output in R0,R1.
-      locations->SetOut(Location::RegisterPairLocation(R0, R1));
+      locations->SetInAt(0, Location::RequiresRegister());
+      locations->SetInAt(1, Location::RequiresRegister());
+      locations->AddTemp(Location::RequiresRegister());
+      locations->SetOut(Location::RequiresRegister());
       break;
     }
     default:
@@ -2369,24 +2514,56 @@ void InstructionCodeGeneratorARM::HandleShift(HBinaryOperation* op) {
       break;
     }
     case Primitive::kPrimLong: {
-      // TODO: Inline the assembly instead of calling the runtime.
-      InvokeRuntimeCallingConvention calling_convention;
-      DCHECK_EQ(calling_convention.GetRegisterAt(0), first.AsRegisterPairLow<Register>());
-      DCHECK_EQ(calling_convention.GetRegisterAt(1), first.AsRegisterPairHigh<Register>());
-      DCHECK_EQ(calling_convention.GetRegisterAt(2), second.AsRegister<Register>());
-      DCHECK_EQ(R0, out.AsRegisterPairLow<Register>());
-      DCHECK_EQ(R1, out.AsRegisterPairHigh<Register>());
+      Register o_h = out.AsRegisterPairHigh<Register>();
+      Register o_l = out.AsRegisterPairLow<Register>();
 
-      int32_t entry_point_offset;
+      Register temp = locations->GetTemp(0).AsRegister<Register>();
+
+      Register high = first.AsRegisterPairHigh<Register>();
+      Register low = first.AsRegisterPairLow<Register>();
+
+      Register second_reg = second.AsRegister<Register>();
+
       if (op->IsShl()) {
-        entry_point_offset = QUICK_ENTRY_POINT(pShlLong);
+        // Shift the high part
+        __ and_(second_reg, second_reg, ShifterOperand(63));
+        __ Lsl(o_h, high, second_reg);
+        // Shift the low part and `or` what overflew on the high part
+        __ rsb(temp, second_reg, ShifterOperand(32));
+        __ Lsr(temp, low, temp);
+        __ orr(o_h, o_h, ShifterOperand(temp));
+        // If the shift is > 32 bits, override the high part
+        __ subs(temp, second_reg, ShifterOperand(32));
+        __ it(PL);
+        __ Lsl(o_h, low, temp, false, PL);
+        // Shift the low part
+        __ Lsl(o_l, low, second_reg);
       } else if (op->IsShr()) {
-        entry_point_offset = QUICK_ENTRY_POINT(pShrLong);
+        // Shift the low part
+        __ and_(second_reg, second_reg, ShifterOperand(63));
+        __ Lsr(o_l, low, second_reg);
+        // Shift the high part and `or` what underflew on the low part
+        __ rsb(temp, second_reg, ShifterOperand(32));
+        __ Lsl(temp, high, temp);
+        __ orr(o_l, o_l, ShifterOperand(temp));
+        // If the shift is > 32 bits, override the low part
+        __ subs(temp, second_reg, ShifterOperand(32));
+        __ it(PL);
+        __ Asr(o_l, high, temp, false, PL);
+        // Shift the high part
+        __ Asr(o_h, high, second_reg);
       } else {
-        entry_point_offset = QUICK_ENTRY_POINT(pUshrLong);
+        // same as Shr except we use `Lsr`s and not `Asr`s
+        __ and_(second_reg, second_reg, ShifterOperand(63));
+        __ Lsr(o_l, low, second_reg);
+        __ rsb(temp, second_reg, ShifterOperand(32));
+        __ Lsl(temp, high, temp);
+        __ orr(o_l, o_l, ShifterOperand(temp));
+        __ subs(temp, second_reg, ShifterOperand(32));
+        __ it(PL);
+        __ Lsr(o_l, high, temp, false, PL);
+        __ Lsr(o_h, high, second_reg);
       }
-      __ LoadFromOffset(kLoadWord, LR, TR, entry_point_offset);
-      __ blx(LR);
       break;
     }
     default:
@@ -2500,6 +2677,20 @@ void InstructionCodeGeneratorARM::VisitNot(HNot* not_) {
     default:
       LOG(FATAL) << "Unimplemented type for not operation " << not_->GetResultType();
   }
+}
+
+void LocationsBuilderARM::VisitBooleanNot(HBooleanNot* bool_not) {
+  LocationSummary* locations =
+      new (GetGraph()->GetArena()) LocationSummary(bool_not, LocationSummary::kNoCall);
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
+}
+
+void InstructionCodeGeneratorARM::VisitBooleanNot(HBooleanNot* bool_not) {
+  LocationSummary* locations = bool_not->GetLocations();
+  Location out = locations->Out();
+  Location in = locations->InAt(0);
+  __ eor(out.AsRegister<Register>(), in.AsRegister<Register>(), ShifterOperand(1));
 }
 
 void LocationsBuilderARM::VisitCompare(HCompare* compare) {
@@ -2649,10 +2840,14 @@ void LocationsBuilderARM::HandleFieldSet(HInstruction* instruction, const FieldI
   LocationSummary* locations =
       new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kNoCall);
   locations->SetInAt(0, Location::RequiresRegister());
-  locations->SetInAt(1, Location::RequiresRegister());
-
 
   Primitive::Type field_type = field_info.GetFieldType();
+  if (Primitive::IsFloatingPointType(field_type)) {
+    locations->SetInAt(1, Location::RequiresFpuRegister());
+  } else {
+    locations->SetInAt(1, Location::RequiresRegister());
+  }
+
   bool is_wide = field_type == Primitive::kPrimLong || field_type == Primitive::kPrimDouble;
   bool generate_volatile = field_info.IsVolatile()
       && is_wide
@@ -2788,8 +2983,13 @@ void LocationsBuilderARM::HandleFieldGet(HInstruction* instruction, const FieldI
       && (field_info.GetFieldType() == Primitive::kPrimDouble)
       && !codegen_->GetInstructionSetFeatures().HasAtomicLdrdAndStrd();
   bool overlap = field_info.IsVolatile() && (field_info.GetFieldType() == Primitive::kPrimLong);
-  locations->SetOut(Location::RequiresRegister(),
-                    (overlap ? Location::kOutputOverlap : Location::kNoOutputOverlap));
+
+  if (Primitive::IsFloatingPointType(instruction->GetType())) {
+    locations->SetOut(Location::RequiresFpuRegister());
+  } else {
+    locations->SetOut(Location::RequiresRegister(),
+                      (overlap ? Location::kOutputOverlap : Location::kNoOutputOverlap));
+  }
   if (volatile_for_double) {
     // Arm encoding have some additional constraints for ldrexd/strexd:
     // - registers need to be consecutive
@@ -2962,7 +3162,11 @@ void LocationsBuilderARM::VisitArrayGet(HArrayGet* instruction) {
       new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kNoCall);
   locations->SetInAt(0, Location::RequiresRegister());
   locations->SetInAt(1, Location::RegisterOrConstant(instruction->InputAt(1)));
-  locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
+  if (Primitive::IsFloatingPointType(instruction->GetType())) {
+    locations->SetOut(Location::RequiresFpuRegister(), Location::kNoOutputOverlap);
+  } else {
+    locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
+  }
 }
 
 void InstructionCodeGeneratorARM::VisitArrayGet(HArrayGet* instruction) {
@@ -3109,7 +3313,11 @@ void LocationsBuilderARM::VisitArraySet(HArraySet* instruction) {
   } else {
     locations->SetInAt(0, Location::RequiresRegister());
     locations->SetInAt(1, Location::RegisterOrConstant(instruction->InputAt(1)));
-    locations->SetInAt(2, Location::RequiresRegister());
+    if (Primitive::IsFloatingPointType(value_type)) {
+      locations->SetInAt(2, Location::RequiresFpuRegister());
+    } else {
+      locations->SetInAt(2, Location::RequiresRegister());
+    }
 
     if (needs_write_barrier) {
       // Temporary registers for the write barrier.
@@ -3696,9 +3904,11 @@ void InstructionCodeGeneratorARM::VisitInstanceOf(HInstanceOf* instruction) {
   SlowPathCodeARM* slow_path = nullptr;
 
   // Return 0 if `obj` is null.
-  // TODO: avoid this check if we know obj is not null.
-  __ cmp(obj, ShifterOperand(0));
-  __ b(&zero, EQ);
+  // avoid null check if we know obj is not null.
+  if (instruction->MustDoNullCheck()) {
+    __ cmp(obj, ShifterOperand(0));
+    __ b(&zero, EQ);
+  }
   // Compare the class of `obj` with `cls`.
   __ LoadFromOffset(kLoadWord, out, obj, class_offset);
   __ cmp(out, ShifterOperand(cls));
@@ -3717,8 +3927,12 @@ void InstructionCodeGeneratorARM::VisitInstanceOf(HInstanceOf* instruction) {
     __ LoadImmediate(out, 1);
     __ b(&done);
   }
-  __ Bind(&zero);
-  __ LoadImmediate(out, 0);
+
+  if (instruction->MustDoNullCheck() || instruction->IsClassFinal()) {
+    __ Bind(&zero);
+    __ LoadImmediate(out, 0);
+  }
+
   if (slow_path != nullptr) {
     __ Bind(slow_path->GetExitLabel());
   }
@@ -3744,9 +3958,11 @@ void InstructionCodeGeneratorARM::VisitCheckCast(HCheckCast* instruction) {
       instruction, locations->InAt(1), locations->GetTemp(0), instruction->GetDexPc());
   codegen_->AddSlowPath(slow_path);
 
-  // TODO: avoid this check if we know obj is not null.
-  __ cmp(obj, ShifterOperand(0));
-  __ b(slow_path->GetExitLabel(), EQ);
+  // avoid null check if we know obj is not null.
+  if (instruction->MustDoNullCheck()) {
+    __ cmp(obj, ShifterOperand(0));
+    __ b(slow_path->GetExitLabel(), EQ);
+  }
   // Compare the class of `obj` with `cls`.
   __ LoadFromOffset(kLoadWord, temp, obj, class_offset);
   __ cmp(temp, ShifterOperand(cls));
@@ -3851,15 +4067,9 @@ void CodeGeneratorARM::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke,
   //
   // Currently we implement the app -> app logic, which looks up in the resolve cache.
 
-  // temp = method;
-  LoadCurrentMethod(temp);
-  if (!invoke->IsRecursive()) {
-    // temp = temp->dex_cache_resolved_methods_;
-    __ LoadFromOffset(
-        kLoadWord, temp, temp, mirror::ArtMethod::DexCacheResolvedMethodsOffset().Int32Value());
-    // temp = temp[index_in_cache]
-    __ LoadFromOffset(
-        kLoadWord, temp, temp, CodeGenerator::GetCacheOffset(invoke->GetDexMethodIndex()));
+  if (invoke->IsStringInit()) {
+    // temp = thread->string_init_entrypoint
+    __ LoadFromOffset(kLoadWord, temp, TR, invoke->GetStringInitOffset());
     // LR = temp[offset_of_quick_compiled_code]
     __ LoadFromOffset(kLoadWord, LR, temp,
                       mirror::ArtMethod::EntryPointFromQuickCompiledCodeOffset(
@@ -3867,7 +4077,24 @@ void CodeGeneratorARM::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke,
     // LR()
     __ blx(LR);
   } else {
-    __ bl(GetFrameEntryLabel());
+    // temp = method;
+    LoadCurrentMethod(temp);
+    if (!invoke->IsRecursive()) {
+      // temp = temp->dex_cache_resolved_methods_;
+      __ LoadFromOffset(
+          kLoadWord, temp, temp, mirror::ArtMethod::DexCacheResolvedMethodsOffset().Int32Value());
+      // temp = temp[index_in_cache]
+      __ LoadFromOffset(
+          kLoadWord, temp, temp, CodeGenerator::GetCacheOffset(invoke->GetDexMethodIndex()));
+      // LR = temp[offset_of_quick_compiled_code]
+      __ LoadFromOffset(kLoadWord, LR, temp,
+                        mirror::ArtMethod::EntryPointFromQuickCompiledCodeOffset(
+                            kArmWordSize).Int32Value());
+      // LR()
+      __ blx(LR);
+    } else {
+      __ bl(GetFrameEntryLabel());
+    }
   }
 
   DCHECK(!IsLeafMethod());

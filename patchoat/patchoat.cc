@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "art_field-inl.h"
 #include "base/dumpable.h"
 #include "base/scoped_flock.h"
 #include "base/stringpiece.h"
@@ -34,7 +35,6 @@
 #include "elf_file_impl.h"
 #include "gc/space/image_space.h"
 #include "image.h"
-#include "mirror/art_field-inl.h"
 #include "mirror/art_method-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/reference.h"
@@ -415,12 +415,63 @@ bool PatchOat::ReplaceOatFileWithSymlink(const std::string& input_oat_filename,
   return true;
 }
 
+void PatchOat::PatchArtFields(const ImageHeader* image_header) {
+  const size_t art_field_size = image_header->GetArtFieldsSize();
+  const size_t art_field_offset = image_header->GetArtFieldsOffset();
+  for (size_t pos = 0; pos < art_field_size; pos += sizeof(ArtField)) {
+    auto* field = reinterpret_cast<ArtField*>(heap_->Begin() + art_field_offset + pos);
+    auto* dest_field = RelocatedCopyOf(field);
+    dest_field->SetDeclaringClass(RelocatedAddressOfPointer(field->GetDeclaringClass()));
+  }
+}
+
+void PatchOat::PatchDexFileArrays(mirror::ObjectArray<mirror::Object>* img_roots) {
+  auto* dex_caches = down_cast<mirror::ObjectArray<mirror::DexCache>*>(
+      img_roots->Get(ImageHeader::kDexCaches));
+  for (size_t i = 0, count = dex_caches->GetLength(); i < count; ++i) {
+    auto* dex_cache = dex_caches->GetWithoutChecks(i);
+    auto* fields = dex_cache->GetResolvedFields();
+    if (fields == nullptr) {
+      continue;
+    }
+    CHECK(!fields->IsObjectArray());
+    CHECK(fields->IsArrayInstance());
+    auto* component_type = fields->GetClass()->GetComponentType();
+    if (component_type->IsPrimitiveInt()) {
+      mirror::IntArray* arr = fields->AsIntArray();
+      mirror::IntArray* copy_arr = down_cast<mirror::IntArray*>(RelocatedCopyOf(arr));
+      for (size_t j = 0, count2 = arr->GetLength(); j < count2; ++j) {
+        auto f = arr->GetWithoutChecks(j);
+        if (f != 0) {
+          copy_arr->SetWithoutChecks<false>(j, f + delta_);
+        }
+      }
+    } else {
+      CHECK(component_type->IsPrimitiveLong());
+      mirror::LongArray* arr = fields->AsLongArray();
+      mirror::LongArray* copy_arr = down_cast<mirror::LongArray*>(RelocatedCopyOf(arr));
+      for (size_t j = 0, count2 = arr->GetLength(); j < count2; ++j) {
+        auto f = arr->GetWithoutChecks(j);
+        if (f != 0) {
+          copy_arr->SetWithoutChecks<false>(j, f + delta_);
+        }
+      }
+    }
+  }
+}
+
 bool PatchOat::PatchImage() {
   ImageHeader* image_header = reinterpret_cast<ImageHeader*>(image_->Begin());
   CHECK_GT(image_->Size(), sizeof(ImageHeader));
   // These are the roots from the original file.
-  mirror::Object* img_roots = image_header->GetImageRoots();
+  auto* img_roots = image_header->GetImageRoots();
   image_header->RelocateImage(delta_);
+
+  // Patch and update ArtFields.
+  PatchArtFields(image_header);
+
+  // Patch dex file int/long arrays which point to ArtFields.
+  PatchDexFileArrays(img_roots);
 
   VisitObject(img_roots);
   if (!image_header->IsValid()) {
@@ -448,7 +499,7 @@ void PatchOat::PatchVisitor::operator() (mirror::Object* obj, MemberOffset off,
                                          bool is_static_unused ATTRIBUTE_UNUSED) const {
   mirror::Object* referent = obj->GetFieldObject<mirror::Object, kVerifyNone>(off);
   DCHECK(patcher_->InHeap(referent)) << "Referent is not in the heap.";
-  mirror::Object* moved_object = patcher_->RelocatedAddressOf(referent);
+  mirror::Object* moved_object = patcher_->RelocatedAddressOfPointer(referent);
   copy_->SetFieldObjectWithoutWriteBarrier<false, true, kVerifyNone>(off, moved_object);
 }
 
@@ -457,28 +508,8 @@ void PatchOat::PatchVisitor::operator() (mirror::Class* cls ATTRIBUTE_UNUSED,
   MemberOffset off = mirror::Reference::ReferentOffset();
   mirror::Object* referent = ref->GetReferent();
   DCHECK(patcher_->InHeap(referent)) << "Referent is not in the heap.";
-  mirror::Object* moved_object = patcher_->RelocatedAddressOf(referent);
+  mirror::Object* moved_object = patcher_->RelocatedAddressOfPointer(referent);
   copy_->SetFieldObjectWithoutWriteBarrier<false, true, kVerifyNone>(off, moved_object);
-}
-
-mirror::Object* PatchOat::RelocatedCopyOf(mirror::Object* obj) {
-  if (obj == nullptr) {
-    return nullptr;
-  }
-  DCHECK_GT(reinterpret_cast<uintptr_t>(obj), reinterpret_cast<uintptr_t>(heap_->Begin()));
-  DCHECK_LT(reinterpret_cast<uintptr_t>(obj), reinterpret_cast<uintptr_t>(heap_->End()));
-  uintptr_t heap_off =
-      reinterpret_cast<uintptr_t>(obj) - reinterpret_cast<uintptr_t>(heap_->Begin());
-  DCHECK_LT(heap_off, image_->Size());
-  return reinterpret_cast<mirror::Object*>(image_->Begin() + heap_off);
-}
-
-mirror::Object* PatchOat::RelocatedAddressOf(mirror::Object* obj) {
-  if (obj == nullptr) {
-    return nullptr;
-  } else {
-    return reinterpret_cast<mirror::Object*>(reinterpret_cast<uint8_t*>(obj) + delta_);
-  }
 }
 
 const OatHeader* PatchOat::GetOatHeader(const ElfFile* elf_file) {
@@ -507,7 +538,7 @@ void PatchOat::VisitObject(mirror::Object* object) {
   if (kUseBakerOrBrooksReadBarrier) {
     object->AssertReadBarrierPointer();
     if (kUseBrooksReadBarrier) {
-      mirror::Object* moved_to = RelocatedAddressOf(object);
+      mirror::Object* moved_to = RelocatedAddressOfPointer(object);
       copy->SetReadBarrierPointer(moved_to);
       DCHECK_EQ(copy->GetReadBarrierPointer(), moved_to);
     }
@@ -516,6 +547,12 @@ void PatchOat::VisitObject(mirror::Object* object) {
   object->VisitReferences<true, kVerifyNone>(visitor, visitor);
   if (object->IsArtMethod<kVerifyNone>()) {
     FixupMethod(down_cast<mirror::ArtMethod*>(object), down_cast<mirror::ArtMethod*>(copy));
+  } else if (object->IsClass<kVerifyNone>()) {
+    mirror::Class* klass = down_cast<mirror::Class*>(object);
+    down_cast<mirror::Class*>(copy)->SetSFieldsUnchecked(
+        RelocatedAddressOfPointer(klass->GetSFields()));
+    down_cast<mirror::Class*>(copy)->SetIFieldsUnchecked(
+        RelocatedAddressOfPointer(klass->GetIFields()));
   }
 }
 
@@ -588,35 +625,6 @@ bool PatchOat::Patch(File* input_oat, off_t delta, File* output_oat, TimingLogge
   return true;
 }
 
-template <typename ElfFileImpl, typename ptr_t>
-bool PatchOat::CheckOatFile(ElfFileImpl* oat_file) {
-  auto patches_sec = oat_file->FindSectionByName(".oat_patches");
-  if (patches_sec->sh_type != SHT_OAT_PATCH) {
-    return false;
-  }
-  ptr_t* patches = reinterpret_cast<ptr_t*>(oat_file->Begin() + patches_sec->sh_offset);
-  ptr_t* patches_end = patches + (patches_sec->sh_size / sizeof(ptr_t));
-  auto oat_data_sec = oat_file->FindSectionByName(".rodata");
-  auto oat_text_sec = oat_file->FindSectionByName(".text");
-  if (oat_data_sec == nullptr) {
-    return false;
-  }
-  if (oat_text_sec == nullptr) {
-    return false;
-  }
-  if (oat_text_sec->sh_offset <= oat_data_sec->sh_offset) {
-    return false;
-  }
-
-  for (; patches < patches_end; patches++) {
-    if (oat_text_sec->sh_size <= *patches) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
 template <typename ElfFileImpl>
 bool PatchOat::PatchOatHeader(ElfFileImpl* oat_file) {
   auto rodata_sec = oat_file->FindSectionByName(".rodata");
@@ -642,7 +650,7 @@ bool PatchOat::PatchElf() {
 template <typename ElfFileImpl>
 bool PatchOat::PatchElf(ElfFileImpl* oat_file) {
   TimingLogger::ScopedTiming t("Fixup Elf Text Section", timings_);
-  if (!PatchTextSection<ElfFileImpl>(oat_file)) {
+  if (!oat_file->ApplyOatPatchesTo(".text", delta_)) {
     return false;
   }
 
@@ -691,51 +699,6 @@ bool PatchOat::PatchElf(ElfFileImpl* oat_file) {
     return false;
   }
 
-  return true;
-}
-
-template <typename ElfFileImpl>
-bool PatchOat::PatchTextSection(ElfFileImpl* oat_file) {
-  auto patches_sec = oat_file->FindSectionByName(".oat_patches");
-  if (patches_sec == nullptr) {
-    LOG(ERROR) << ".oat_patches section not found. Aborting patch";
-    return false;
-  }
-  if (patches_sec->sh_type != SHT_OAT_PATCH) {
-    LOG(ERROR) << "Unexpected type of .oat_patches";
-    return false;
-  }
-
-  switch (patches_sec->sh_entsize) {
-    case sizeof(uint32_t):
-      return PatchTextSection<ElfFileImpl, uint32_t>(oat_file);
-    case sizeof(uint64_t):
-      return PatchTextSection<ElfFileImpl, uint64_t>(oat_file);
-    default:
-      LOG(ERROR) << ".oat_patches Entsize of " << patches_sec->sh_entsize << "bits "
-                 << "is not valid";
-      return false;
-  }
-}
-
-template <typename ElfFileImpl, typename patch_loc_t>
-bool PatchOat::PatchTextSection(ElfFileImpl* oat_file) {
-  bool oat_file_valid = CheckOatFile<ElfFileImpl, patch_loc_t>(oat_file);
-  CHECK(oat_file_valid) << "Oat file invalid";
-  auto patches_sec = oat_file->FindSectionByName(".oat_patches");
-  patch_loc_t* patches = reinterpret_cast<patch_loc_t*>(oat_file->Begin() + patches_sec->sh_offset);
-  patch_loc_t* patches_end = patches + (patches_sec->sh_size / sizeof(patch_loc_t));
-  auto oat_text_sec = oat_file->FindSectionByName(".text");
-  CHECK(oat_text_sec != nullptr);
-  uint8_t* to_patch = oat_file->Begin() + oat_text_sec->sh_offset;
-  uintptr_t to_patch_end = reinterpret_cast<uintptr_t>(to_patch) + oat_text_sec->sh_size;
-
-  for (; patches < patches_end; patches++) {
-    CHECK_LT(*patches, oat_text_sec->sh_size) << "Bad Patch";
-    uint32_t* patch_loc = reinterpret_cast<uint32_t*>(to_patch + *patches);
-    CHECK_LT(reinterpret_cast<uintptr_t>(patch_loc), to_patch_end);
-    *patch_loc += delta_;
-  }
   return true;
 }
 

@@ -27,13 +27,11 @@
 #include <vector>
 
 #include "arch/instruction_set.h"
-#include "base/allocator.h"
-#include "base/arena_allocator.h"
 #include "base/macros.h"
-#include "compiler_callbacks.h"
 #include "gc_root.h"
 #include "instrumentation.h"
 #include "jobject_comparator.h"
+#include "method_reference.h"
 #include "object_callbacks.h"
 #include "offsets.h"
 #include "profiler_options.h"
@@ -42,6 +40,10 @@
 #include "safe_map.h"
 
 namespace art {
+
+class ArenaPool;
+class CompilerCallbacks;
+class LinearAlloc;
 
 namespace gc {
   class Heap;
@@ -81,9 +83,12 @@ class StackOverflowHandler;
 class SuspensionHandler;
 class ThreadList;
 class Trace;
+struct TraceConfig;
 class Transaction;
 
 typedef std::vector<std::pair<std::string, const void*>> RuntimeOptions;
+typedef SafeMap<MethodReference, SafeMap<uint32_t, std::set<uint32_t>>,
+    MethodReferenceComparator> MethodRefToStringInitRegMap;
 
 // Not all combinations of flags are valid. You may not visit all roots as well as the new roots
 // (no logical reason to do this). You also may not start logging new roots and stop logging new
@@ -112,9 +117,10 @@ class Runtime {
     return compiler_callbacks_ != nullptr;
   }
 
-  bool CanRelocate() const {
-    return !IsAotCompiler() || compiler_callbacks_->IsRelocationPossible();
-  }
+  // If a compiler, are we compiling a boot image?
+  bool IsCompilingBootImage() const;
+
+  bool CanRelocate() const;
 
   bool ShouldRelocate() const {
     return must_relocate_ && CanRelocate();
@@ -245,7 +251,7 @@ class Runtime {
   }
 
   InternTable* GetInternTable() const {
-    DCHECK(intern_table_ != NULL);
+    DCHECK(intern_table_ != nullptr);
     return intern_table_;
   }
 
@@ -294,23 +300,27 @@ class Runtime {
 
   // Visit all the roots. If only_dirty is true then non-dirty roots won't be visited. If
   // clean_dirty is true then dirty roots will be marked as non-dirty after visiting.
-  void VisitRoots(RootCallback* visitor, void* arg, VisitRootFlags flags = kVisitRootFlagAllRoots)
+  void VisitRoots(RootVisitor* visitor, VisitRootFlags flags = kVisitRootFlagAllRoots)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
+  // Visit image roots, only used for hprof since the GC uses the image space mod union table
+  // instead.
+  void VisitImageRoots(RootVisitor* visitor) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
   // Visit all of the roots we can do safely do concurrently.
-  void VisitConcurrentRoots(RootCallback* visitor, void* arg,
+  void VisitConcurrentRoots(RootVisitor* visitor,
                             VisitRootFlags flags = kVisitRootFlagAllRoots)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Visit all of the non thread roots, we can do this with mutators unpaused.
-  void VisitNonThreadRoots(RootCallback* visitor, void* arg)
+  void VisitNonThreadRoots(RootVisitor* visitor)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  void VisitTransactionRoots(RootCallback* visitor, void* arg)
+  void VisitTransactionRoots(RootVisitor* visitor)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Visit all of the thread roots.
-  void VisitThreadRoots(RootCallback* visitor, void* arg) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  void VisitThreadRoots(RootVisitor* visitor) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Flip thread roots from from-space refs to to-space refs.
   size_t FlipThreadRoots(Closure* thread_flip_visitor, Closure* flip_callback,
@@ -318,17 +328,17 @@ class Runtime {
       LOCKS_EXCLUDED(Locks::mutator_lock_);
 
   // Visit all other roots which must be done with mutators suspended.
-  void VisitNonConcurrentRoots(RootCallback* visitor, void* arg)
+  void VisitNonConcurrentRoots(RootVisitor* visitor)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  // Sweep system weaks, the system weak is deleted if the visitor return nullptr. Otherwise, the
+  // Sweep system weaks, the system weak is deleted if the visitor return null. Otherwise, the
   // system weak is updated to be the visitor's returned value.
   void SweepSystemWeaks(IsMarkedCallback* visitor, void* arg)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Constant roots are the roots which never change after the runtime is initialized, they only
   // need to be visited once per GC cycle.
-  void VisitConstantRoots(RootCallback* callback, void* arg)
+  void VisitConstantRoots(RootVisitor* visitor)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Returns a special method that calls into a trampoline for runtime method resolution
@@ -452,16 +462,6 @@ class Runtime {
     return &instrumentation_;
   }
 
-  bool UseCompileTimeClassPath() const {
-    return use_compile_time_class_path_;
-  }
-
-  const std::vector<const DexFile*>& GetCompileTimeClassPath(jobject class_loader);
-
-  // The caller is responsible for ensuring the class_path DexFiles remain
-  // valid as long as the Runtime object remains valid.
-  void SetCompileTimeClassPath(jobject class_loader, std::vector<const DexFile*>& class_path);
-
   void StartProfiler(const char* profile_output_filename);
   void UpdateProfilerState(int state);
 
@@ -473,9 +473,9 @@ class Runtime {
   void ExitTransactionMode();
   bool IsTransactionAborted() const;
 
-  void AbortTransactionAndThrowInternalError(Thread* self, const std::string& abort_message)
+  void AbortTransactionAndThrowAbortError(Thread* self, const std::string& abort_message)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void ThrowInternalErrorForAbortedTransaction(Thread* self)
+  void ThrowTransactionAbortError(Thread* self)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   void RecordWriteFieldBoolean(mirror::Object* obj, MemberOffset field_offset, uint8_t value,
@@ -524,6 +524,10 @@ class Runtime {
     return allow_dex_file_fallback_;
   }
 
+  const std::vector<std::string>& GetCpuAbilist() const {
+    return cpu_abilist_;
+  }
+
   bool RunningOnValgrind() const {
     return running_on_valgrind_;
   }
@@ -540,6 +544,7 @@ class Runtime {
     return zygote_max_failed_boots_;
   }
 
+  // Create the JIT and instrumentation and code cache.
   void CreateJit();
 
   ArenaPool* GetArenaPool() {
@@ -547,6 +552,17 @@ class Runtime {
   }
   const ArenaPool* GetArenaPool() const {
     return arena_pool_.get();
+  }
+  LinearAlloc* GetLinearAlloc() {
+    return linear_alloc_.get();
+  }
+
+  jit::JitOptions* GetJITOptions() {
+    return jit_options_.get();
+  }
+
+  MethodRefToStringInitRegMap& GetStringInitMap() {
+    return method_ref_string_init_reg_map_;
   }
 
  private:
@@ -565,7 +581,7 @@ class Runtime {
   void StartDaemonThreads();
   void StartSignalCatcher();
 
-  // A pointer to the active runtime or NULL.
+  // A pointer to the active runtime or null.
   static Runtime* instance_;
 
   // NOTE: these must match the gc::ProcessState values as they come directly from the framework.
@@ -613,6 +629,13 @@ class Runtime {
   gc::Heap* heap_;
 
   std::unique_ptr<ArenaPool> arena_pool_;
+  // Special low 4gb pool for compiler linear alloc. We need ArtFields to be in low 4gb if we are
+  // compiling using a 32 bit image on a 64 bit compiler in case we resolve things in the image
+  // since the field arrays are int arrays in this case.
+  std::unique_ptr<ArenaPool> low_4gb_arena_pool_;
+
+  // Shared linear alloc for now.
+  std::unique_ptr<LinearAlloc> linear_alloc_;
 
   // The number of spins that are done before thread suspension is used to forcibly inflate.
   size_t max_spins_before_thin_lock_inflation_;
@@ -671,16 +694,9 @@ class Runtime {
   ProfilerOptions profiler_options_;
   bool profiler_started_;
 
-  bool method_trace_;
-  std::string method_trace_file_;
-  size_t method_trace_file_size_;
-  instrumentation::Instrumentation instrumentation_;
+  std::unique_ptr<TraceConfig> trace_config_;
 
-  typedef AllocationTrackingSafeMap<jobject, std::vector<const DexFile*>,
-                                    kAllocatorTagCompileTimeClassPath, JobjectComparator>
-      CompileTimeClassPaths;
-  CompileTimeClassPaths compile_time_class_paths_;
-  bool use_compile_time_class_path_;
+  instrumentation::Instrumentation instrumentation_;
 
   jobject main_thread_group_;
   jobject system_thread_group_;
@@ -700,6 +716,9 @@ class Runtime {
   // If true, the runtime may use dex files directly with the interpreter if an oat file is not
   // available/usable.
   bool allow_dex_file_fallback_;
+
+  // List of supported cpu abis.
+  std::vector<std::string> cpu_abilist_;
 
   // Specifies target SDK version to allow workarounds for certain API levels.
   int32_t target_sdk_version_;
@@ -724,6 +743,8 @@ class Runtime {
   // and trying again. This option is only inspected when we're running as a
   // zygote.
   uint32_t zygote_max_failed_boots_;
+
+  MethodRefToStringInitRegMap method_ref_string_init_reg_map_;
 
   DISALLOW_COPY_AND_ASSIGN(Runtime);
 };

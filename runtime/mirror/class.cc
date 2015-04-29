@@ -18,13 +18,14 @@
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
-#include "class_linker.h"
+#include "class_linker-inl.h"
 #include "class_loader.h"
 #include "class-inl.h"
 #include "dex_cache.h"
 #include "dex_file-inl.h"
 #include "gc/accounting/card_table-inl.h"
 #include "handle_scope-inl.h"
+#include "method.h"
 #include "object_array-inl.h"
 #include "object-inl.h"
 #include "runtime.h"
@@ -51,30 +52,31 @@ void Class::ResetClass() {
   java_lang_Class_ = GcRoot<Class>(nullptr);
 }
 
-void Class::VisitRoots(RootCallback* callback, void* arg) {
-  java_lang_Class_.VisitRootIfNonNull(callback, arg, RootInfo(kRootStickyClass));
+void Class::VisitRoots(RootVisitor* visitor) {
+  java_lang_Class_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
 }
 
-void Class::SetStatus(Status new_status, Thread* self) {
-  Status old_status = GetStatus();
+void Class::SetStatus(Handle<Class> h_this, Status new_status, Thread* self) {
+  Status old_status = h_this->GetStatus();
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   bool class_linker_initialized = class_linker != nullptr && class_linker->IsInitialized();
   if (LIKELY(class_linker_initialized)) {
     if (UNLIKELY(new_status <= old_status && new_status != kStatusError &&
                  new_status != kStatusRetired)) {
-      LOG(FATAL) << "Unexpected change back of class status for " << PrettyClass(this) << " "
-          << old_status << " -> " << new_status;
+      LOG(FATAL) << "Unexpected change back of class status for " << PrettyClass(h_this.Get())
+                 << " " << old_status << " -> " << new_status;
     }
     if (new_status >= kStatusResolved || old_status >= kStatusResolved) {
       // When classes are being resolved the resolution code should hold the lock.
-      CHECK_EQ(GetLockOwnerThreadId(), self->GetThreadId())
+      CHECK_EQ(h_this->GetLockOwnerThreadId(), self->GetThreadId())
             << "Attempt to change status of class while not holding its lock: "
-            << PrettyClass(this) << " " << old_status << " -> " << new_status;
+            << PrettyClass(h_this.Get()) << " " << old_status << " -> " << new_status;
     }
   }
   if (UNLIKELY(new_status == kStatusError)) {
-    CHECK_NE(GetStatus(), kStatusError)
-        << "Attempt to set as erroneous an already erroneous class " << PrettyClass(this);
+    CHECK_NE(h_this->GetStatus(), kStatusError)
+        << "Attempt to set as erroneous an already erroneous class "
+        << PrettyClass(h_this.Get());
 
     // Stash current exception.
     StackHandleScope<1> hs(self);
@@ -100,7 +102,7 @@ void Class::SetStatus(Status new_status, Thread* self) {
       // case.
       Class* exception_class = old_exception->GetClass();
       if (!eiie_class->IsAssignableFrom(exception_class)) {
-        SetVerifyErrorClass(exception_class);
+        h_this->SetVerifyErrorClass(exception_class);
       }
     }
 
@@ -109,9 +111,9 @@ void Class::SetStatus(Status new_status, Thread* self) {
   }
   static_assert(sizeof(Status) == sizeof(uint32_t), "Size of status not equal to uint32");
   if (Runtime::Current()->IsActiveTransaction()) {
-    SetField32Volatile<true>(OFFSET_OF_OBJECT_MEMBER(Class, status_), new_status);
+    h_this->SetField32Volatile<true>(OFFSET_OF_OBJECT_MEMBER(Class, status_), new_status);
   } else {
-    SetField32Volatile<false>(OFFSET_OF_OBJECT_MEMBER(Class, status_), new_status);
+    h_this->SetField32Volatile<false>(OFFSET_OF_OBJECT_MEMBER(Class, status_), new_status);
   }
 
   if (!class_linker_initialized) {
@@ -121,17 +123,17 @@ void Class::SetStatus(Status new_status, Thread* self) {
   } else {
     // Classes that are being resolved or initialized need to notify waiters that the class status
     // changed. See ClassLinker::EnsureResolved and ClassLinker::WaitForInitializeClass.
-    if (IsTemp()) {
+    if (h_this->IsTemp()) {
       // Class is a temporary one, ensure that waiters for resolution get notified of retirement
       // so that they can grab the new version of the class from the class linker's table.
-      CHECK_LT(new_status, kStatusResolved) << PrettyDescriptor(this);
+      CHECK_LT(new_status, kStatusResolved) << PrettyDescriptor(h_this.Get());
       if (new_status == kStatusRetired || new_status == kStatusError) {
-        NotifyAll(self);
+        h_this->NotifyAll(self);
       }
     } else {
       CHECK_NE(new_status, kStatusRetired);
       if (old_status >= kStatusResolved || new_status >= kStatusResolved) {
-        NotifyAll(self);
+        h_this->NotifyAll(self);
       }
     }
   }
@@ -227,8 +229,12 @@ void Class::DumpClass(std::ostream& os, int flags) {
     os << "  interfaces (" << num_direct_interfaces << "):\n";
     for (size_t i = 0; i < num_direct_interfaces; ++i) {
       Class* interface = GetDirectInterface(self, h_this, i);
-      const ClassLoader* cl = interface->GetClassLoader();
-      os << StringPrintf("    %2zd: %s (cl=%p)\n", i, PrettyClass(interface).c_str(), cl);
+      if (interface == nullptr) {
+        os << StringPrintf("    %2zd: nullptr!\n", i);
+      } else {
+        const ClassLoader* cl = interface->GetClassLoader();
+        os << StringPrintf("    %2zd: %s (cl=%p)\n", i, PrettyClass(interface).c_str(), cl);
+      }
     }
   }
   if (!IsLoaded()) {
@@ -322,10 +328,6 @@ bool Class::IsInSamePackage(Class* that) {
   // Compare the package part of the descriptor string.
   std::string temp1, temp2;
   return IsInSamePackage(klass1->GetDescriptor(&temp1), klass2->GetDescriptor(&temp2));
-}
-
-bool Class::IsStringClass() const {
-  return this == String::GetJavaLangString();
 }
 
 bool Class::IsThrowableClass() {
@@ -828,11 +830,12 @@ class CopyClassVisitor {
   void operator()(Object* obj, size_t usable_size) const
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     UNUSED(usable_size);
-    mirror::Class* new_class_obj = obj->AsClass();
-    mirror::Object::CopyObject(self_, new_class_obj, orig_->Get(), copy_bytes_);
-    new_class_obj->SetStatus(Class::kStatusResolving, self_);
-    new_class_obj->PopulateEmbeddedImtAndVTable(imt_handle_scope_);
-    new_class_obj->SetClassSize(new_length_);
+    StackHandleScope<1> hs(self_);
+    Handle<mirror::Class> h_new_class_obj(hs.NewHandle(obj->AsClass()));
+    mirror::Object::CopyObject(self_, h_new_class_obj.Get(), orig_->Get(), copy_bytes_);
+    mirror::Class::SetStatus(h_new_class_obj, Class::kStatusResolving, self_);
+    h_new_class_obj->PopulateEmbeddedImtAndVTable(imt_handle_scope_);
+    h_new_class_obj->SetClassSize(new_length_);
   }
 
  private:
@@ -863,6 +866,32 @@ Class* Class::CopyOf(Thread* self, int32_t new_length,
     return nullptr;
   }
   return new_class->AsClass();
+}
+
+bool Class::ProxyDescriptorEquals(const char* match) {
+  DCHECK(IsProxyClass());
+  return Runtime::Current()->GetClassLinker()->GetDescriptorForProxy(this) == match;
+}
+
+mirror::ArtMethod* Class::GetDeclaredConstructor(
+    Thread* self, Handle<mirror::ObjectArray<mirror::Class>> args) {
+  auto* direct_methods = GetDirectMethods();
+  size_t count = direct_methods != nullptr ? direct_methods->GetLength() : 0u;
+  for (size_t i = 0; i < count; ++i) {
+    auto* m = direct_methods->GetWithoutChecks(i);
+    // Skip <clinit> which is a static constructor, as well as non constructors.
+    if (m->IsStatic() || !m->IsConstructor()) {
+      continue;
+    }
+    // May cause thread suspension and exceptions.
+    if (m->EqualParameters(args)) {
+      return m;
+    }
+    if (self->IsExceptionPending()) {
+      return nullptr;
+    }
+  }
+  return nullptr;
 }
 
 }  // namespace mirror

@@ -27,7 +27,7 @@ namespace art {
 class Mir2Lir::SpecialSuspendCheckSlowPath : public Mir2Lir::LIRSlowPath {
  public:
   SpecialSuspendCheckSlowPath(Mir2Lir* m2l, LIR* branch, LIR* cont)
-      : LIRSlowPath(m2l, m2l->GetCurrentDexPc(), branch, cont),
+      : LIRSlowPath(m2l, branch, cont),
         num_used_args_(0u) {
   }
 
@@ -100,19 +100,6 @@ RegisterClass Mir2Lir::ShortyToRegClass(char shorty_type) {
       break;
     default:
       res = kCoreReg;
-  }
-  return res;
-}
-
-RegisterClass Mir2Lir::LocToRegClass(RegLocation loc) {
-  RegisterClass res;
-  if (loc.fp) {
-    DCHECK(!loc.ref) << "At most, one of ref/fp may be set";
-    res = kFPReg;
-  } else if (loc.ref) {
-    res = kRefReg;
-  } else {
-    res = kCoreReg;
   }
   return res;
 }
@@ -406,6 +393,7 @@ bool Mir2Lir::GenSpecialIdentity(MIR* mir, const InlineMethod& special) {
 bool Mir2Lir::GenSpecialCase(BasicBlock* bb, MIR* mir, const InlineMethod& special) {
   DCHECK(special.flags & kInlineSpecial);
   current_dalvik_offset_ = mir->offset;
+  DCHECK(current_mir_ == nullptr);  // Safepoints attributed to prologue.
   MIR* return_mir = nullptr;
   bool successful = false;
   EnsureInitializedArgMappingToPhysicalReg();
@@ -540,7 +528,7 @@ void Mir2Lir::CompileDalvikInstruction(MIR* mir, BasicBlock* bb, LIR* label_list
       GenMoveException(rl_dest);
       break;
 
-    case Instruction::RETURN_VOID_BARRIER:
+    case Instruction::RETURN_VOID_NO_BARRIER:
     case Instruction::RETURN_VOID:
       if (((cu_->access_flags & kAccConstructor) != 0) &&
           cu_->compiler_driver->RequiresConstructorBarrier(Thread::Current(), cu_->dex_file,
@@ -559,25 +547,20 @@ void Mir2Lir::CompileDalvikInstruction(MIR* mir, BasicBlock* bb, LIR* label_list
       if (!kLeafOptimization || !mir_graph_->MethodIsLeaf()) {
         GenSuspendTest(opt_flags);
       }
-      DCHECK_EQ(LocToRegClass(rl_src[0]), ShortyToRegClass(cu_->shorty[0]));
-      StoreValue(GetReturn(LocToRegClass(rl_src[0])), rl_src[0]);
+      StoreValue(GetReturn(ShortyToRegClass(cu_->shorty[0])), rl_src[0]);
       break;
 
     case Instruction::RETURN_WIDE:
       if (!kLeafOptimization || !mir_graph_->MethodIsLeaf()) {
         GenSuspendTest(opt_flags);
       }
-      DCHECK_EQ(LocToRegClass(rl_src[0]), ShortyToRegClass(cu_->shorty[0]));
-      StoreValueWide(GetReturnWide(LocToRegClass(rl_src[0])), rl_src[0]);
-      break;
-
-    case Instruction::MOVE_RESULT_WIDE:
-      StoreValueWide(rl_dest, GetReturnWide(LocToRegClass(rl_dest)));
+      StoreValueWide(GetReturnWide(ShortyToRegClass(cu_->shorty[0])), rl_src[0]);
       break;
 
     case Instruction::MOVE_RESULT:
+    case Instruction::MOVE_RESULT_WIDE:
     case Instruction::MOVE_RESULT_OBJECT:
-      StoreValue(rl_dest, GetReturn(LocToRegClass(rl_dest)));
+      // Already processed with invoke or filled-new-array.
       break;
 
     case Instruction::MOVE:
@@ -587,9 +570,6 @@ void Mir2Lir::CompileDalvikInstruction(MIR* mir, BasicBlock* bb, LIR* label_list
     case Instruction::MOVE_FROM16:
     case Instruction::MOVE_OBJECT_FROM16:
       StoreValue(rl_dest, rl_src[0]);
-      if (rl_src[0].is_const && (mir_graph_->ConstantValue(rl_src[0]) == 0)) {
-        Workaround7250540(rl_dest, RegStorage::InvalidReg());
-      }
       break;
 
     case Instruction::MOVE_WIDE:
@@ -632,7 +612,7 @@ void Mir2Lir::CompileDalvikInstruction(MIR* mir, BasicBlock* bb, LIR* label_list
       break;
 
     case Instruction::CHECK_CAST: {
-      GenCheckCast(mir->offset, vB, rl_src[0]);
+      GenCheckCast(opt_flags, mir->offset, vB, rl_src[0]);
       break;
     }
     case Instruction::INSTANCE_OF:
@@ -1239,7 +1219,7 @@ bool Mir2Lir::MethodBlockCodeGen(BasicBlock* bb) {
   block_label_list_[block_id].flags.fixup = kFixupLabel;
   AppendLIR(&block_label_list_[block_id]);
 
-  LIR* head_lir = NULL;
+  LIR* head_lir = nullptr;
 
   // If this is a catch block, export the start address.
   if (bb->catch_entry) {
@@ -1252,13 +1232,20 @@ bool Mir2Lir::MethodBlockCodeGen(BasicBlock* bb) {
   if (bb->block_type == kEntryBlock) {
     ResetRegPool();
     int start_vreg = mir_graph_->GetFirstInVR();
+    AppendLIR(NewLIR0(kPseudoPrologueBegin));
     GenEntrySequence(&mir_graph_->reg_location_[start_vreg], mir_graph_->GetMethodLoc());
+    AppendLIR(NewLIR0(kPseudoPrologueEnd));
+    DCHECK_EQ(cfi_.GetCurrentCFAOffset(), frame_size_);
   } else if (bb->block_type == kExitBlock) {
     ResetRegPool();
+    DCHECK_EQ(cfi_.GetCurrentCFAOffset(), frame_size_);
+    AppendLIR(NewLIR0(kPseudoEpilogueBegin));
     GenExitSequence();
+    AppendLIR(NewLIR0(kPseudoEpilogueEnd));
+    DCHECK_EQ(cfi_.GetCurrentCFAOffset(), frame_size_);
   }
 
-  for (mir = bb->first_mir_insn; mir != NULL; mir = mir->next) {
+  for (mir = bb->first_mir_insn; mir != nullptr; mir = mir->next) {
     ResetRegPool();
     if (cu_->disable_opt & (1 << kTrackLiveTemps)) {
       ClobberAllTemps();
@@ -1276,12 +1263,13 @@ bool Mir2Lir::MethodBlockCodeGen(BasicBlock* bb) {
     }
 
     current_dalvik_offset_ = mir->offset;
+    current_mir_ = mir;
     int opcode = mir->dalvikInsn.opcode;
 
     GenPrintLabel(mir);
 
     // Remember the first LIR for this block.
-    if (head_lir == NULL) {
+    if (head_lir == nullptr) {
       head_lir = &block_label_list_[bb->id];
       // Set the first label as a scheduling barrier.
       DCHECK(!head_lir->flags.use_def_invalid);
@@ -1321,7 +1309,7 @@ bool Mir2Lir::SpecialMIR2LIR(const InlineMethod& special) {
   cu_->NewTimingSplit("SpecialMIR2LIR");
   // Find the first DalvikByteCode block.
   DCHECK_EQ(mir_graph_->GetNumReachableBlocks(), mir_graph_->GetDfsOrder().size());
-  BasicBlock*bb = NULL;
+  BasicBlock*bb = nullptr;
   for (BasicBlockId dfs_id : mir_graph_->GetDfsOrder()) {
     BasicBlock* candidate = mir_graph_->GetBasicBlock(dfs_id);
     if (candidate->block_type == kDalvikByteCode) {
@@ -1329,11 +1317,11 @@ bool Mir2Lir::SpecialMIR2LIR(const InlineMethod& special) {
       break;
     }
   }
-  if (bb == NULL) {
+  if (bb == nullptr) {
     return false;
   }
   DCHECK_EQ(bb->start_offset, 0);
-  DCHECK(bb->first_mir_insn != NULL);
+  DCHECK(bb->first_mir_insn != nullptr);
 
   // Get the first instruction.
   MIR* mir = bb->first_mir_insn;
@@ -1355,17 +1343,17 @@ void Mir2Lir::MethodMIR2LIR() {
   PreOrderDfsIterator iter(mir_graph_);
   BasicBlock* curr_bb = iter.Next();
   BasicBlock* next_bb = iter.Next();
-  while (curr_bb != NULL) {
+  while (curr_bb != nullptr) {
     MethodBlockCodeGen(curr_bb);
     // If the fall_through block is no longer laid out consecutively, drop in a branch.
     BasicBlock* curr_bb_fall_through = mir_graph_->GetBasicBlock(curr_bb->fall_through);
-    if ((curr_bb_fall_through != NULL) && (curr_bb_fall_through != next_bb)) {
+    if ((curr_bb_fall_through != nullptr) && (curr_bb_fall_through != next_bb)) {
       OpUnconditionalBranch(&block_label_list_[curr_bb->fall_through]);
     }
     curr_bb = next_bb;
     do {
       next_bb = iter.Next();
-    } while ((next_bb != NULL) && (next_bb->block_type == kDead));
+    } while ((next_bb != nullptr) && (next_bb->block_type == kDead));
   }
   HandleSlowPaths();
 }
@@ -1376,6 +1364,7 @@ void Mir2Lir::MethodMIR2LIR() {
 
 LIR* Mir2Lir::LIRSlowPath::GenerateTargetLabel(int opcode) {
   m2l_->SetCurrentDexPc(current_dex_pc_);
+  m2l_->current_mir_ = current_mir_;
   LIR* target = m2l_->NewLIR0(opcode);
   fromfast_->target = target;
   return target;

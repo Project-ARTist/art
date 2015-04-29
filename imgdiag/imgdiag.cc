@@ -97,7 +97,8 @@ class ImgDiagDumper {
 
     {
       struct stat sts;
-      std::string proc_pid_str = StringPrintf("/proc/%ld", static_cast<long>(image_diff_pid));  // NOLINT [runtime/int]
+      std::string proc_pid_str =
+          StringPrintf("/proc/%ld", static_cast<long>(image_diff_pid));  // NOLINT [runtime/int]
       if (stat(proc_pid_str.c_str(), &sts) == -1) {
         os << "Process does not exist";
         return false;
@@ -144,7 +145,8 @@ class ImgDiagDumper {
     const size_t pointer_size = InstructionSetPointerSize(
         Runtime::Current()->GetInstructionSet());
 
-    std::string file_name = StringPrintf("/proc/%ld/mem", static_cast<long>(image_diff_pid));  // NOLINT [runtime/int]
+    std::string file_name =
+        StringPrintf("/proc/%ld/mem", static_cast<long>(image_diff_pid));  // NOLINT [runtime/int]
 
     size_t boot_map_size = boot_map.end - boot_map.start;
 
@@ -168,7 +170,10 @@ class ImgDiagDumper {
        << "\n\n";
 
     const uint8_t* image_begin_unaligned = boot_image_header.GetImageBegin();
-    const uint8_t* image_end_unaligned = image_begin_unaligned + boot_image_header.GetImageSize();
+    const uint8_t* image_mirror_end_unaligned = image_begin_unaligned +
+        boot_image_header.GetImageSize();
+    const uint8_t* image_end_unaligned = image_mirror_end_unaligned +
+        boot_image_header.GetArtFieldsSize();
 
     // Adjust range to nearest page
     const uint8_t* image_begin = AlignDown(image_begin_unaligned, kPageSize);
@@ -194,8 +199,8 @@ class ImgDiagDumper {
       return false;
     }
 
-    std::string page_map_file_name = StringPrintf("/proc/%ld/pagemap",
-                                                  static_cast<long>(image_diff_pid));  // NOLINT [runtime/int]
+    std::string page_map_file_name = StringPrintf(
+        "/proc/%ld/pagemap", static_cast<long>(image_diff_pid));  // NOLINT [runtime/int]
     auto page_map_file = std::unique_ptr<File>(OS::OpenFileForReading(page_map_file_name.c_str()));
     if (page_map_file == nullptr) {
       os << "Failed to open " << page_map_file_name << " for reading: " << strerror(errno);
@@ -223,8 +228,10 @@ class ImgDiagDumper {
       return false;
     }
 
-    std::set<size_t> dirty_page_set_remote;  // Set of the remote virtual page indices that are dirty
-    std::set<size_t> dirty_page_set_local;   // Set of the local virtual page indices that are dirty
+    // Set of the remote virtual page indices that are dirty
+    std::set<size_t> dirty_page_set_remote;
+    // Set of the local virtual page indices that are dirty
+    std::set<size_t> dirty_page_set_local;
 
     size_t different_int32s = 0;
     size_t different_bytes = 0;
@@ -350,7 +357,7 @@ class ImgDiagDumper {
     size_t dirty_object_bytes = 0;
     {
       const uint8_t* begin_image_ptr = image_begin_unaligned;
-      const uint8_t* end_image_ptr = image_end_unaligned;
+      const uint8_t* end_image_ptr = image_mirror_end_unaligned;
 
       const uint8_t* current = begin_image_ptr + RoundUp(sizeof(ImageHeader), kObjectAlignment);
       while (reinterpret_cast<const uintptr_t>(current)

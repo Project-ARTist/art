@@ -18,13 +18,18 @@
 
 #include <stdlib.h>
 
+#include <cutils/process_name.h>
+
 #include "arch/instruction_set.h"
 #include "debugger.h"
 #include "java_vm_ext.h"
+#include "jit/jit.h"
 #include "jni_internal.h"
 #include "JNIHelp.h"
+#include "scoped_thread_state_change.h"
 #include "ScopedUtfChars.h"
 #include "thread-inl.h"
+#include "trace.h"
 
 #if defined(__linux__)
 #include <sys/prctl.h>
@@ -59,10 +64,12 @@ static void EnableDebugFeatures(uint32_t debug_flags) {
     DEBUG_ENABLE_ASSERT             = 1 << 2,
     DEBUG_ENABLE_SAFEMODE           = 1 << 3,
     DEBUG_ENABLE_JNI_LOGGING        = 1 << 4,
+    DEBUG_ENABLE_JIT                = 1 << 5,
+    DEBUG_GENERATE_CFI              = 1 << 6,
   };
 
+  Runtime* const runtime = Runtime::Current();
   if ((debug_flags & DEBUG_ENABLE_CHECKJNI) != 0) {
-    Runtime* runtime = Runtime::Current();
     JavaVMExt* vm = runtime->GetJavaVM();
     if (!vm->IsCheckJniEnabled()) {
       LOG(INFO) << "Late-enabling -Xcheck:jni";
@@ -86,11 +93,29 @@ static void EnableDebugFeatures(uint32_t debug_flags) {
   }
   debug_flags &= ~DEBUG_ENABLE_DEBUGGER;
 
-  if ((debug_flags & DEBUG_ENABLE_SAFEMODE) != 0) {
+  const bool safe_mode = (debug_flags & DEBUG_ENABLE_SAFEMODE) != 0;
+  if (safe_mode) {
     // Ensure that any (secondary) oat files will be interpreted.
-    Runtime* runtime = Runtime::Current();
     runtime->AddCompilerOption("--compiler-filter=interpret-only");
     debug_flags &= ~DEBUG_ENABLE_SAFEMODE;
+  }
+
+  bool use_jit = false;
+  if ((debug_flags & DEBUG_ENABLE_JIT) != 0) {
+    if (safe_mode) {
+      LOG(INFO) << "Not enabling JIT due to safe mode";
+    } else {
+      use_jit = true;
+      LOG(INFO) << "Late-enabling JIT";
+    }
+    debug_flags &= ~DEBUG_ENABLE_JIT;
+  }
+  runtime->GetJITOptions()->SetUseJIT(use_jit);
+
+  const bool generate_cfi = (debug_flags & DEBUG_GENERATE_CFI) != 0;
+  if (generate_cfi) {
+    runtime->AddCompilerOption("--include-cfi");
+    debug_flags &= ~DEBUG_GENERATE_CFI;
   }
 
   // This is for backwards compatibility with Dalvik.
@@ -107,6 +132,11 @@ static jlong ZygoteHooks_nativePreFork(JNIEnv* env, jclass) {
 
   runtime->PreZygoteFork();
 
+  if (Trace::GetMethodTracingMode() != TracingMode::kTracingInactive) {
+    // Tracing active, pause it.
+    Trace::Pause();
+  }
+
   // Grab thread before fork potentially makes Thread::pthread_key_self_ unusable.
   return reinterpret_cast<jlong>(ThreadForEnv(env));
 }
@@ -117,6 +147,50 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env, jclass, jlong token, ji
   // Our system thread ID, etc, has changed so reset Thread state.
   thread->InitAfterFork();
   EnableDebugFeatures(debug_flags);
+
+  // Update tracing.
+  if (Trace::GetMethodTracingMode() != TracingMode::kTracingInactive) {
+    Trace::TraceOutputMode output_mode = Trace::GetOutputMode();
+    Trace::TraceMode trace_mode = Trace::GetMode();
+    size_t buffer_size = Trace::GetBufferSize();
+
+    // Just drop it.
+    Trace::Abort();
+
+    // Only restart if it was streaming mode.
+    // TODO: Expose buffer size, so we can also do file mode.
+    if (output_mode == Trace::TraceOutputMode::kStreaming) {
+      const char* proc_name_cutils = get_process_name();
+      std::string proc_name;
+      if (proc_name_cutils != nullptr) {
+        proc_name = proc_name_cutils;
+      }
+      if (proc_name_cutils == nullptr || proc_name == "zygote" || proc_name == "zygote64") {
+        // Either no process name, or the name hasn't been changed, yet. Just use pid.
+        pid_t pid = getpid();
+        proc_name = StringPrintf("%u", static_cast<uint32_t>(pid));
+      }
+
+      std::string profiles_dir(GetDalvikCache("profiles", false /* create_if_absent */));
+      if (!profiles_dir.empty()) {
+        std::string trace_file = StringPrintf("%s/%s.trace.bin", profiles_dir.c_str(),
+                                              proc_name.c_str());
+        Trace::Start(trace_file.c_str(),
+                     -1,
+                     buffer_size,
+                     0,   // TODO: Expose flags.
+                     output_mode,
+                     trace_mode,
+                     0);  // TODO: Expose interval.
+        if (thread->IsExceptionPending()) {
+          ScopedObjectAccess soa(env);
+          thread->ClearException();
+        }
+      } else {
+        LOG(ERROR) << "Profiles dir is empty?!?!";
+      }
+    }
+  }
 
   if (instruction_set != nullptr) {
     ScopedUtfChars isa_string(env, instruction_set);

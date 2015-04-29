@@ -14,13 +14,13 @@
  * limitations under the License.
  */
 
+#include "art_field-inl.h"
 #include "base/logging.h"
 #include "base/mutex.h"
 #include "dex_file-inl.h"
 #include "dex_instruction-inl.h"
 #include "driver/compiler_driver.h"
 #include "driver/dex_compilation_unit.h"
-#include "mirror/art_field-inl.h"
 #include "mirror/art_method-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/dex_cache.h"
@@ -180,22 +180,21 @@ void DexCompiler::Compile() {
 }
 
 void DexCompiler::CompileReturnVoid(Instruction* inst, uint32_t dex_pc) {
-  DCHECK(inst->Opcode() == Instruction::RETURN_VOID);
-  // Are we compiling a non-clinit constructor?
-  if (!unit_.IsConstructor() || unit_.IsStatic()) {
-    return;
+  DCHECK_EQ(inst->Opcode(), Instruction::RETURN_VOID);
+  if (unit_.IsConstructor()) {
+    // Are we compiling a non clinit constructor which needs a barrier ?
+    if (!unit_.IsStatic() &&
+        driver_.RequiresConstructorBarrier(Thread::Current(), unit_.GetDexFile(),
+                                           unit_.GetClassDefIndex())) {
+      return;
+    }
   }
-  // Do we need a constructor barrier ?
-  if (!driver_.RequiresConstructorBarrier(Thread::Current(), unit_.GetDexFile(),
-                                         unit_.GetClassDefIndex())) {
-    return;
-  }
-  // Replace RETURN_VOID by RETURN_VOID_BARRIER.
+  // Replace RETURN_VOID by RETURN_VOID_NO_BARRIER.
   VLOG(compiler) << "Replacing " << Instruction::Name(inst->Opcode())
-                 << " by " << Instruction::Name(Instruction::RETURN_VOID_BARRIER)
+                 << " by " << Instruction::Name(Instruction::RETURN_VOID_NO_BARRIER)
                  << " at dex pc " << StringPrintf("0x%x", dex_pc) << " in method "
                  << PrettyMethod(unit_.GetDexMethodIndex(), GetDexFile(), true);
-  inst->SetOpcode(Instruction::RETURN_VOID_BARRIER);
+  inst->SetOpcode(Instruction::RETURN_VOID_NO_BARRIER);
 }
 
 Instruction* DexCompiler::CompileCheckCast(Instruction* inst, uint32_t dex_pc) {
@@ -302,7 +301,7 @@ extern "C" void ArtCompileDEX(art::CompilerDriver& driver, const art::DexFile::C
                               art::DexToDexCompilationLevel dex_to_dex_compilation_level) {
   UNUSED(invoke_type);
   if (dex_to_dex_compilation_level != art::kDontDexToDexCompile) {
-    art::DexCompilationUnit unit(NULL, class_loader, art::Runtime::Current()->GetClassLinker(),
+    art::DexCompilationUnit unit(nullptr, class_loader, art::Runtime::Current()->GetClassLinker(),
                                  dex_file, code_item, class_def_idx, method_idx, access_flags,
                                  driver.GetVerifiedMethod(&dex_file, method_idx));
     art::optimizer::DexCompiler dex_compiler(driver, unit, dex_to_dex_compilation_level);

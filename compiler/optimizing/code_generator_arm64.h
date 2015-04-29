@@ -23,8 +23,8 @@
 #include "nodes.h"
 #include "parallel_move_resolver.h"
 #include "utils/arm64/assembler_arm64.h"
-#include "a64/disasm-a64.h"
-#include "a64/macro-assembler-a64.h"
+#include "vixl/a64/disasm-a64.h"
+#include "vixl/a64/macro-assembler-a64.h"
 #include "arch/arm64/quick_method_frame_info_arm64.h"
 
 namespace art {
@@ -46,14 +46,11 @@ static constexpr size_t kParameterFPRegistersLength = arraysize(kParameterFPRegi
 
 const vixl::Register tr = vixl::x18;                        // Thread Register
 static const vixl::Register kArtMethodRegister = vixl::w0;  // Method register on invoke.
-const vixl::Register kQuickSuspendRegister = vixl::x19;
 
 const vixl::CPURegList vixl_reserved_core_registers(vixl::ip0, vixl::ip1);
 const vixl::CPURegList vixl_reserved_fp_registers(vixl::d31);
 
-// TODO: When the runtime does not use kQuickSuspendRegister as a suspend
-// counter remove it from the reserved registers list.
-const vixl::CPURegList runtime_reserved_core_registers(tr, kQuickSuspendRegister, vixl::lr);
+const vixl::CPURegList runtime_reserved_core_registers(tr, vixl::lr);
 
 // Callee-saved registers defined by AAPCS64.
 const vixl::CPURegList callee_saved_core_registers(vixl::CPURegister::kRegister,
@@ -80,6 +77,31 @@ class SlowPathCodeARM64 : public SlowPathCode {
   DISALLOW_COPY_AND_ASSIGN(SlowPathCodeARM64);
 };
 
+static const vixl::Register kRuntimeParameterCoreRegisters[] =
+    { vixl::x0, vixl::x1, vixl::x2, vixl::x3, vixl::x4, vixl::x5, vixl::x6, vixl::x7 };
+static constexpr size_t kRuntimeParameterCoreRegistersLength =
+    arraysize(kRuntimeParameterCoreRegisters);
+static const vixl::FPRegister kRuntimeParameterFpuRegisters[] =
+    { vixl::d0, vixl::d1, vixl::d2, vixl::d3, vixl::d4, vixl::d5, vixl::d6, vixl::d7 };
+static constexpr size_t kRuntimeParameterFpuRegistersLength =
+    arraysize(kRuntimeParameterCoreRegisters);
+
+class InvokeRuntimeCallingConvention : public CallingConvention<vixl::Register, vixl::FPRegister> {
+ public:
+  static constexpr size_t kParameterCoreRegistersLength = arraysize(kParameterCoreRegisters);
+
+  InvokeRuntimeCallingConvention()
+      : CallingConvention(kRuntimeParameterCoreRegisters,
+                          kRuntimeParameterCoreRegistersLength,
+                          kRuntimeParameterFpuRegisters,
+                          kRuntimeParameterFpuRegistersLength) {}
+
+  Location GetReturnLocation(Primitive::Type return_type);
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(InvokeRuntimeCallingConvention);
+};
+
 class InvokeDexCallingConvention : public CallingConvention<vixl::Register, vixl::FPRegister> {
  public:
   InvokeDexCallingConvention()
@@ -97,25 +119,20 @@ class InvokeDexCallingConvention : public CallingConvention<vixl::Register, vixl
   DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConvention);
 };
 
-class InvokeDexCallingConventionVisitor {
+class InvokeDexCallingConventionVisitorARM64 : public InvokeDexCallingConventionVisitor {
  public:
-  InvokeDexCallingConventionVisitor() : gp_index_(0), fp_index_(0), stack_index_(0) {}
+  InvokeDexCallingConventionVisitorARM64() {}
+  virtual ~InvokeDexCallingConventionVisitorARM64() {}
 
-  Location GetNextLocation(Primitive::Type type);
+  Location GetNextLocation(Primitive::Type type) OVERRIDE;
   Location GetReturnLocation(Primitive::Type return_type) {
     return calling_convention.GetReturnLocation(return_type);
   }
 
  private:
   InvokeDexCallingConvention calling_convention;
-  // The current index for core registers.
-  uint32_t gp_index_;
-  // The current index for floating-point registers.
-  uint32_t fp_index_;
-  // The current stack index.
-  uint32_t stack_index_;
 
-  DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConventionVisitor);
+  DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConventionVisitorARM64);
 };
 
 class InstructionCodeGeneratorARM64 : public HGraphVisitor {
@@ -137,9 +154,15 @@ class InstructionCodeGeneratorARM64 : public HGraphVisitor {
   void GenerateMemoryBarrier(MemBarrierKind kind);
   void GenerateSuspendCheck(HSuspendCheck* instruction, HBasicBlock* successor);
   void HandleBinaryOp(HBinaryOperation* instr);
+  void HandleFieldSet(HInstruction* instruction, const FieldInfo& field_info);
+  void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info);
   void HandleShift(HBinaryOperation* instr);
   void GenerateImplicitNullCheck(HNullCheck* instruction);
   void GenerateExplicitNullCheck(HNullCheck* instruction);
+  void GenerateTestAndBranch(HInstruction* instruction,
+                             vixl::Label* true_target,
+                             vixl::Label* false_target,
+                             vixl::Label* always_true_target);
 
   Arm64Assembler* const assembler_;
   CodeGeneratorARM64* const codegen_;
@@ -159,24 +182,28 @@ class LocationsBuilderARM64 : public HGraphVisitor {
 
  private:
   void HandleBinaryOp(HBinaryOperation* instr);
-  void HandleShift(HBinaryOperation* instr);
+  void HandleFieldSet(HInstruction* instruction);
+  void HandleFieldGet(HInstruction* instruction);
   void HandleInvoke(HInvoke* instr);
+  void HandleShift(HBinaryOperation* instr);
 
   CodeGeneratorARM64* const codegen_;
-  InvokeDexCallingConventionVisitor parameter_visitor_;
+  InvokeDexCallingConventionVisitorARM64 parameter_visitor_;
 
   DISALLOW_COPY_AND_ASSIGN(LocationsBuilderARM64);
 };
 
-class ParallelMoveResolverARM64 : public ParallelMoveResolver {
+class ParallelMoveResolverARM64 : public ParallelMoveResolverNoSwap {
  public:
   ParallelMoveResolverARM64(ArenaAllocator* allocator, CodeGeneratorARM64* codegen)
-      : ParallelMoveResolver(allocator), codegen_(codegen) {}
+      : ParallelMoveResolverNoSwap(allocator), codegen_(codegen), vixl_temps_() {}
 
+ protected:
+  void PrepareForEmitNativeCode() OVERRIDE;
+  void FinishEmitNativeCode() OVERRIDE;
+  Location AllocateScratchLocationFor(Location::Kind kind) OVERRIDE;
+  void FreeScratchLocation(Location loc) OVERRIDE;
   void EmitMove(size_t index) OVERRIDE;
-  void EmitSwap(size_t index) OVERRIDE;
-  void RestoreScratch(int reg) OVERRIDE;
-  void SpillScratch(int reg) OVERRIDE;
 
  private:
   Arm64Assembler* GetAssembler() const;
@@ -185,6 +212,7 @@ class ParallelMoveResolverARM64 : public ParallelMoveResolver {
   }
 
   CodeGeneratorARM64* const codegen_;
+  vixl::UseScratchRegisterScope vixl_temps_;
 
   DISALLOW_COPY_AND_ASSIGN(ParallelMoveResolverARM64);
 };
@@ -292,7 +320,6 @@ class CodeGeneratorARM64 : public CodeGenerator {
   // locations, and is used for optimisation and debugging.
   void MoveLocation(Location destination, Location source,
                     Primitive::Type type = Primitive::kPrimVoid);
-  void SwapLocations(Location loc_1, Location loc_2);
   void Load(Primitive::Type type, vixl::CPURegister dst, const vixl::MemOperand& src);
   void Store(Primitive::Type type, vixl::CPURegister rt, const vixl::MemOperand& dst);
   void LoadCurrentMethod(vixl::Register current_method);

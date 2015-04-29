@@ -631,20 +631,20 @@ bool JavaVMExt::LoadNativeLibrary(JNIEnv* env, const std::string& path, jobject 
 
   Locks::mutator_lock_->AssertNotHeld(self);
   const char* path_str = path.empty() ? nullptr : path.c_str();
-  void* handle = dlopen(path_str, RTLD_LAZY);
+  void* handle = dlopen(path_str, RTLD_NOW);
   bool needs_native_bridge = false;
   if (handle == nullptr) {
     if (android::NativeBridgeIsSupported(path_str)) {
-      handle = android::NativeBridgeLoadLibrary(path_str, RTLD_LAZY);
+      handle = android::NativeBridgeLoadLibrary(path_str, RTLD_NOW);
       needs_native_bridge = true;
     }
   }
 
-  VLOG(jni) << "[Call to dlopen(\"" << path << "\", RTLD_LAZY) returned " << handle << "]";
+  VLOG(jni) << "[Call to dlopen(\"" << path << "\", RTLD_NOW) returned " << handle << "]";
 
   if (handle == nullptr) {
     *error_msg = dlerror();
-    LOG(ERROR) << "dlopen(\"" << path << "\", RTLD_LAZY) failed: " << *error_msg;
+    VLOG(jni) << "dlopen(\"" << path << "\", RTLD_NOW) failed: " << *error_msg;
     return false;
   }
 
@@ -748,19 +748,18 @@ void* JavaVMExt::FindCodeForNativeMethod(mirror::ArtMethod* m) {
 
 void JavaVMExt::SweepJniWeakGlobals(IsMarkedCallback* callback, void* arg) {
   MutexLock mu(Thread::Current(), weak_globals_lock_);
-  for (mirror::Object** entry : weak_globals_) {
-    // Since this is called by the GC, we don't need a read barrier.
-    mirror::Object* obj = *entry;
-    if (obj == nullptr) {
-      // Need to skip null here to distinguish between null entries
-      // and cleared weak ref entries.
-      continue;
+  Runtime* const runtime = Runtime::Current();
+  for (auto* entry : weak_globals_) {
+    // Need to skip null here to distinguish between null entries and cleared weak ref entries.
+    if (!entry->IsNull()) {
+      // Since this is called by the GC, we don't need a read barrier.
+      mirror::Object* obj = entry->Read<kWithoutReadBarrier>();
+      mirror::Object* new_obj = callback(obj, arg);
+      if (new_obj == nullptr) {
+        new_obj = runtime->GetClearedJniWeakGlobal();
+      }
+      *entry = GcRoot<mirror::Object>(new_obj);
     }
-    mirror::Object* new_obj = callback(obj, arg);
-    if (new_obj == nullptr) {
-      new_obj = Runtime::Current()->GetClearedJniWeakGlobal();
-    }
-    *entry = new_obj;
   }
 }
 
@@ -769,10 +768,10 @@ void JavaVMExt::TrimGlobals() {
   globals_.Trim();
 }
 
-void JavaVMExt::VisitRoots(RootCallback* callback, void* arg) {
+void JavaVMExt::VisitRoots(RootVisitor* visitor) {
   Thread* self = Thread::Current();
   ReaderMutexLock mu(self, globals_lock_);
-  globals_.VisitRoots(callback, arg, RootInfo(kRootJNIGlobal));
+  globals_.VisitRoots(visitor, RootInfo(kRootJNIGlobal));
   // The weak_globals table is visited by the GC itself (because it mutates the table).
 }
 

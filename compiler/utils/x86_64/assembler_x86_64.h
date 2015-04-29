@@ -97,9 +97,13 @@ class Operand : public ValueObject {
         && (reg.NeedsRex() == ((rex_ & 1) != 0));  // REX.000B bits match.
   }
 
+  AssemblerFixup* GetFixup() const {
+    return fixup_;
+  }
+
  protected:
   // Operand can be sub classed (e.g: Address).
-  Operand() : rex_(0), length_(0) { }
+  Operand() : rex_(0), length_(0), fixup_(nullptr) { }
 
   void SetModRM(uint8_t mod_in, CpuRegister rm_in) {
     CHECK_EQ(mod_in & ~3, 0);
@@ -136,12 +140,17 @@ class Operand : public ValueObject {
     length_ += disp_size;
   }
 
+  void SetFixup(AssemblerFixup* fixup) {
+    fixup_ = fixup;
+  }
+
  private:
   uint8_t rex_;
   uint8_t length_;
   uint8_t encoding_[6];
+  AssemblerFixup* fixup_;
 
-  explicit Operand(CpuRegister reg) : rex_(0), length_(0) { SetModRM(3, reg); }
+  explicit Operand(CpuRegister reg) : rex_(0), length_(0), fixup_(nullptr) { SetModRM(3, reg); }
 
   // Get the operand encoding byte at the given index.
   uint8_t encoding_at(int index_in) const {
@@ -226,9 +235,22 @@ class Address : public Operand {
       result.SetSIB(TIMES_1, CpuRegister(RSP), CpuRegister(RBP));
       result.SetDisp32(addr);
     } else {
+      // RIP addressing is done using RBP as the base register.
+      // The value in RBP isn't used.  Instead the offset is added to RIP.
       result.SetModRM(0, CpuRegister(RBP));
       result.SetDisp32(addr);
     }
+    return result;
+  }
+
+  // An RIP relative address that will be fixed up later.
+  static Address RIP(AssemblerFixup* fixup) {
+    Address result;
+    // RIP addressing is done using RBP as the base register.
+    // The value in RBP isn't used.  Instead the offset is added to RIP.
+    result.SetModRM(0, CpuRegister(RBP));
+    result.SetDisp32(0);
+    result.SetFixup(fixup);
     return result;
   }
 
@@ -242,9 +264,46 @@ class Address : public Operand {
 };
 
 
+/**
+ * Class to handle constant area values.
+ */
+class ConstantArea {
+  public:
+    ConstantArea() {}
+
+    // Add a double to the constant area, returning the offset into
+    // the constant area where the literal resides.
+    int AddDouble(double v);
+
+    // Add a float to the constant area, returning the offset into
+    // the constant area where the literal resides.
+    int AddFloat(float v);
+
+    // Add an int32_t to the constant area, returning the offset into
+    // the constant area where the literal resides.
+    int AddInt32(int32_t v);
+
+    // Add an int64_t to the constant area, returning the offset into
+    // the constant area where the literal resides.
+    int AddInt64(int64_t v);
+
+    int GetSize() const {
+      return buffer_.size() * elem_size_;
+    }
+
+    const std::vector<int32_t>& GetBuffer() const {
+      return buffer_;
+    }
+
+  private:
+    static constexpr size_t elem_size_ = sizeof(int32_t);
+    std::vector<int32_t> buffer_;
+};
+
+
 class X86_64Assembler FINAL : public Assembler {
  public:
-  X86_64Assembler() : cfi_cfa_offset_(0), cfi_pc_(0) {}
+  X86_64Assembler() {}
   virtual ~X86_64Assembler() {}
 
   /*
@@ -269,6 +328,7 @@ class X86_64Assembler FINAL : public Assembler {
   void movq(CpuRegister dst, const Address& src);
   void movl(CpuRegister dst, const Address& src);
   void movq(const Address& dst, CpuRegister src);
+  void movq(const Address& dst, const Immediate& src);
   void movl(const Address& dst, CpuRegister src);
   void movl(const Address& dst, const Immediate& imm);
 
@@ -332,14 +392,18 @@ class X86_64Assembler FINAL : public Assembler {
 
   void cvtsi2ss(XmmRegister dst, CpuRegister src);  // Note: this is the r/m32 version.
   void cvtsi2ss(XmmRegister dst, CpuRegister src, bool is64bit);
+  void cvtsi2ss(XmmRegister dst, const Address& src, bool is64bit);
   void cvtsi2sd(XmmRegister dst, CpuRegister src);  // Note: this is the r/m32 version.
   void cvtsi2sd(XmmRegister dst, CpuRegister src, bool is64bit);
+  void cvtsi2sd(XmmRegister dst, const Address& src, bool is64bit);
 
   void cvtss2si(CpuRegister dst, XmmRegister src);  // Note: this is the r32 version.
   void cvtss2sd(XmmRegister dst, XmmRegister src);
+  void cvtss2sd(XmmRegister dst, const Address& src);
 
   void cvtsd2si(CpuRegister dst, XmmRegister src);  // Note: this is the r32 version.
   void cvtsd2ss(XmmRegister dst, XmmRegister src);
+  void cvtsd2ss(XmmRegister dst, const Address& src);
 
   void cvttss2si(CpuRegister dst, XmmRegister src);  // Note: this is the r32 version.
   void cvttss2si(CpuRegister dst, XmmRegister src, bool is64bit);
@@ -349,9 +413,16 @@ class X86_64Assembler FINAL : public Assembler {
   void cvtdq2pd(XmmRegister dst, XmmRegister src);
 
   void comiss(XmmRegister a, XmmRegister b);
+  void comiss(XmmRegister a, const Address& b);
   void comisd(XmmRegister a, XmmRegister b);
+  void comisd(XmmRegister a, const Address& b);
   void ucomiss(XmmRegister a, XmmRegister b);
+  void ucomiss(XmmRegister a, const Address& b);
   void ucomisd(XmmRegister a, XmmRegister b);
+  void ucomisd(XmmRegister a, const Address& b);
+
+  void roundsd(XmmRegister dst, XmmRegister src, const Immediate& imm);
+  void roundss(XmmRegister dst, XmmRegister src, const Immediate& imm);
 
   void sqrtsd(XmmRegister dst, XmmRegister src);
   void sqrtss(XmmRegister dst, XmmRegister src);
@@ -386,6 +457,7 @@ class X86_64Assembler FINAL : public Assembler {
   void fistpl(const Address& dst);
   void fistps(const Address& dst);
   void fildl(const Address& src);
+  void filds(const Address& src);
 
   void fincstp();
   void ffree(const Immediate& index);
@@ -424,17 +496,21 @@ class X86_64Assembler FINAL : public Assembler {
   void andl(CpuRegister reg, const Address& address);
   void andq(CpuRegister dst, const Immediate& imm);
   void andq(CpuRegister dst, CpuRegister src);
+  void andq(CpuRegister reg, const Address& address);
 
   void orl(CpuRegister dst, const Immediate& imm);
   void orl(CpuRegister dst, CpuRegister src);
   void orl(CpuRegister reg, const Address& address);
   void orq(CpuRegister dst, CpuRegister src);
+  void orq(CpuRegister dst, const Immediate& imm);
+  void orq(CpuRegister reg, const Address& address);
 
   void xorl(CpuRegister dst, CpuRegister src);
   void xorl(CpuRegister dst, const Immediate& imm);
   void xorl(CpuRegister reg, const Address& address);
   void xorq(CpuRegister dst, const Immediate& imm);
   void xorq(CpuRegister dst, CpuRegister src);
+  void xorq(CpuRegister reg, const Address& address);
 
   void addl(CpuRegister dst, CpuRegister src);
   void addl(CpuRegister reg, const Immediate& imm);
@@ -464,9 +540,11 @@ class X86_64Assembler FINAL : public Assembler {
   void imull(CpuRegister reg, const Immediate& imm);
   void imull(CpuRegister reg, const Address& address);
 
+  void imulq(CpuRegister src);
   void imulq(CpuRegister dst, CpuRegister src);
   void imulq(CpuRegister reg, const Immediate& imm);
   void imulq(CpuRegister reg, const Address& address);
+  void imulq(CpuRegister dst, CpuRegister reg, const Immediate& imm);
 
   void imull(CpuRegister reg);
   void imull(const Address& address);
@@ -512,6 +590,7 @@ class X86_64Assembler FINAL : public Assembler {
 
   X86_64Assembler* lock();
   void cmpxchgl(const Address& address, CpuRegister reg);
+  void cmpxchgq(const Address& address, CpuRegister reg);
 
   void mfence();
 
@@ -532,6 +611,10 @@ class X86_64Assembler FINAL : public Assembler {
 
   void LockCmpxchgl(const Address& address, CpuRegister reg) {
     lock()->cmpxchgl(address, reg);
+  }
+
+  void LockCmpxchgq(const Address& address, CpuRegister reg) {
+    lock()->cmpxchgq(address, reg);
   }
 
   //
@@ -628,17 +711,17 @@ class X86_64Assembler FINAL : public Assembler {
   void GetCurrentThread(ManagedRegister tr) OVERRIDE;
   void GetCurrentThread(FrameOffset dest_offset, ManagedRegister scratch) OVERRIDE;
 
-  // Set up out_reg to hold a Object** into the handle scope, or to be NULL if the
+  // Set up out_reg to hold a Object** into the handle scope, or to be null if the
   // value is null and null_allowed. in_reg holds a possibly stale reference
   // that can be used to avoid loading the handle scope entry to see if the value is
-  // NULL.
-  void CreateHandleScopeEntry(ManagedRegister out_reg, FrameOffset handlescope_offset, ManagedRegister in_reg,
-                       bool null_allowed) OVERRIDE;
+  // null.
+  void CreateHandleScopeEntry(ManagedRegister out_reg, FrameOffset handlescope_offset,
+                              ManagedRegister in_reg, bool null_allowed) OVERRIDE;
 
-  // Set up out_off to hold a Object** into the handle scope, or to be NULL if the
+  // Set up out_off to hold a Object** into the handle scope, or to be null if the
   // value is null and null_allowed.
-  void CreateHandleScopeEntry(FrameOffset out_off, FrameOffset handlescope_offset, ManagedRegister scratch,
-                       bool null_allowed) OVERRIDE;
+  void CreateHandleScopeEntry(FrameOffset out_off, FrameOffset handlescope_offset,
+                              ManagedRegister scratch, bool null_allowed) OVERRIDE;
 
   // src holds a handle scope entry (Object**) load this into dst
   virtual void LoadReferenceFromHandleScope(ManagedRegister dst,
@@ -658,11 +741,27 @@ class X86_64Assembler FINAL : public Assembler {
   // and branch to a ExceptionSlowPath if it is.
   void ExceptionPoll(ManagedRegister scratch, size_t stack_adjust) OVERRIDE;
 
-  void InitializeFrameDescriptionEntry() OVERRIDE;
-  void FinalizeFrameDescriptionEntry() OVERRIDE;
-  std::vector<uint8_t>* GetFrameDescriptionEntry() OVERRIDE {
-    return &cfi_info_;
-  }
+  // Add a double to the constant area, returning the offset into
+  // the constant area where the literal resides.
+  int AddDouble(double v) { return constant_area_.AddDouble(v); }
+
+  // Add a float to the constant area, returning the offset into
+  // the constant area where the literal resides.
+  int AddFloat(float v)   { return constant_area_.AddFloat(v); }
+
+  // Add an int32_t to the constant area, returning the offset into
+  // the constant area where the literal resides.
+  int AddInt32(int32_t v) { return constant_area_.AddInt32(v); }
+
+  // Add an int64_t to the constant area, returning the offset into
+  // the constant area where the literal resides.
+  int AddInt64(int64_t v) { return constant_area_.AddInt64(v); }
+
+  // Add the contents of the constant area to the assembler buffer.
+  void AddConstantArea();
+
+  // Is the constant area empty? Return true if there are no literals in the constant area.
+  bool IsConstantAreaEmpty() const { return constant_area_.GetSize() == 0; }
 
  private:
   void EmitUint8(uint8_t value);
@@ -702,6 +801,7 @@ class X86_64Assembler FINAL : public Assembler {
   void EmitRex64(const Operand& operand);
   void EmitRex64(CpuRegister dst, CpuRegister src);
   void EmitRex64(CpuRegister dst, const Operand& operand);
+  void EmitRex64(XmmRegister dst, const Operand& operand);
   void EmitRex64(XmmRegister dst, CpuRegister src);
   void EmitRex64(CpuRegister dst, XmmRegister src);
 
@@ -709,8 +809,7 @@ class X86_64Assembler FINAL : public Assembler {
   void EmitOptionalByteRegNormalizingRex32(CpuRegister dst, CpuRegister src);
   void EmitOptionalByteRegNormalizingRex32(CpuRegister dst, const Operand& operand);
 
-  std::vector<uint8_t> cfi_info_;
-  uint32_t cfi_cfa_offset_, cfi_pc_;
+  ConstantArea constant_area_;
 
   DISALLOW_COPY_AND_ASSIGN(X86_64Assembler);
 };

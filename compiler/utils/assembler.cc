@@ -41,8 +41,8 @@ AssemblerBuffer::AssemblerBuffer() {
   contents_ = NewContents(kInitialBufferCapacity);
   cursor_ = contents_;
   limit_ = ComputeLimit(contents_, kInitialBufferCapacity);
-  fixup_ = NULL;
-  slow_path_ = NULL;
+  fixup_ = nullptr;
+  slow_path_ = nullptr;
 #ifndef NDEBUG
   has_ensured_capacity_ = false;
   fixups_processed_ = false;
@@ -61,7 +61,7 @@ AssemblerBuffer::~AssemblerBuffer() {
 
 void AssemblerBuffer::ProcessFixups(const MemoryRegion& region) {
   AssemblerFixup* fixup = fixup_;
-  while (fixup != NULL) {
+  while (fixup != nullptr) {
     fixup->Process(region, fixup->position());
     fixup = fixup->previous();
   }
@@ -105,6 +105,9 @@ void AssemblerBuffer::ExtendCapacity() {
   CHECK_EQ(Size(), old_size);
 }
 
+void DebugFrameOpCodeWriterForAssembler::ImplicitlyAdvancePC() {
+  this->AdvancePC(assembler_->CodeSize());
+}
 
 Assembler* Assembler::Create(InstructionSet instruction_set) {
   switch (instruction_set) {
@@ -124,7 +127,7 @@ Assembler* Assembler::Create(InstructionSet instruction_set) {
       return new x86_64::X86_64Assembler();
     default:
       LOG(FATAL) << "Unknown InstructionSet: " << instruction_set;
-      return NULL;
+      return nullptr;
   }
 }
 

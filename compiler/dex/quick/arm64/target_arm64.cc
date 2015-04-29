@@ -53,10 +53,9 @@ static constexpr RegStorage dp_regs_arr[] =
      rs_d24, rs_d25, rs_d26, rs_d27, rs_d28, rs_d29, rs_d30, rs_d31};
 // Note: we are not able to call to C function since rs_xSELF is a special register need to be
 // preserved but would be scratched by native functions follow aapcs64.
-static constexpr RegStorage reserved_regs_arr[] =
-    {rs_wSUSPEND, rs_wSELF, rs_wsp, rs_wLR, rs_wzr};
-static constexpr RegStorage reserved64_regs_arr[] =
-    {rs_xSUSPEND, rs_xSELF, rs_sp, rs_xLR, rs_xzr};
+static constexpr RegStorage reserved_regs_arr[] = {rs_wSELF, rs_wsp, rs_wLR, rs_wzr};
+static constexpr RegStorage reserved64_regs_arr[] = {rs_xSELF, rs_sp, rs_xLR, rs_xzr};
+
 static constexpr RegStorage core_temps_arr[] =
     {rs_w0, rs_w1, rs_w2, rs_w3, rs_w4, rs_w5, rs_w6, rs_w7,
      rs_w8, rs_w9, rs_w10, rs_w11, rs_w12, rs_w13, rs_w14, rs_w15, rs_w16,
@@ -110,7 +109,7 @@ RegStorage Arm64Mir2Lir::TargetReg(SpecialTargetRegister reg) {
   RegStorage res_reg = RegStorage::InvalidReg();
   switch (reg) {
     case kSelf: res_reg = rs_wSELF; break;
-    case kSuspend: res_reg = rs_wSUSPEND; break;
+    case kSuspend: res_reg = RegStorage::InvalidReg(); break;
     case kLr: res_reg =  rs_wLR; break;
     case kPc: res_reg = RegStorage::InvalidReg(); break;
     case kSp: res_reg =  rs_wsp; break;
@@ -606,7 +605,8 @@ RegisterClass Arm64Mir2Lir::RegClassForFieldLoadStore(OpSize size, bool is_volat
 
 Arm64Mir2Lir::Arm64Mir2Lir(CompilationUnit* cu, MIRGraph* mir_graph, ArenaAllocator* arena)
     : Mir2Lir(cu, mir_graph, arena),
-      call_method_insns_(arena->Adapter()) {
+      call_method_insns_(arena->Adapter()),
+      dex_cache_access_insns_(arena->Adapter()) {
   // Sanity check - make sure encoding map lines up.
   for (int i = 0; i < kA64Last; i++) {
     DCHECK_EQ(UNWIDE(Arm64Mir2Lir::EncodingMap[i].opcode), i)
@@ -846,16 +846,27 @@ RegStorage Arm64Mir2Lir::InToRegStorageArm64Mapper::GetNextReg(ShortyArg arg) {
 }
 
 void Arm64Mir2Lir::InstallLiteralPools() {
+  patches_.reserve(call_method_insns_.size() + dex_cache_access_insns_.size());
+
   // PC-relative calls to methods.
-  patches_.reserve(call_method_insns_.size());
   for (LIR* p : call_method_insns_) {
       DCHECK_EQ(p->opcode, kA64Bl1t);
       uint32_t target_method_idx = p->operands[1];
-      const DexFile* target_dex_file =
-          reinterpret_cast<const DexFile*>(UnwrapPointer(p->operands[2]));
-
+      const DexFile* target_dex_file = UnwrapPointer<DexFile>(p->operands[2]);
       patches_.push_back(LinkerPatch::RelativeCodePatch(p->offset,
                                                         target_dex_file, target_method_idx));
+  }
+
+  // PC-relative references to dex cache arrays.
+  for (LIR* p : dex_cache_access_insns_) {
+    DCHECK(p->opcode == kA64Adrp2xd || p->opcode == kA64Ldr3rXD);
+    const LIR* adrp = UnwrapPointer<LIR>(p->operands[4]);
+    DCHECK_EQ(adrp->opcode, kA64Adrp2xd);
+    const DexFile* dex_file = UnwrapPointer<DexFile>(adrp->operands[2]);
+    uint32_t offset = adrp->operands[3];
+    DCHECK(!p->flags.is_nop);
+    DCHECK(!adrp->flags.is_nop);
+    patches_.push_back(LinkerPatch::DexCacheArrayPatch(p->offset, dex_file, adrp->offset, offset));
   }
 
   // And do the normal processing.

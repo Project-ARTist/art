@@ -250,7 +250,11 @@ const InstructionSetFeatures* InstructionSetFeatures::AddFeaturesFromString(
     }
     first = true;
   }
-  DCHECK_EQ(use_default, features.empty());
+  // Expectation: "default" is standalone, no other flags. But an empty features vector after
+  // processing can also come along if the handled flags (at the moment only smp) are the only
+  // ones in the list. So logically, we check "default -> features.empty."
+  DCHECK(!use_default || features.empty());
+
   return AddFeaturesFromSplitString(smp, features, error_msg);
 }
 
@@ -284,10 +288,10 @@ const X86_64InstructionSetFeatures* InstructionSetFeatures::AsX86_64InstructionS
   return down_cast<const X86_64InstructionSetFeatures*>(this);
 }
 
-bool InstructionSetFeatures::FindVariantInArray(const char* variants[], size_t num_variants,
+bool InstructionSetFeatures::FindVariantInArray(const char* const variants[], size_t num_variants,
                                                 const std::string& variant) {
-  const char** begin = variants;
-  const char** end = begin + num_variants;
+  const char* const * begin = variants;
+  const char* const * end = begin + num_variants;
   return std::find(begin, end, variant) != end;
 }
 

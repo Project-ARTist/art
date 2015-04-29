@@ -19,6 +19,7 @@
 
 #include <map>
 #include <memory>
+#include <type_traits>
 #include <vector>
 
 // Explicitly include our own elf.h to avoid Linux and other dependencies.
@@ -31,11 +32,22 @@ extern "C" {
   struct JITCodeEntry;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
+template <typename ElfTypes>
 class ElfFileImpl {
  public:
+  using Elf_Addr = typename ElfTypes::Addr;
+  using Elf_Off = typename ElfTypes::Off;
+  using Elf_Half = typename ElfTypes::Half;
+  using Elf_Word = typename ElfTypes::Word;
+  using Elf_Sword = typename ElfTypes::Sword;
+  using Elf_Ehdr = typename ElfTypes::Ehdr;
+  using Elf_Shdr = typename ElfTypes::Shdr;
+  using Elf_Sym = typename ElfTypes::Sym;
+  using Elf_Rel = typename ElfTypes::Rel;
+  using Elf_Rela = typename ElfTypes::Rela;
+  using Elf_Phdr = typename ElfTypes::Phdr;
+  using Elf_Dyn = typename ElfTypes::Dyn;
+
   static ElfFileImpl* Open(File* file, bool writable, bool program_header_only,
                            std::string* error_msg, uint8_t* requested_base = nullptr);
   static ElfFileImpl* Open(File* file, int mmap_prot, int mmap_flags, std::string* error_msg);
@@ -82,8 +94,7 @@ class ElfFileImpl {
                              const std::string& symbol_name,
                              bool build_map);
 
-  // Lookup a string given string section and offset. Returns nullptr for
-  // special 0 offset.
+  // Lookup a string given string section and offset. Returns null for special 0 offset.
   const char* GetString(Elf_Shdr&, Elf_Word) const;
 
   Elf_Word GetDynamicNum() const;
@@ -102,13 +113,19 @@ class ElfFileImpl {
   // executable is true at run time, false at compile time.
   bool Load(bool executable, std::string* error_msg);
 
-  bool Fixup(uintptr_t base_address);
-  bool FixupDynamic(uintptr_t base_address);
-  bool FixupSectionHeaders(uintptr_t base_address);
-  bool FixupProgramHeaders(uintptr_t base_address);
-  bool FixupSymbols(uintptr_t base_address, bool dynamic);
-  bool FixupRelocations(uintptr_t base_address);
-  bool FixupDebugSections(off_t base_address_delta);
+  bool Fixup(Elf_Addr base_address);
+  bool FixupDynamic(Elf_Addr base_address);
+  bool FixupSectionHeaders(Elf_Addr base_address);
+  bool FixupProgramHeaders(Elf_Addr base_address);
+  bool FixupSymbols(Elf_Addr base_address, bool dynamic);
+  bool FixupRelocations(Elf_Addr base_address);
+  bool FixupDebugSections(typename std::make_signed<Elf_Off>::type base_address_delta);
+  bool ApplyOatPatchesTo(const char* target_section_name,
+                         typename std::make_signed<Elf_Off>::type base_address_delta);
+  static bool ApplyOatPatches(const uint8_t* patches, const uint8_t* patches_end,
+                              const char* target_section_name,
+                              typename std::make_signed<Elf_Off>::type delta,
+                              uint8_t* to_patch, const uint8_t* to_patch_end);
 
   bool Strip(std::string* error_msg);
 
@@ -149,7 +166,7 @@ class ElfFileImpl {
   // Check whether the offset is in range, and set to target to Begin() + offset if OK.
   bool CheckAndSet(Elf32_Off offset, const char* label, uint8_t** target, std::string* error_msg);
 
-  // Find symbol in specified table, returning nullptr if it is not found.
+  // Find symbol in specified table, returning null if it is not found.
   //
   // If build_map is true, builds a map to speed repeated access. The
   // map does not included untyped symbol values (aka STT_NOTYPE)
@@ -166,7 +183,7 @@ class ElfFileImpl {
   Elf_Dyn* FindDynamicByType(Elf_Sword type) const;
   Elf_Word FindDynamicValueByType(Elf_Sword type) const;
 
-  // Lookup a string by section type. Returns nullptr for special 0 offset.
+  // Lookup a string by section type. Returns null for special 0 offset.
   const char* GetString(Elf_Word section_type, Elf_Word) const;
 
   const File* const file_;
@@ -202,9 +219,7 @@ class ElfFileImpl {
   // Support for GDB JIT
   uint8_t* jit_elf_image_;
   JITCodeEntry* jit_gdb_entry_;
-  std::unique_ptr<ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-                  Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel,
-                  Elf_Rela, Elf_Dyn, Elf_Off>> gdb_file_mapping_;
+  std::unique_ptr<ElfFileImpl<ElfTypes>> gdb_file_mapping_;
   void GdbJITSupport();
 
   // Override the 'base' p_vaddr in the first LOAD segment with this value (if non-null).

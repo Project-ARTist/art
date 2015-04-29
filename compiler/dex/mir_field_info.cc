@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "base/logging.h"
+#include "dex/verified_method.h"
 #include "driver/compiler_driver.h"
 #include "driver/compiler_driver-inl.h"
 #include "mirror/class_loader.h"  // Only to allow casts in Handle<ClassLoader>.
@@ -55,7 +56,7 @@ void MirIFieldLoweringInfo::Resolve(CompilerDriver* compiler_driver,
   // definition) we still want to resolve fields and record all available info.
   for (auto it = field_infos, end = field_infos + count; it != end; ++it) {
     uint32_t field_idx;
-    mirror::ArtField* resolved_field;
+    ArtField* resolved_field;
     if (!it->IsQuickened()) {
       field_idx = it->field_idx_;
       resolved_field = compiler_driver->ResolveField(soa, dex_cache, class_loader, mUnit,
@@ -120,7 +121,7 @@ void MirSFieldLoweringInfo::Resolve(CompilerDriver* compiler_driver,
 
   for (auto it = field_infos, end = field_infos + count; it != end; ++it) {
     uint32_t field_idx = it->field_idx_;
-    mirror::ArtField* resolved_field =
+    ArtField* resolved_field =
         compiler_driver->ResolveField(soa, dex_cache, class_loader, mUnit, field_idx, true);
     if (UNLIKELY(resolved_field == nullptr)) {
       continue;

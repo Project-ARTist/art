@@ -32,7 +32,8 @@ class CompilerOptions FINAL {
  public:
   enum CompilerFilter {
     kVerifyNone,          // Skip verification and compile nothing except JNI stubs.
-    kInterpretOnly,       // Compile nothing except JNI stubs.
+    kInterpretOnly,       // Verify, and compile only JNI stubs.
+    kVerifyAtRuntime,     // Only compile JNI stubs and verify at runtime.
     kSpace,               // Maximize space savings.
     kBalanced,            // Try to get the best performance return on compilation investment.
     kSpeed,               // Maximize runtime performance.
@@ -52,6 +53,7 @@ class CompilerOptions FINAL {
   static const bool kDefaultIncludePatchInformation = false;
 
   CompilerOptions();
+  ~CompilerOptions();
 
   CompilerOptions(CompilerFilter compiler_filter,
                   size_t huge_method_threshold,
@@ -59,11 +61,11 @@ class CompilerOptions FINAL {
                   size_t small_method_threshold,
                   size_t tiny_method_threshold,
                   size_t num_dex_methods_threshold,
-                  bool generate_gdb_information,
                   bool include_patch_information,
                   double top_k_profile_threshold,
                   bool debuggable,
                   bool include_debug_symbols,
+                  bool include_cfi,
                   bool implicit_null_checks,
                   bool implicit_so_checks,
                   bool implicit_suspend_checks,
@@ -81,13 +83,23 @@ class CompilerOptions FINAL {
     compiler_filter_ = compiler_filter;
   }
 
+  bool VerifyAtRuntime() const {
+    return compiler_filter_ == CompilerOptions::kVerifyAtRuntime;
+  }
+
   bool IsCompilationEnabled() const {
-    return ((compiler_filter_ != CompilerOptions::kVerifyNone) &&
-            (compiler_filter_ != CompilerOptions::kInterpretOnly));
+    return compiler_filter_ != CompilerOptions::kVerifyNone &&
+        compiler_filter_ != CompilerOptions::kInterpretOnly &&
+        compiler_filter_ != CompilerOptions::kVerifyAtRuntime;
   }
 
   bool IsVerificationEnabled() const {
-    return (compiler_filter_ != CompilerOptions::kVerifyNone);
+    return compiler_filter_ != CompilerOptions::kVerifyNone &&
+        compiler_filter_ != CompilerOptions::kVerifyAtRuntime;
+  }
+
+  bool NeverVerify() const {
+    return compiler_filter_ == CompilerOptions::kVerifyNone;
   }
 
   size_t GetHugeMethodThreshold() const {
@@ -138,6 +150,11 @@ class CompilerOptions FINAL {
     return include_debug_symbols_;
   }
 
+  bool GetIncludeCFI() const {
+    // include-debug-symbols implies include-cfi.
+    return include_cfi_ || include_debug_symbols_;
+  }
+
   bool GetImplicitNullChecks() const {
     return implicit_null_checks_;
   }
@@ -148,10 +165,6 @@ class CompilerOptions FINAL {
 
   bool GetImplicitSuspendChecks() const {
     return implicit_suspend_checks_;
-  }
-
-  bool GetGenerateGDBInformation() const {
-    return generate_gdb_information_;
   }
 
   bool GetIncludePatchInformation() const {
@@ -195,12 +208,12 @@ class CompilerOptions FINAL {
   const size_t small_method_threshold_;
   const size_t tiny_method_threshold_;
   const size_t num_dex_methods_threshold_;
-  const bool generate_gdb_information_;
   const bool include_patch_information_;
   // When using a profile file only the top K% of the profiled samples will be compiled.
   const double top_k_profile_threshold_;
   const bool debuggable_;
   const bool include_debug_symbols_;
+  const bool include_cfi_;
   const bool implicit_null_checks_;
   const bool implicit_so_checks_;
   const bool implicit_suspend_checks_;

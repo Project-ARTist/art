@@ -32,7 +32,7 @@
 
     // xIP0 = (ArtMethod*) Runtime.instance_.callee_save_methods[kRefAndArgs]  .
     THIS_LOAD_REQUIRES_READ_BARRIER
-    ldr xIP0, [xIP0, RUNTIME_SAVE_ALL_CALLEE_SAVE_FRAME_OFFSET ]
+    ldr wIP0, [xIP0, RUNTIME_SAVE_ALL_CALLEE_SAVE_FRAME_OFFSET ]
 
     sub sp, sp, #176
     .cfi_adjust_cfa_offset 176
@@ -48,8 +48,8 @@
     stp d12, d13, [sp, #40]
     stp d14, d15, [sp, #56]
 
-    // Reserved registers
-    stp xSELF, xSUSPEND, [sp, #72]
+    // Thread register and x19 (callee-save)
+    stp xSELF, x19, [sp, #72]
     .cfi_rel_offset x18, 72
     .cfi_rel_offset x19, 80
 
@@ -97,40 +97,41 @@
 
     // xIP0 = (ArtMethod*) Runtime.instance_.callee_save_methods[kRefAndArgs]  .
     THIS_LOAD_REQUIRES_READ_BARRIER
-    ldr xIP0, [xIP0, RUNTIME_REFS_ONLY_CALLEE_SAVE_FRAME_OFFSET ]
+    ldr wIP0, [xIP0, RUNTIME_REFS_ONLY_CALLEE_SAVE_FRAME_OFFSET ]
 
-    sub sp, sp, #96
-    .cfi_adjust_cfa_offset 96
+    sub sp, sp, #112
+    .cfi_adjust_cfa_offset 112
 
     // Ugly compile-time check, but we only have the preprocessor.
-#if (FRAME_SIZE_REFS_ONLY_CALLEE_SAVE != 96)
+#if (FRAME_SIZE_REFS_ONLY_CALLEE_SAVE != 112)
 #error "REFS_ONLY_CALLEE_SAVE_FRAME(ARM64) size not as expected."
 #endif
 
     // Callee-saves
-    stp x20, x21,  [sp, #8]
-    .cfi_rel_offset x20, 8
-    .cfi_rel_offset x21, 16
+    stp x19, x20,  [sp, #16]
+    .cfi_rel_offset x19, 16
+    .cfi_rel_offset x20, 24
 
-    stp x22, x23, [sp, #24]
-    .cfi_rel_offset x22, 24
-    .cfi_rel_offset x23, 32
+    stp x21, x22, [sp, #32]
+    .cfi_rel_offset x21, 32
+    .cfi_rel_offset x22, 40
 
-    stp x24, x25, [sp, #40]
-    .cfi_rel_offset x24, 40
-    .cfi_rel_offset x25, 48
+    stp x23, x24, [sp, #48]
+    .cfi_rel_offset x23, 48
+    .cfi_rel_offset x24, 56
 
-    stp x26, x27, [sp, #56]
-    .cfi_rel_offset x26, 56
-    .cfi_rel_offset x27, 64
+    stp x25, x26, [sp, #64]
+    .cfi_rel_offset x25, 64
+    .cfi_rel_offset x26, 72
 
-    stp x28, x29, [sp, #72]
-    .cfi_rel_offset x28, 72
-    .cfi_rel_offset x29, 80
+    stp x27, x28, [sp, #80]
+    .cfi_rel_offset x27, 80
+    .cfi_rel_offset x28, 88
 
-    // LR
-    str xLR, [sp, #88]
-    .cfi_rel_offset x30, 88
+    // x29(callee-save) and LR
+    stp x29, xLR, [sp, #96]
+    .cfi_rel_offset x29, 96
+    .cfi_rel_offset x30, 104
 
     // Save xSELF to xETR.
     mov xETR, xSELF
@@ -148,32 +149,33 @@
     mov xSELF, xETR
 
     // Callee-saves
-    ldp x20, x21,  [sp, #8]
+    ldp x19, x20,  [sp, #16]
+    .cfi_restore x19
     .cfi_restore x20
+
+    ldp x21, x22, [sp, #32]
     .cfi_restore x21
-
-    ldp x22, x23, [sp, #24]
     .cfi_restore x22
+
+    ldp x23, x24, [sp, #48]
     .cfi_restore x23
-
-    ldp x24, x25, [sp, #40]
     .cfi_restore x24
+
+    ldp x25, x26, [sp, #64]
     .cfi_restore x25
-
-    ldp x26, x27, [sp, #56]
     .cfi_restore x26
+
+    ldp x27, x28, [sp, #80]
     .cfi_restore x27
-
-    ldp x28, x29, [sp, #72]
     .cfi_restore x28
-    .cfi_restore x29
 
-    // LR
-    ldr xLR, [sp, #88]
+    // x29(callee-save) and LR
+    ldp x29, xLR, [sp, #96]
+    .cfi_restore x29
     .cfi_restore x30
 
-    add sp, sp, #96
-    .cfi_adjust_cfa_offset -96
+    add sp, sp, #112
+    .cfi_adjust_cfa_offset -112
 .endm
 
 .macro POP_REFS_ONLY_CALLEE_SAVE_FRAME
@@ -183,8 +185,8 @@
     ldr xETR, [sp, #16]
     .cfi_restore x21
 
-    add sp, sp, #96
-    .cfi_adjust_cfa_offset -96
+    add sp, sp, #112
+    .cfi_adjust_cfa_offset -112
 .endm
 
 .macro RESTORE_REFS_ONLY_CALLEE_SAVE_FRAME_AND_RETURN
@@ -202,30 +204,33 @@
 #error "REFS_AND_ARGS_CALLEE_SAVE_FRAME(ARM64) size not as expected."
 #endif
 
-    // FP args
-    stp d0, d1, [sp, #16]
-    stp d2, d3, [sp, #32]
-    stp d4, d5, [sp, #48]
-    stp d6, d7, [sp, #64]
+    // FP args.
+    stp d0, d1, [sp, #8]
+    stp d2, d3, [sp, #24]
+    stp d4, d5, [sp, #40]
+    stp d6, d7, [sp, #56]
 
-    // args and x20(callee-save)
-    stp x1,  x2, [sp, #80]
-    .cfi_rel_offset x1, 80
-    .cfi_rel_offset x2, 88
+    // Core args.
+    str x1, [sp, 72]
+    .cfi_rel_offset x1, 72
 
-    stp x3,  x4, [sp, #96]
-    .cfi_rel_offset x3, 96
-    .cfi_rel_offset x4, 104
+    stp x2,  x3, [sp, #80]
+    .cfi_rel_offset x2, 80
+    .cfi_rel_offset x3, 88
 
-    stp x5,  x6, [sp, #112]
-    .cfi_rel_offset x5, 112
-    .cfi_rel_offset x6, 120
+    stp x4,  x5, [sp, #96]
+    .cfi_rel_offset x4, 96
+    .cfi_rel_offset x5, 104
 
-    stp x7, x20, [sp, #128]
-    .cfi_rel_offset x7, 128
-    .cfi_rel_offset x20, 136
+    stp x6,  x7, [sp, #112]
+    .cfi_rel_offset x6, 112
+    .cfi_rel_offset x7, 120
 
     // Callee-saves.
+    stp x19, x20, [sp, #128]
+    .cfi_rel_offset x19, 128
+    .cfi_rel_offset x20, 136
+
     stp x21, x22, [sp, #144]
     .cfi_rel_offset x21, 144
     .cfi_rel_offset x22, 152
@@ -266,7 +271,7 @@
 
     // xIP0 = (ArtMethod*) Runtime.instance_.callee_save_methods[kRefAndArgs]  .
     THIS_LOAD_REQUIRES_READ_BARRIER
-    ldr xIP0, [xIP0, RUNTIME_REFS_AND_ARGS_CALLEE_SAVE_FRAME_OFFSET ]
+    ldr wIP0, [xIP0, RUNTIME_REFS_AND_ARGS_CALLEE_SAVE_FRAME_OFFSET ]
 
     SETUP_REFS_AND_ARGS_CALLEE_SAVE_FRAME_INTERNAL
 
@@ -289,30 +294,33 @@
     // Restore xSELF.
     mov xSELF, xETR
 
-    // FP args
-    ldp d0, d1, [sp, #16]
-    ldp d2, d3, [sp, #32]
-    ldp d4, d5, [sp, #48]
-    ldp d6, d7, [sp, #64]
+    // FP args.
+    ldp d0, d1, [sp, #8]
+    ldp d2, d3, [sp, #24]
+    ldp d4, d5, [sp, #40]
+    ldp d6, d7, [sp, #56]
 
-    // args and x20(callee-save)
-    ldp x1,  x2, [sp, #80]
+    // Core args.
+    ldr x1, [sp, 72]
     .cfi_restore x1
+
+    ldp x2,  x3, [sp, #80]
     .cfi_restore x2
-
-    ldp x3,  x4, [sp, #96]
     .cfi_restore x3
+
+    ldp x4,  x5, [sp, #96]
     .cfi_restore x4
-
-    ldp x5,  x6, [sp, #112]
     .cfi_restore x5
-    .cfi_restore x6
 
-    ldp x7, x20, [sp, #128]
+    ldp x6,  x7, [sp, #112]
+    .cfi_restore x6
     .cfi_restore x7
-    .cfi_restore x20
 
     // Callee-saves.
+    ldp x19, x20, [sp, #128]
+    .cfi_restore x19
+    .cfi_restore x20
+
     ldp x21, x22, [sp, #144]
     .cfi_restore x21
     .cfi_restore x22
@@ -458,7 +466,7 @@ ONE_ARG_RUNTIME_EXCEPTION art_quick_throw_no_such_method, artThrowNoSuchMethodFr
      * The helper will attempt to locate the target and return a 128-bit result in x0/x1 consisting
      * of the target Method* in x0 and method->code_ in x1.
      *
-     * If unsuccessful, the helper will return NULL/????. There will be a pending exception in the
+     * If unsuccessful, the helper will return null/????. There will be a pending exception in the
      * thread and we branch to another stub to deliver it.
      *
      * On success this wrapper will restore arguments and *jump* to the target, leaving the lr
@@ -499,7 +507,7 @@ INVOKE_TRAMPOLINE art_quick_invoke_virtual_trampoline_with_access_check, artInvo
 
 .macro INVOKE_STUB_CREATE_FRAME
 
-SAVE_SIZE=15*8   // x4, x5, x20, x21, x22, x23, x24, x25, x26, x27, x28, xSUSPEND, SP, LR, FP saved.
+SAVE_SIZE=15*8   // x4, x5, x19, x20, x21, x22, x23, x24, x25, x26, x27, x28, SP, LR, FP saved.
 SAVE_SIZE_AND_METHOD=SAVE_SIZE+STACK_REFERENCE_SIZE
 
 
@@ -534,7 +542,7 @@ SAVE_SIZE_AND_METHOD=SAVE_SIZE+STACK_REFERENCE_SIZE
     .cfi_rel_offset x20, 48
     .cfi_rel_offset x21, 56
 
-    stp x9, xSUSPEND, [x10, #32]           // Save old stack pointer and xSUSPEND
+    stp x9, x19, [x10, #32]                // Save old stack pointer and x19.
     .cfi_rel_offset sp, 32
     .cfi_rel_offset x19, 40
 
@@ -549,7 +557,6 @@ SAVE_SIZE_AND_METHOD=SAVE_SIZE+STACK_REFERENCE_SIZE
     mov xFP, x10                           // Use xFP now, as it's callee-saved.
     .cfi_def_cfa_register x29
     mov xSELF, x3                          // Move thread pointer into SELF register.
-    mov wSUSPEND, #SUSPEND_CHECK_INTERVAL  // reset wSUSPEND to suspend check interval
 
     // Copy arguments into stack frame.
     // Use simple copy routine for now.
@@ -558,7 +565,7 @@ SAVE_SIZE_AND_METHOD=SAVE_SIZE+STACK_REFERENCE_SIZE
     // W2 - args length
     // X9 - destination address.
     // W10 - temporary
-    add x9, sp, #4                         // Destination address is bottom of stack + NULL.
+    add x9, sp, #4                         // Destination address is bottom of stack + null.
 
     // Use \@ to differentiate between macro invocations.
 .LcopyParams\@:
@@ -572,7 +579,7 @@ SAVE_SIZE_AND_METHOD=SAVE_SIZE+STACK_REFERENCE_SIZE
 
 .LendCopyParams\@:
 
-    // Store NULL into StackReference<Method>* at bottom of frame.
+    // Store null into StackReference<Method>* at bottom of frame.
     str wzr, [sp]
 
 #if (STACK_REFERENCE_SIZE != 4)
@@ -634,7 +641,7 @@ SAVE_SIZE_AND_METHOD=SAVE_SIZE+STACK_REFERENCE_SIZE
     str x0, [x4]
 
 .Lexit_art_quick_invoke_stub\@:
-    ldp x2, xSUSPEND, [xFP, #32]   // Restore stack pointer and xSUSPEND.
+    ldp x2, x19, [xFP, #32]   // Restore stack pointer and x19.
     .cfi_restore x19
     mov sp, x2
     .cfi_restore sp
@@ -662,7 +669,9 @@ SAVE_SIZE_AND_METHOD=SAVE_SIZE+STACK_REFERENCE_SIZE
  *  |       FP''           | <- SP'
  *  +----------------------+
  *  +----------------------+
- *  |        x19           | <- Used as wSUSPEND, won't be restored by managed code.
+ *  |        x28           | <- TODO: Remove callee-saves.
+ *  |         :            |
+ *  |        x19           |
  *  |        SP'           |
  *  |        X5            |
  *  |        X4            |        Saved registers
@@ -680,7 +689,6 @@ SAVE_SIZE_AND_METHOD=SAVE_SIZE+STACK_REFERENCE_SIZE
  *  x1-x7 - integer parameters.
  *  d0-d7 - Floating point parameters.
  *  xSELF = self
- *  wSUSPEND = suspend count
  *  SP = & of ArtMethod*
  *  x1 = "this" pointer.
  *
@@ -1253,10 +1261,22 @@ ENTRY art_quick_aput_obj
 END art_quick_aput_obj
 
 // Macro to facilitate adding new allocation entrypoints.
+.macro ONE_ARG_DOWNCALL name, entrypoint, return
+    .extern \entrypoint
+ENTRY \name
+    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME // save callee saves in case of GC
+    mov    x1, xSELF                  // pass Thread::Current
+    bl     \entrypoint                // (uint32_t type_idx, Method* method, Thread*)
+    RESTORE_REFS_ONLY_CALLEE_SAVE_FRAME
+    \return
+END \name
+.endm
+
+// Macro to facilitate adding new allocation entrypoints.
 .macro TWO_ARG_DOWNCALL name, entrypoint, return
     .extern \entrypoint
 ENTRY \name
-    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME  // save callee saves in case of GC
+    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME // save callee saves in case of GC
     mov    x2, xSELF                  // pass Thread::Current
     bl     \entrypoint                // (uint32_t type_idx, Method* method, Thread*)
     RESTORE_REFS_ONLY_CALLEE_SAVE_FRAME
@@ -1264,15 +1284,28 @@ ENTRY \name
 END \name
 .endm
 
-// Macro to facilitate adding new array allocation entrypoints.
+// Macro to facilitate adding new allocation entrypoints.
 .macro THREE_ARG_DOWNCALL name, entrypoint, return
     .extern \entrypoint
 ENTRY \name
-    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME  // save callee saves in case of GC
+    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME // save callee saves in case of GC
     mov    x3, xSELF                  // pass Thread::Current
     bl     \entrypoint
     RESTORE_REFS_ONLY_CALLEE_SAVE_FRAME
     \return
+END \name
+.endm
+
+// Macro to facilitate adding new allocation entrypoints.
+.macro FOUR_ARG_DOWNCALL name, entrypoint, return
+    .extern \entrypoint
+ENTRY \name
+    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME // save callee saves in case of GC
+    mov    x4, xSELF                  // pass Thread::Current
+    bl     \entrypoint                //
+    RESTORE_REFS_ONLY_CALLEE_SAVE_FRAME
+    \return
+    DELIVER_PENDING_EXCEPTION
 END \name
 .endm
 
@@ -1331,10 +1364,10 @@ TWO_ARG_REF_DOWNCALL art_quick_handle_fill_data, artHandleFillArrayDataFromCode,
      * initializer and deliver the exception on error. On success the static storage base is
      * returned.
      */
-TWO_ARG_DOWNCALL art_quick_initialize_static_storage, artInitializeStaticStorageFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_DOWNCALL art_quick_initialize_static_storage, artInitializeStaticStorageFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
 
-TWO_ARG_DOWNCALL art_quick_initialize_type, artInitializeTypeFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
-TWO_ARG_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_DOWNCALL art_quick_initialize_type, artInitializeTypeFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
 
 ONE_ARG_REF_DOWNCALL art_quick_get_boolean_static, artGetBooleanStaticFromCode, RETURN_OR_DELIVER_PENDING_EXCEPTION_X1
 ONE_ARG_REF_DOWNCALL art_quick_get_byte_static, artGetByteStaticFromCode, RETURN_OR_DELIVER_PENDING_EXCEPTION_X1
@@ -1378,22 +1411,20 @@ END art_quick_set64_static
 
     /*
      * Entry from managed code to resolve a string, this stub will allocate a String and deliver an
-     * exception on error. On success the String is returned. x0 holds the referring method,
-     * w1 holds the string index. The fast path check for hit in strings cache has already been
-     * performed.
+     * exception on error. On success the String is returned. w0 holds the string index. The fast
+     * path check for hit in strings cache has already been performed.
      */
-TWO_ARG_DOWNCALL art_quick_resolve_string, artResolveStringFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_DOWNCALL art_quick_resolve_string, artResolveStringFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
 
 // Generate the allocation entrypoints for each allocator.
 GENERATE_ALL_ALLOC_ENTRYPOINTS
 
     /*
-     * Called by managed code when the value in wSUSPEND has been decremented to 0.
+     * Called by managed code when the thread has been asked to suspend.
      */
     .extern artTestSuspendFromCode
 ENTRY art_quick_test_suspend
     ldrh   w0, [xSELF, #THREAD_FLAGS_OFFSET]  // get xSELF->state_and_flags.as_struct.flags
-    mov    wSUSPEND, #SUSPEND_CHECK_INTERVAL  // reset wSUSPEND to SUSPEND_CHECK_INTERVAL
     cbnz   w0, .Lneed_suspend                 // check flags == 0
     ret                                       // return if flags == 0
 .Lneed_suspend:
@@ -1477,6 +1508,7 @@ END art_quick_resolution_trampoline
  * | X22               |    callee save
  * | X21               |    callee save
  * | X20               |    callee save
+ * | X19               |    callee save
  * | X7                |    arg7
  * | X6                |    arg6
  * | X5                |    arg5
@@ -1706,18 +1738,13 @@ END art_quick_deoptimize
      */
 ENTRY art_quick_indexof
     ldr   w3, [x0, #MIRROR_STRING_COUNT_OFFSET]
-    ldr   w4, [x0, #MIRROR_STRING_OFFSET_OFFSET]
-    ldr   w0, [x0, #MIRROR_STRING_VALUE_OFFSET] // x0 ?
+    add   x0, x0, #MIRROR_STRING_VALUE_OFFSET
 
     /* Clamp start to [0..count] */
     cmp   w2, #0
     csel  w2, wzr, w2, lt
     cmp   w2, w3
     csel  w2, w3, w2, gt
-
-    /* Build a pointer to the start of the string data */
-    add   x0, x0, #MIRROR_CHAR_ARRAY_DATA_OFFSET
-    add   x0, x0, x4, lsl #1
 
     /* Save a copy to compute result */
     mov   x5, x0
@@ -1810,33 +1837,21 @@ ENTRY art_quick_string_compareto
     ret
 1:                        // Different string objects.
 
-    ldr    w6, [x2, #MIRROR_STRING_OFFSET_OFFSET]
-    ldr    w5, [x1, #MIRROR_STRING_OFFSET_OFFSET]
     ldr    w4, [x2, #MIRROR_STRING_COUNT_OFFSET]
     ldr    w3, [x1, #MIRROR_STRING_COUNT_OFFSET]
-    ldr    w2, [x2, #MIRROR_STRING_VALUE_OFFSET]
-    ldr    w1, [x1, #MIRROR_STRING_VALUE_OFFSET]
+    add    x2, x2, #MIRROR_STRING_VALUE_OFFSET
+    add    x1, x1, #MIRROR_STRING_VALUE_OFFSET
 
     /*
-     * Now:           CharArray*    Offset   Count
-     *    first arg      x2          w6        w4
-     *   second arg      x1          w5        w3
+     * Now:           Data*  Count
+     *    first arg    x2      w4
+     *   second arg    x1      w3
      */
 
     // x0 := str1.length(w4) - str2.length(w3). ldr zero-extended w3/w4 into x3/x4.
     subs x0, x4, x3
     // Min(count1, count2) into w3.
     csel x3, x3, x4, ge
-
-    // Build pointer into string data.
-
-    // Add offset in array (substr etc.) (sign extend and << 1).
-    add x2, x2, w6, sxtw #1
-    add x1, x1, w5, sxtw #1
-
-    // Add offset in CharArray to array.
-    add x2, x2, #MIRROR_CHAR_ARRAY_DATA_OFFSET
-    add x1, x1, #MIRROR_CHAR_ARRAY_DATA_OFFSET
 
     // TODO: Tune this value.
     // Check for long string, do memcmp16 for them.

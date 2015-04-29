@@ -18,6 +18,7 @@
 
 #include <iostream>
 
+#include "art_field-inl.h"
 #include "base/logging.h"
 #include "base/mutex-inl.h"
 #include "class_linker.h"
@@ -30,7 +31,6 @@
 #include "indenter.h"
 #include "intern_table.h"
 #include "leb128.h"
-#include "mirror/art_field-inl.h"
 #include "mirror/art_method-inl.h"
 #include "mirror/class.h"
 #include "mirror/class-inl.h"
@@ -395,12 +395,12 @@ MethodVerifier::MethodVerifier(Thread* self,
       has_virtual_or_interface_invokes_(false),
       verify_to_dump_(verify_to_dump),
       allow_thread_suspension_(allow_thread_suspension) {
-  self->SetVerifier(this);
+  self->PushVerifier(this);
   DCHECK(class_def != nullptr);
 }
 
 MethodVerifier::~MethodVerifier() {
-  Thread::Current()->ClearVerifier(this);
+  Thread::Current()->PopVerifier(this);
   STLDeleteElements(&failure_messages_);
 }
 
@@ -451,7 +451,7 @@ void MethodVerifier::FindLocksAtDexPc() {
   Verify();
 }
 
-mirror::ArtField* MethodVerifier::FindAccessedFieldAtDexPc(mirror::ArtMethod* m,
+ArtField* MethodVerifier::FindAccessedFieldAtDexPc(mirror::ArtMethod* m,
                                                            uint32_t dex_pc) {
   Thread* self = Thread::Current();
   StackHandleScope<3> hs(self);
@@ -464,7 +464,7 @@ mirror::ArtField* MethodVerifier::FindAccessedFieldAtDexPc(mirror::ArtMethod* m,
   return verifier.FindAccessedFieldAtDexPc(dex_pc);
 }
 
-mirror::ArtField* MethodVerifier::FindAccessedFieldAtDexPc(uint32_t dex_pc) {
+ArtField* MethodVerifier::FindAccessedFieldAtDexPc(uint32_t dex_pc) {
   CHECK(code_item_ != nullptr);  // This only makes sense for methods with code.
 
   // Strictly speaking, we ought to be able to get away with doing a subset of the full method
@@ -514,6 +514,23 @@ mirror::ArtMethod* MethodVerifier::FindInvokedMethodAtDexPc(uint32_t dex_pc) {
   const Instruction* inst = Instruction::At(code_item_->insns_ + dex_pc);
   const bool is_range = (inst->Opcode() == Instruction::INVOKE_VIRTUAL_RANGE_QUICK);
   return GetQuickInvokedMethod(inst, register_line, is_range, false);
+}
+
+SafeMap<uint32_t, std::set<uint32_t>> MethodVerifier::FindStringInitMap(mirror::ArtMethod* m) {
+  Thread* self = Thread::Current();
+  StackHandleScope<3> hs(self);
+  Handle<mirror::DexCache> dex_cache(hs.NewHandle(m->GetDexCache()));
+  Handle<mirror::ClassLoader> class_loader(hs.NewHandle(m->GetClassLoader()));
+  Handle<mirror::ArtMethod> method(hs.NewHandle(m));
+  MethodVerifier verifier(self, m->GetDexFile(), dex_cache, class_loader, &m->GetClassDef(),
+                          m->GetCodeItem(), m->GetDexMethodIndex(), method, m->GetAccessFlags(),
+                          true, true, false, true);
+  return verifier.FindStringInitMap();
+}
+
+SafeMap<uint32_t, std::set<uint32_t>>& MethodVerifier::FindStringInitMap() {
+  Verify();
+  return GetStringInitPcRegMap();
 }
 
 bool MethodVerifier::Verify() {
@@ -1075,7 +1092,6 @@ bool MethodVerifier::GetBranchOffset(uint32_t cur_offset, int32_t* pOffset, bool
       break;
     default:
       return false;
-      break;
   }
   return true;
 }
@@ -1086,7 +1102,7 @@ bool MethodVerifier::CheckSwitchTargets(uint32_t cur_offset) {
   const uint16_t* insns = code_item_->insns_ + cur_offset;
   /* make sure the start of the switch is in range */
   int32_t switch_offset = insns[1] | ((int32_t) insns[2]) << 16;
-  if ((int32_t) cur_offset + switch_offset < 0 || cur_offset + switch_offset + 2 >= insn_count) {
+  if ((int32_t) cur_offset + switch_offset < 0 || cur_offset + switch_offset + 2 > insn_count) {
     Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "invalid switch start: at " << cur_offset
                                       << ", switch offset " << switch_offset
                                       << ", count " << insn_count;
@@ -1752,8 +1768,21 @@ bool MethodVerifier::CodeFlowVerifyInstruction(uint32_t* start_guess) {
               Fail(VERIFY_ERROR_NO_CLASS) << " can't resolve returned type '" << return_type
                   << "' or '" << reg_type << "'";
             } else {
-              Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "returning '" << reg_type
-                  << "', but expected from declaration '" << return_type << "'";
+              bool soft_error = false;
+              // Check whether arrays are involved. They will show a valid class status, even
+              // if their components are erroneous.
+              if (reg_type.IsArrayTypes() && return_type.IsArrayTypes()) {
+                return_type.CanAssignArray(reg_type, reg_types_, class_loader_, &soft_error);
+                if (soft_error) {
+                  Fail(VERIFY_ERROR_BAD_CLASS_SOFT) << "array with erroneous component type: "
+                        << reg_type << " vs " << return_type;
+                }
+              }
+
+              if (!soft_error) {
+                Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "returning '" << reg_type
+                    << "', but expected from declaration '" << return_type << "'";
+              }
             }
           }
         }
@@ -2433,7 +2462,8 @@ bool MethodVerifier::CodeFlowVerifyInstruction(uint32_t* start_guess) {
          * Replace the uninitialized reference with an initialized one. We need to do this for all
          * registers that have the same object instance in them, not just the "this" register.
          */
-        work_line_->MarkRefsAsInitialized(this, this_type);
+        const uint32_t this_reg = (is_range) ? inst->VRegC_3rc() : inst->VRegC_35c();
+        work_line_->MarkRefsAsInitialized(this, this_type, this_reg, work_insn_idx_);
       }
       if (return_type == nullptr) {
         return_type = &reg_types_.FromDescriptor(GetClassLoader(), return_type_descriptor,
@@ -2742,9 +2772,17 @@ bool MethodVerifier::CodeFlowVerifyInstruction(uint32_t* start_guess) {
       break;
 
     // Special instructions.
-    case Instruction::RETURN_VOID_BARRIER:
-      if (!IsConstructor() || IsStatic()) {
-          Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "return-void-barrier not expected";
+    case Instruction::RETURN_VOID_NO_BARRIER:
+      if (IsConstructor() && !IsStatic()) {
+        auto& declaring_class = GetDeclaringClass();
+        auto* klass = declaring_class.GetClass();
+        for (uint32_t i = 0, num_fields = klass->NumInstanceFields(); i < num_fields; ++i) {
+          if (klass->GetInstanceField(i)->IsFinal()) {
+            Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "return-void-no-barrier not expected for "
+                << PrettyField(klass->GetInstanceField(i));
+            break;
+          }
+        }
       }
       break;
     // Note: the following instructions encode offsets derived from class linking.
@@ -3017,7 +3055,7 @@ bool MethodVerifier::CodeFlowVerifyInstruction(uint32_t* start_guess) {
       // For returns we only care about the operand to the return, all other registers are dead.
       const Instruction* ret_inst = Instruction::At(code_item_->insns_ + next_insn_idx);
       Instruction::Code opcode = ret_inst->Opcode();
-      if ((opcode == Instruction::RETURN_VOID) || (opcode == Instruction::RETURN_VOID_BARRIER)) {
+      if (opcode == Instruction::RETURN_VOID || opcode == Instruction::RETURN_VOID_NO_BARRIER) {
         SafelyMarkAllRegistersAsConflicts(this, work_line_.get());
       } else {
         if (opcode == Instruction::RETURN_WIDE) {
@@ -3768,7 +3806,7 @@ void MethodVerifier::VerifyAPut(const Instruction* inst,
   }
 }
 
-mirror::ArtField* MethodVerifier::GetStaticField(int field_idx) {
+ArtField* MethodVerifier::GetStaticField(int field_idx) {
   const DexFile::FieldId& field_id = dex_file_->GetFieldId(field_idx);
   // Check access to class
   const RegType& klass_type = ResolveClassAndCheckAccess(field_id.class_idx_);
@@ -3782,8 +3820,8 @@ mirror::ArtField* MethodVerifier::GetStaticField(int field_idx) {
     return nullptr;  // Can't resolve Class so no more to do here, will do checking at runtime.
   }
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  mirror::ArtField* field = class_linker->ResolveFieldJLS(*dex_file_, field_idx, dex_cache_,
-                                                          class_loader_);
+  ArtField* field = class_linker->ResolveFieldJLS(*dex_file_, field_idx, dex_cache_,
+                                                  class_loader_);
   if (field == nullptr) {
     VLOG(verifier) << "Unable to resolve static field " << field_idx << " ("
               << dex_file_->GetFieldName(field_id) << ") in "
@@ -3803,7 +3841,7 @@ mirror::ArtField* MethodVerifier::GetStaticField(int field_idx) {
   return field;
 }
 
-mirror::ArtField* MethodVerifier::GetInstanceField(const RegType& obj_type, int field_idx) {
+ArtField* MethodVerifier::GetInstanceField(const RegType& obj_type, int field_idx) {
   const DexFile::FieldId& field_id = dex_file_->GetFieldId(field_idx);
   // Check access to class
   const RegType& klass_type = ResolveClassAndCheckAccess(field_id.class_idx_);
@@ -3817,8 +3855,8 @@ mirror::ArtField* MethodVerifier::GetInstanceField(const RegType& obj_type, int 
     return nullptr;  // Can't resolve Class so no more to do here
   }
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  mirror::ArtField* field = class_linker->ResolveFieldJLS(*dex_file_, field_idx, dex_cache_,
-                                                          class_loader_);
+  ArtField* field = class_linker->ResolveFieldJLS(*dex_file_, field_idx, dex_cache_,
+                                                  class_loader_);
   if (field == nullptr) {
     VLOG(verifier) << "Unable to resolve instance field " << field_idx << " ("
               << dex_file_->GetFieldName(field_id) << ") in "
@@ -3874,7 +3912,7 @@ template <MethodVerifier::FieldAccessType kAccType>
 void MethodVerifier::VerifyISFieldAccess(const Instruction* inst, const RegType& insn_type,
                                          bool is_primitive, bool is_static) {
   uint32_t field_idx = is_static ? inst->VRegB_21c() : inst->VRegC_22c();
-  mirror::ArtField* field;
+  ArtField* field;
   if (is_static) {
     field = GetStaticField(field_idx);
   } else {
@@ -3894,12 +3932,8 @@ void MethodVerifier::VerifyISFieldAccess(const Instruction* inst, const RegType&
       }
     }
 
-    mirror::Class* field_type_class;
-    {
-      StackHandleScope<1> hs(self_);
-      HandleWrapper<mirror::ArtField> h_field(hs.NewHandleWrapper(&field));
-      field_type_class = h_field->GetType(can_load_classes_);
-    }
+    mirror::Class* field_type_class =
+        can_load_classes_ ? field->GetType<true>() : field->GetType<false>();
     if (field_type_class != nullptr) {
       field_type = &reg_types_.FromClass(field->GetTypeDescriptor(), field_type_class,
                                          field_type_class->CannotBeAssignedFromOtherTypes());
@@ -3968,7 +4002,7 @@ void MethodVerifier::VerifyISFieldAccess(const Instruction* inst, const RegType&
   }
 }
 
-mirror::ArtField* MethodVerifier::GetQuickFieldAccess(const Instruction* inst,
+ArtField* MethodVerifier::GetQuickFieldAccess(const Instruction* inst,
                                                       RegisterLine* reg_line) {
   DCHECK(IsInstructionIGetQuickOrIPutQuick(inst->Opcode())) << inst->Opcode();
   const RegType& object_type = reg_line->GetRegisterType(this, inst->VRegB_22c());
@@ -3977,8 +4011,7 @@ mirror::ArtField* MethodVerifier::GetQuickFieldAccess(const Instruction* inst,
     return nullptr;
   }
   uint32_t field_offset = static_cast<uint32_t>(inst->VRegC_22c());
-  mirror::ArtField* const f = mirror::ArtField::FindInstanceFieldWithOffset(object_type.GetClass(),
-                                                                            field_offset);
+  ArtField* const f = ArtField::FindInstanceFieldWithOffset(object_type.GetClass(), field_offset);
   DCHECK_EQ(f->GetOffset().Uint32Value(), field_offset);
   if (f == nullptr) {
     VLOG(verifier) << "Failed to find instance field at offset '" << field_offset
@@ -3992,7 +4025,7 @@ void MethodVerifier::VerifyQuickFieldAccess(const Instruction* inst, const RegTy
                                             bool is_primitive) {
   DCHECK(Runtime::Current()->IsStarted() || verify_to_dump_);
 
-  mirror::ArtField* field = GetQuickFieldAccess(inst, work_line_.get());
+  ArtField* field = GetQuickFieldAccess(inst, work_line_.get());
   if (field == nullptr) {
     Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "Cannot infer field from " << inst->Name();
     return;
@@ -4010,12 +4043,8 @@ void MethodVerifier::VerifyQuickFieldAccess(const Instruction* inst, const RegTy
   // Get the field type.
   const RegType* field_type;
   {
-    mirror::Class* field_type_class;
-    {
-      StackHandleScope<1> hs(Thread::Current());
-      HandleWrapper<mirror::ArtField> h_field(hs.NewHandleWrapper(&field));
-      field_type_class = h_field->GetType(can_load_classes_);
-    }
+    mirror::Class* field_type_class = can_load_classes_ ? field->GetType<true>() :
+        field->GetType<false>();
 
     if (field_type_class != nullptr) {
       field_type = &reg_types_.FromClass(field->GetTypeDescriptor(), field_type_class,
@@ -4163,7 +4192,7 @@ bool MethodVerifier::UpdateRegisters(uint32_t next_insn, RegisterLine* merge_lin
       // Initialize them as conflicts so they don't add to GC and deoptimization information.
       const Instruction* ret_inst = Instruction::At(code_item_->insns_ + next_insn);
       Instruction::Code opcode = ret_inst->Opcode();
-      if ((opcode == Instruction::RETURN_VOID) || (opcode == Instruction::RETURN_VOID_BARRIER)) {
+      if (opcode == Instruction::RETURN_VOID || opcode == Instruction::RETURN_VOID_NO_BARRIER) {
         SafelyMarkAllRegistersAsConflicts(this, target_line);
       } else {
         target_line->CopyFromLine(merge_line);
@@ -4330,12 +4359,12 @@ void MethodVerifier::Shutdown() {
   verifier::RegTypeCache::ShutDown();
 }
 
-void MethodVerifier::VisitStaticRoots(RootCallback* callback, void* arg) {
-  RegTypeCache::VisitStaticRoots(callback, arg);
+void MethodVerifier::VisitStaticRoots(RootVisitor* visitor) {
+  RegTypeCache::VisitStaticRoots(visitor);
 }
 
-void MethodVerifier::VisitRoots(RootCallback* callback, void* arg, const RootInfo& root_info) {
-  reg_types_.VisitRoots(callback, arg, root_info);
+void MethodVerifier::VisitRoots(RootVisitor* visitor, const RootInfo& root_info) {
+  reg_types_.VisitRoots(visitor, root_info);
 }
 
 }  // namespace verifier

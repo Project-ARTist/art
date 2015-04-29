@@ -347,6 +347,21 @@ bool GvnDeadCodeElimination::VRegChains::IsSRegUsed(uint16_t first_change, uint1
   return false;
 }
 
+bool GvnDeadCodeElimination::VRegChains::IsVRegUsed(uint16_t first_change, uint16_t last_change,
+                                                    int v_reg, MIRGraph* mir_graph) const {
+  DCHECK_LE(first_change, last_change);
+  DCHECK_LE(last_change, mir_data_.size());
+  for (size_t c = first_change; c != last_change; ++c) {
+    SSARepresentation* ssa_rep = mir_data_[c].mir->ssa_rep;
+    for (int i = 0; i != ssa_rep->num_uses; ++i) {
+      if (mir_graph->SRegToVReg(ssa_rep->uses[i]) == v_reg) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 void GvnDeadCodeElimination::VRegChains::RenameSRegUses(uint16_t first_change, uint16_t last_change,
                                                         int old_s_reg, int new_s_reg, bool wide) {
   for (size_t c = first_change; c != last_change; ++c) {
@@ -478,7 +493,7 @@ void GvnDeadCodeElimination::ChangeBinOp2AddrToPlainBinOp(MIR* mir) {
       mir->dalvikInsn.opcode - Instruction::ADD_INT_2ADDR +  Instruction::ADD_INT);
 }
 
-MIR* GvnDeadCodeElimination::CreatePhi(int s_reg, bool fp) {
+MIR* GvnDeadCodeElimination::CreatePhi(int s_reg) {
   int v_reg = mir_graph_->SRegToVReg(s_reg);
   MIR* phi = mir_graph_->NewMIR();
   phi->dalvikInsn.opcode = static_cast<Instruction::Code>(kMirOpPhi);
@@ -491,11 +506,9 @@ MIR* GvnDeadCodeElimination::CreatePhi(int s_reg, bool fp) {
 
   mir_graph_->AllocateSSADefData(phi, 1);
   phi->ssa_rep->defs[0] = s_reg;
-  phi->ssa_rep->fp_def[0] = fp;
 
   size_t num_uses = bb_->predecessors.size();
   mir_graph_->AllocateSSAUseData(phi, num_uses);
-  std::fill_n(phi->ssa_rep->fp_use, num_uses, fp);
   size_t idx = 0u;
   for (BasicBlockId pred_id : bb_->predecessors) {
     BasicBlock* pred_bb = mir_graph_->GetBasicBlock(pred_id);
@@ -523,14 +536,12 @@ MIR* GvnDeadCodeElimination::RenameSRegDefOrCreatePhi(uint16_t def_change, uint1
   // defining MIR for that dalvik reg, the preserved valus must come from its predecessors
   // and we need to create a new Phi (a degenerate Phi if there's only a single predecessor).
   if (def_change == kNPos) {
-    bool fp = mir_to_kill->ssa_rep->fp_def[0];
     if (wide) {
       DCHECK_EQ(new_s_reg + 1, mir_to_kill->ssa_rep->defs[1]);
-      DCHECK_EQ(fp, mir_to_kill->ssa_rep->fp_def[1]);
       DCHECK_EQ(mir_graph_->SRegToVReg(new_s_reg) + 1, mir_graph_->SRegToVReg(new_s_reg + 1));
-      CreatePhi(new_s_reg + 1, fp);  // High word Phi.
+      CreatePhi(new_s_reg + 1);  // High word Phi.
     }
-    return CreatePhi(new_s_reg, fp);
+    return CreatePhi(new_s_reg);
   } else {
     DCHECK_LT(def_change, last_change);
     DCHECK_LE(last_change, vreg_chains_.NumMIRs());
@@ -676,8 +687,14 @@ void GvnDeadCodeElimination::RecordPassTryToKillOverwrittenMoveOrMoveSrc(uint16_
         uint16_t src_name =
             (d->wide_def ? lvn_->GetSregValueWide(src_s_reg) : lvn_->GetSregValue(src_s_reg));
         if (value_name == src_name) {
-          RecordPassKillMoveByRenamingSrcDef(check_change, c);
-          return;
+          // Check if the move's destination vreg is unused between check_change and the move.
+          uint32_t new_dest_v_reg = mir_graph_->SRegToVReg(d->mir->ssa_rep->defs[0]);
+          if (!vreg_chains_.IsVRegUsed(check_change + 1u, c, new_dest_v_reg, mir_graph_) &&
+              (!d->wide_def ||
+               !vreg_chains_.IsVRegUsed(check_change + 1u, c, new_dest_v_reg + 1, mir_graph_))) {
+            RecordPassKillMoveByRenamingSrcDef(check_change, c);
+            return;
+          }
         }
       }
     }
@@ -967,18 +984,17 @@ bool GvnDeadCodeElimination::RecordMIR(MIR* mir) {
   uint16_t opcode = mir->dalvikInsn.opcode;
   switch (opcode) {
     case kMirOpPhi: {
-      // We can't recognize wide variables in Phi from num_defs == 2 as we've got two Phis instead.
+      // Determine if this Phi is merging wide regs.
+      RegLocation raw_dest = gvn_->GetMirGraph()->GetRawDest(mir);
+      if (raw_dest.high_word) {
+        // This is the high part of a wide reg. Ignore the Phi.
+        return false;
+      }
+      bool wide = raw_dest.wide;
+      // Record the value.
       DCHECK_EQ(mir->ssa_rep->num_defs, 1);
       int s_reg = mir->ssa_rep->defs[0];
-      bool wide = false;
-      uint16_t new_value = lvn_->GetSregValue(s_reg);
-      if (new_value == kNoValue) {
-        wide = true;
-        new_value = lvn_->GetSregValueWide(s_reg);
-        if (new_value == kNoValue) {
-          return false;  // Ignore the high word Phi.
-        }
-      }
+      uint16_t new_value = wide ? lvn_->GetSregValueWide(s_reg) : lvn_->GetSregValue(s_reg);
 
       int v_reg = mir_graph_->SRegToVReg(s_reg);
       DCHECK_EQ(vreg_chains_.CurrentValue(v_reg), kNoValue);  // No previous def for v_reg.
@@ -1058,7 +1074,6 @@ bool GvnDeadCodeElimination::RecordMIR(MIR* mir) {
     case Instruction::INVOKE_INTERFACE_RANGE:
     case Instruction::INVOKE_STATIC:
     case Instruction::INVOKE_STATIC_RANGE:
-    case Instruction::CHECK_CAST:
     case Instruction::THROW:
     case Instruction::FILLED_NEW_ARRAY:
     case Instruction::FILLED_NEW_ARRAY_RANGE:
@@ -1071,6 +1086,12 @@ bool GvnDeadCodeElimination::RecordMIR(MIR* mir) {
     case Instruction::NEW_ARRAY:
       must_keep = true;
       uses_all_vregs = true;
+      break;
+
+    case Instruction::CHECK_CAST:
+      DCHECK_EQ(mir->ssa_rep->num_uses, 1);
+      must_keep = true;  // Keep for type information even if MIR_IGNORE_CHECK_CAST.
+      uses_all_vregs = (mir->optimization_flags & MIR_IGNORE_CHECK_CAST) == 0;
       break;
 
     case kMirOpNullCheck:
@@ -1352,7 +1373,6 @@ bool GvnDeadCodeElimination::RecordMIR(MIR* mir) {
     default:
       LOG(FATAL) << "Unexpected opcode: " << opcode;
       UNREACHABLE();
-      break;
   }
 
   if (mir->ssa_rep->num_defs != 0) {

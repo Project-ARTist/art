@@ -32,7 +32,6 @@
 #include "mirror/string.h"
 #include "oat.h"
 #include "x86_lir.h"
-#include "utils/dwarf_cfi.h"
 
 namespace art {
 
@@ -390,7 +389,7 @@ std::string X86Mir2Lir::BuildInsnString(const char *fmt, LIR *lir, unsigned char
              break;
           }
           case 'p': {
-            EmbeddedData *tab_rec = reinterpret_cast<EmbeddedData*>(UnwrapPointer(operand));
+            const EmbeddedData* tab_rec = UnwrapPointer<EmbeddedData>(operand);
             buf += StringPrintf("0x%08x", tab_rec->offset);
             break;
           }
@@ -725,6 +724,14 @@ int X86Mir2Lir::NumReservableVectorRegisters(bool long_or_fp) {
   return long_or_fp ? num_vector_temps - 2 : num_vector_temps - 1;
 }
 
+static dwarf::Reg DwarfCoreReg(bool is_x86_64, int num) {
+  return is_x86_64 ? dwarf::Reg::X86_64Core(num) : dwarf::Reg::X86Core(num);
+}
+
+static dwarf::Reg DwarfFpReg(bool is_x86_64, int num) {
+  return is_x86_64 ? dwarf::Reg::X86_64Fp(num) : dwarf::Reg::X86Fp(num);
+}
+
 void X86Mir2Lir::SpillCoreRegs() {
   if (num_core_spills_ == 0) {
     return;
@@ -735,11 +742,11 @@ void X86Mir2Lir::SpillCoreRegs() {
       frame_size_ - (GetInstructionSetPointerSize(cu_->instruction_set) * num_core_spills_);
   OpSize size = cu_->target64 ? k64 : k32;
   const RegStorage rs_rSP = cu_->target64 ? rs_rX86_SP_64 : rs_rX86_SP_32;
-  for (int reg = 0; mask; mask >>= 1, reg++) {
-    if (mask & 0x1) {
-      StoreBaseDisp(rs_rSP, offset,
-                    cu_->target64 ? RegStorage::Solo64(reg) :  RegStorage::Solo32(reg),
-                   size, kNotVolatile);
+  for (int reg = 0; mask != 0u; mask >>= 1, reg++) {
+    if ((mask & 0x1) != 0u) {
+      RegStorage r_src = cu_->target64 ? RegStorage::Solo64(reg) : RegStorage::Solo32(reg);
+      StoreBaseDisp(rs_rSP, offset, r_src, size, kNotVolatile);
+      cfi_.RelOffset(DwarfCoreReg(cu_->target64, reg), offset);
       offset += GetInstructionSetPointerSize(cu_->instruction_set);
     }
   }
@@ -754,10 +761,11 @@ void X86Mir2Lir::UnSpillCoreRegs() {
   int offset = frame_size_ - (GetInstructionSetPointerSize(cu_->instruction_set) * num_core_spills_);
   OpSize size = cu_->target64 ? k64 : k32;
   const RegStorage rs_rSP = cu_->target64 ? rs_rX86_SP_64 : rs_rX86_SP_32;
-  for (int reg = 0; mask; mask >>= 1, reg++) {
-    if (mask & 0x1) {
-      LoadBaseDisp(rs_rSP, offset, cu_->target64 ? RegStorage::Solo64(reg) :  RegStorage::Solo32(reg),
-                   size, kNotVolatile);
+  for (int reg = 0; mask != 0u; mask >>= 1, reg++) {
+    if ((mask & 0x1) != 0u) {
+      RegStorage r_dest = cu_->target64 ? RegStorage::Solo64(reg) : RegStorage::Solo32(reg);
+      LoadBaseDisp(rs_rSP, offset, r_dest, size, kNotVolatile);
+      cfi_.Restore(DwarfCoreReg(cu_->target64, reg));
       offset += GetInstructionSetPointerSize(cu_->instruction_set);
     }
   }
@@ -771,9 +779,10 @@ void X86Mir2Lir::SpillFPRegs() {
   int offset = frame_size_ -
       (GetInstructionSetPointerSize(cu_->instruction_set) * (num_fp_spills_ + num_core_spills_));
   const RegStorage rs_rSP = cu_->target64 ? rs_rX86_SP_64 : rs_rX86_SP_32;
-  for (int reg = 0; mask; mask >>= 1, reg++) {
-    if (mask & 0x1) {
+  for (int reg = 0; mask != 0u; mask >>= 1, reg++) {
+    if ((mask & 0x1) != 0u) {
       StoreBaseDisp(rs_rSP, offset, RegStorage::FloatSolo64(reg), k64, kNotVolatile);
+      cfi_.RelOffset(DwarfFpReg(cu_->target64, reg), offset);
       offset += sizeof(double);
     }
   }
@@ -786,10 +795,11 @@ void X86Mir2Lir::UnSpillFPRegs() {
   int offset = frame_size_ -
       (GetInstructionSetPointerSize(cu_->instruction_set) * (num_fp_spills_ + num_core_spills_));
   const RegStorage rs_rSP = cu_->target64 ? rs_rX86_SP_64 : rs_rX86_SP_32;
-  for (int reg = 0; mask; mask >>= 1, reg++) {
-    if (mask & 0x1) {
+  for (int reg = 0; mask != 0u; mask >>= 1, reg++) {
+    if ((mask & 0x1) != 0u) {
       LoadBaseDisp(rs_rSP, offset, RegStorage::FloatSolo64(reg),
                    k64, kNotVolatile);
+      cfi_.Restore(DwarfFpReg(cu_->target64, reg));
       offset += sizeof(double);
     }
   }
@@ -825,21 +835,22 @@ RegisterClass X86Mir2Lir::RegClassForFieldLoadStore(OpSize size, bool is_volatil
 X86Mir2Lir::X86Mir2Lir(CompilationUnit* cu, MIRGraph* mir_graph, ArenaAllocator* arena)
     : Mir2Lir(cu, mir_graph, arena),
       in_to_reg_storage_x86_64_mapper_(this), in_to_reg_storage_x86_mapper_(this),
-      base_of_code_(nullptr), store_method_addr_(false), store_method_addr_used_(false),
+      pc_rel_base_reg_(RegStorage::InvalidReg()),
+      pc_rel_base_reg_used_(false),
+      setup_pc_rel_base_reg_(nullptr),
       method_address_insns_(arena->Adapter()),
       class_type_address_insns_(arena->Adapter()),
       call_method_insns_(arena->Adapter()),
-      stack_decrement_(nullptr), stack_increment_(nullptr),
+      dex_cache_access_insns_(arena->Adapter()),
       const_vectors_(nullptr) {
   method_address_insns_.reserve(100);
   class_type_address_insns_.reserve(100);
   call_method_insns_.reserve(100);
-  store_method_addr_used_ = false;
-    for (int i = 0; i < kX86Last; i++) {
-      DCHECK_EQ(X86Mir2Lir::EncodingMap[i].opcode, i)
-          << "Encoding order for " << X86Mir2Lir::EncodingMap[i].name
-          << " is wrong: expecting " << i << ", seeing "
-          << static_cast<int>(X86Mir2Lir::EncodingMap[i].opcode);
+  for (int i = 0; i < kX86Last; i++) {
+    DCHECK_EQ(X86Mir2Lir::EncodingMap[i].opcode, i)
+        << "Encoding order for " << X86Mir2Lir::EncodingMap[i].name
+        << " is wrong: expecting " << i << ", seeing "
+        << static_cast<int>(X86Mir2Lir::EncodingMap[i].opcode);
   }
 }
 
@@ -922,14 +933,6 @@ void X86Mir2Lir::DumpRegLocation(RegLocation loc) {
              << ", high: " << static_cast<int>(loc.reg.GetHighReg())
              << ", s_reg: " << loc.s_reg_low
              << ", orig: " << loc.orig_sreg;
-}
-
-void X86Mir2Lir::Materialize() {
-  // A good place to put the analysis before starting.
-  AnalyzeMIR();
-
-  // Now continue with regular code generation.
-  Mir2Lir::Materialize();
 }
 
 void X86Mir2Lir::LoadMethodAddress(const MethodReference& target_method, InvokeType type,
@@ -1058,12 +1061,14 @@ void X86Mir2Lir::InstallLiteralPools() {
     }
   }
 
+  patches_.reserve(method_address_insns_.size() + class_type_address_insns_.size() +
+                   call_method_insns_.size() + dex_cache_access_insns_.size());
+
   // Handle the fixups for methods.
   for (LIR* p : method_address_insns_) {
       DCHECK_EQ(p->opcode, kX86Mov32RI);
       uint32_t target_method_idx = p->operands[2];
-      const DexFile* target_dex_file =
-          reinterpret_cast<const DexFile*>(UnwrapPointer(p->operands[3]));
+      const DexFile* target_dex_file = UnwrapPointer<DexFile>(p->operands[3]);
 
       // The offset to patch is the last 4 bytes of the instruction.
       int patch_offset = p->offset + p->flags.size - 4;
@@ -1075,8 +1080,7 @@ void X86Mir2Lir::InstallLiteralPools() {
   for (LIR* p : class_type_address_insns_) {
       DCHECK_EQ(p->opcode, kX86Mov32RI);
 
-      const DexFile* class_dex_file =
-        reinterpret_cast<const DexFile*>(UnwrapPointer(p->operands[3]));
+      const DexFile* class_dex_file = UnwrapPointer<DexFile>(p->operands[3]);
       uint32_t target_type_idx = p->operands[2];
 
       // The offset to patch is the last 4 bytes of the instruction.
@@ -1086,17 +1090,27 @@ void X86Mir2Lir::InstallLiteralPools() {
   }
 
   // And now the PC-relative calls to methods.
-  patches_.reserve(call_method_insns_.size());
   for (LIR* p : call_method_insns_) {
       DCHECK_EQ(p->opcode, kX86CallI);
       uint32_t target_method_idx = p->operands[1];
-      const DexFile* target_dex_file =
-          reinterpret_cast<const DexFile*>(UnwrapPointer(p->operands[2]));
+      const DexFile* target_dex_file = UnwrapPointer<DexFile>(p->operands[2]);
 
       // The offset to patch is the last 4 bytes of the instruction.
       int patch_offset = p->offset + p->flags.size - 4;
       patches_.push_back(LinkerPatch::RelativeCodePatch(patch_offset,
                                                         target_dex_file, target_method_idx));
+  }
+
+  // PC-relative references to dex cache arrays.
+  for (LIR* p : dex_cache_access_insns_) {
+    DCHECK(p->opcode == kX86Mov32RM);
+    const DexFile* dex_file = UnwrapPointer<DexFile>(p->operands[3]);
+    uint32_t offset = p->operands[4];
+    // The offset to patch is the last 4 bytes of the instruction.
+    int patch_offset = p->offset + p->flags.size - 4;
+    DCHECK(!p->flags.is_nop);
+    patches_.push_back(LinkerPatch::DexCacheArrayPatch(patch_offset, dex_file,
+                                                       p->target->offset, offset));
   }
 
   // And do the normal processing.
@@ -1267,7 +1281,7 @@ bool X86Mir2Lir::GenInlinedIndexOf(CallInfo* info, bool zero_based) {
   RegLocation rl_return = GetReturn(kCoreReg);
   RegLocation rl_dest = InlineTarget(info);
 
-  // Is the string non-NULL?
+  // Is the string non-null?
   LoadValueDirectFixed(rl_obj, rs_rDX);
   GenNullCheck(rs_rDX, info->opt_flags);
   info->opt_flags |= MIR_IGNORE_NULL_CHECK;  // Record that we've null checked.
@@ -1288,10 +1302,6 @@ bool X86Mir2Lir::GenInlinedIndexOf(CallInfo* info, bool zero_based) {
   int value_offset = mirror::String::ValueOffset().Int32Value();
   // Location of count within the String object.
   int count_offset = mirror::String::CountOffset().Int32Value();
-  // Starting offset within data array.
-  int offset_offset = mirror::String::OffsetOffset().Int32Value();
-  // Start of char data with array_.
-  int data_offset = mirror::Array::DataOffset(sizeof(uint16_t)).Int32Value();
 
   // Compute the number of words to search in to rCX.
   Load32Disp(rs_rDX, count_offset, rs_rCX);
@@ -1306,6 +1316,11 @@ bool X86Mir2Lir::GenInlinedIndexOf(CallInfo* info, bool zero_based) {
   if (!cu_->target64) {
     // EDI is promotable in 32-bit mode.
     NewLIR1(kX86Push32R, rs_rDI.GetReg());
+    cfi_.AdjustCFAOffset(4);
+    // Record cfi only if it is not already spilled.
+    if (!CoreSpillMaskContains(rs_rDI.GetReg())) {
+      cfi_.RelOffset(DwarfCoreReg(cu_->target64, rs_rDI.GetReg()), 0);
+    }
   }
 
   if (zero_based) {
@@ -1369,15 +1384,13 @@ bool X86Mir2Lir::GenInlinedIndexOf(CallInfo* info, bool zero_based) {
 
   // Load the address of the string into EDI.
   // In case of start index we have to add the address to existing value in EDI.
-  // The string starts at VALUE(String) + 2 * OFFSET(String) + DATA_OFFSET.
   if (zero_based || (!zero_based && rl_start.is_const && start_value == 0)) {
-    Load32Disp(rs_rDX, offset_offset, rs_rDI);
+    OpRegRegImm(kOpAdd, rs_rDI, rs_rDX, value_offset);
   } else {
-    OpRegMem(kOpAdd, rs_rDI, rs_rDX, offset_offset);
+    OpRegImm(kOpLsl, rs_rDI, 1);
+    OpRegReg(kOpAdd, rs_rDI, rs_rDX);
+    OpRegImm(kOpAdd, rs_rDI, value_offset);
   }
-  OpRegImm(kOpLsl, rs_rDI, 1);
-  OpRegMem(kOpAdd, rs_rDI, rs_rDX, value_offset);
-  OpRegImm(kOpAdd, rs_rDI, data_offset);
 
   // EDI now contains the start of the string to be searched.
   // We are all prepared to do the search for the character.
@@ -1401,8 +1414,13 @@ bool X86Mir2Lir::GenInlinedIndexOf(CallInfo* info, bool zero_based) {
   // And join up at the end.
   all_done->target = NewLIR0(kPseudoTargetLabel);
 
-  if (!cu_->target64)
+  if (!cu_->target64) {
     NewLIR1(kX86Pop32R, rs_rDI.GetReg());
+    cfi_.AdjustCFAOffset(-4);
+    if (!CoreSpillMaskContains(rs_rDI.GetReg())) {
+      cfi_.Restore(DwarfCoreReg(cu_->target64, rs_rDI.GetReg()));
+    }
+  }
 
   // Out of line code returns here.
   if (slowpath_branch != nullptr) {
@@ -1413,100 +1431,6 @@ bool X86Mir2Lir::GenInlinedIndexOf(CallInfo* info, bool zero_based) {
 
   StoreValue(rl_dest, rl_return);
   return true;
-}
-
-static bool ARTRegIDToDWARFRegID(bool is_x86_64, int art_reg_id, int* dwarf_reg_id) {
-  if (is_x86_64) {
-    switch (art_reg_id) {
-    case 3 : *dwarf_reg_id =  3; return true;  // %rbx
-    // This is the only discrepancy between ART & DWARF register numbering.
-    case 5 : *dwarf_reg_id =  6; return true;  // %rbp
-    case 12: *dwarf_reg_id = 12; return true;  // %r12
-    case 13: *dwarf_reg_id = 13; return true;  // %r13
-    case 14: *dwarf_reg_id = 14; return true;  // %r14
-    case 15: *dwarf_reg_id = 15; return true;  // %r15
-    default: return false;  // Should not get here
-    }
-  } else {
-    switch (art_reg_id) {
-    case 5: *dwarf_reg_id = 5; return true;  // %ebp
-    case 6: *dwarf_reg_id = 6; return true;  // %esi
-    case 7: *dwarf_reg_id = 7; return true;  // %edi
-    default: return false;  // Should not get here
-    }
-  }
-}
-
-std::vector<uint8_t>* X86Mir2Lir::ReturnFrameDescriptionEntry() {
-  std::vector<uint8_t>* cfi_info = new std::vector<uint8_t>;
-
-  // Generate the FDE for the method.
-  DCHECK_NE(data_offset_, 0U);
-
-  WriteFDEHeader(cfi_info, cu_->target64);
-  WriteFDEAddressRange(cfi_info, data_offset_, cu_->target64);
-
-  // The instructions in the FDE.
-  if (stack_decrement_ != nullptr) {
-    // Advance LOC to just past the stack decrement.
-    uint32_t pc = NEXT_LIR(stack_decrement_)->offset;
-    DW_CFA_advance_loc(cfi_info, pc);
-
-    // Now update the offset to the call frame: DW_CFA_def_cfa_offset frame_size.
-    DW_CFA_def_cfa_offset(cfi_info, frame_size_);
-
-    // Handle register spills
-    const uint32_t kSpillInstLen = (cu_->target64) ? 5 : 4;
-    const int kDataAlignmentFactor = (cu_->target64) ? -8 : -4;
-    uint32_t mask = core_spill_mask_ & ~(1 << rs_rRET.GetRegNum());
-    int offset = -(GetInstructionSetPointerSize(cu_->instruction_set) * num_core_spills_);
-    for (int reg = 0; mask; mask >>= 1, reg++) {
-      if (mask & 0x1) {
-        pc += kSpillInstLen;
-
-        // Advance LOC to pass this instruction
-        DW_CFA_advance_loc(cfi_info, kSpillInstLen);
-
-        int dwarf_reg_id;
-        if (ARTRegIDToDWARFRegID(cu_->target64, reg, &dwarf_reg_id)) {
-          // DW_CFA_offset_extended_sf reg offset
-          DW_CFA_offset_extended_sf(cfi_info, dwarf_reg_id, offset / kDataAlignmentFactor);
-        }
-
-        offset += GetInstructionSetPointerSize(cu_->instruction_set);
-      }
-    }
-
-    // We continue with that stack until the epilogue.
-    if (stack_increment_ != nullptr) {
-      uint32_t new_pc = NEXT_LIR(stack_increment_)->offset;
-      DW_CFA_advance_loc(cfi_info, new_pc - pc);
-
-      // We probably have code snippets after the epilogue, so save the
-      // current state: DW_CFA_remember_state.
-      DW_CFA_remember_state(cfi_info);
-
-      // We have now popped the stack: DW_CFA_def_cfa_offset 4/8.
-      // There is only the return PC on the stack now.
-      DW_CFA_def_cfa_offset(cfi_info, GetInstructionSetPointerSize(cu_->instruction_set));
-
-      // Everything after that is the same as before the epilogue.
-      // Stack bump was followed by RET instruction.
-      LIR *post_ret_insn = NEXT_LIR(NEXT_LIR(stack_increment_));
-      if (post_ret_insn != nullptr) {
-        pc = new_pc;
-        new_pc = post_ret_insn->offset;
-        DW_CFA_advance_loc(cfi_info, new_pc - pc);
-        // Restore the state: DW_CFA_restore_state.
-        DW_CFA_restore_state(cfi_info);
-      }
-    }
-  }
-
-  PadCFI(cfi_info);
-  WriteCFILength(cfi_info, cu_->target64);
-
-  return cfi_info;
 }
 
 void X86Mir2Lir::GenMachineSpecificExtendedMethodMIR(BasicBlock* bb, MIR* mir) {
@@ -1645,20 +1569,17 @@ void X86Mir2Lir::AppendOpcodeWithConst(X86OpCode opcode, int reg, MIR* mir) {
   LIR* load;
   ScopedMemRefType mem_ref_type(this, ResourceMask::kLiteral);
   if (cu_->target64) {
-    load = NewLIR3(opcode, reg, kRIPReg, 256 /* bogus */);
+    load = NewLIR3(opcode, reg, kRIPReg, kDummy32BitOffset);
   } else {
-    // Address the start of the method.
-    RegLocation rl_method = mir_graph_->GetRegLocation(base_of_code_->s_reg_low);
-    if (rl_method.wide) {
-      rl_method = LoadValueWide(rl_method, kCoreReg);
-    } else {
-      rl_method = LoadValue(rl_method, kCoreReg);
+    // Get the PC to a register and get the anchor.
+    LIR* anchor;
+    RegStorage r_pc = GetPcAndAnchor(&anchor);
+
+    load = NewLIR3(opcode, reg, r_pc.GetReg(), kDummy32BitOffset);
+    load->operands[4] = WrapPointer(anchor);
+    if (IsTemp(r_pc)) {
+      FreeTemp(r_pc);
     }
-
-    load = NewLIR3(opcode, reg, rl_method.reg.GetReg(), 256 /* bogus */);
-
-    // The literal pool needs position independent logic.
-    store_method_addr_used_ = true;
   }
   load->flags.fixup = kFixupLoad;
   load->target = data_target;
@@ -2496,24 +2417,15 @@ bool X86Mir2Lir::GenInlinedCharAt(CallInfo* info) {
   int value_offset = mirror::String::ValueOffset().Int32Value();
   // Location of count
   int count_offset = mirror::String::CountOffset().Int32Value();
-  // Starting offset within data array
-  int offset_offset = mirror::String::OffsetOffset().Int32Value();
-  // Start of char data with array_
-  int data_offset = mirror::Array::DataOffset(sizeof(uint16_t)).Int32Value();
 
   RegLocation rl_obj = info->args[0];
   RegLocation rl_idx = info->args[1];
   rl_obj = LoadValue(rl_obj, kRefReg);
-  // X86 wants to avoid putting a constant index into a register.
-  if (!rl_idx.is_const) {
-    rl_idx = LoadValue(rl_idx, kCoreReg);
-  }
+  rl_idx = LoadValue(rl_idx, kCoreReg);
   RegStorage reg_max;
   GenNullCheck(rl_obj.reg, info->opt_flags);
   bool range_check = (!(info->opt_flags & MIR_IGNORE_RANGE_CHECK));
   LIR* range_check_branch = nullptr;
-  RegStorage reg_off;
-  RegStorage reg_ptr;
   if (range_check) {
     // On x86, we can compare to memory directly
     // Set up a launch pad to allow retry in case of bounds violation */
@@ -2529,24 +2441,11 @@ bool X86Mir2Lir::GenInlinedCharAt(CallInfo* info) {
       range_check_branch = OpCondBranch(kCondUge, nullptr);
     }
   }
-  reg_off = AllocTemp();
-  reg_ptr = AllocTempRef();
-  Load32Disp(rl_obj.reg, offset_offset, reg_off);
-  LoadRefDisp(rl_obj.reg, value_offset, reg_ptr, kNotVolatile);
-  if (rl_idx.is_const) {
-    OpRegImm(kOpAdd, reg_off, mir_graph_->ConstantValue(rl_idx.orig_sreg));
-  } else {
-    OpRegReg(kOpAdd, reg_off, rl_idx.reg);
-  }
-  FreeTemp(rl_obj.reg);
-  if (rl_idx.location == kLocPhysReg) {
-    FreeTemp(rl_idx.reg);
-  }
   RegLocation rl_dest = InlineTarget(info);
   RegLocation rl_result = EvalLoc(rl_dest, kCoreReg, true);
-  LoadBaseIndexedDisp(reg_ptr, reg_off, 1, data_offset, rl_result.reg, kUnsignedHalf);
-  FreeTemp(reg_off);
-  FreeTemp(reg_ptr);
+  LoadBaseIndexedDisp(rl_obj.reg, rl_idx.reg, 1, value_offset, rl_result.reg, kUnsignedHalf);
+  FreeTemp(rl_idx.reg);
+  FreeTemp(rl_obj.reg);
   StoreValue(rl_dest, rl_result);
   if (range_check) {
     DCHECK(range_check_branch != nullptr);

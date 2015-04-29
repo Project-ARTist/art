@@ -20,6 +20,7 @@
 #include <string>
 
 #include "atomic.h"
+#include "class_linker-inl.h"
 #include "common_runtime_test.h"
 #include "handle_scope-inl.h"
 #include "mirror/class-inl.h"
@@ -115,8 +116,8 @@ class CreateTask : public Task {
       ScopedObjectAccess soa(self);
 
       monitor_test_->thread_ = self;        // Pass the Thread.
-      monitor_test_->object_.Get()->MonitorEnter(self);     // Lock the object. This should transition
-      LockWord lock_after = monitor_test_->object_.Get()->GetLockWord(false);     // it to thinLocked.
+      monitor_test_->object_.Get()->MonitorEnter(self);  // Lock the object. This should transition
+      LockWord lock_after = monitor_test_->object_.Get()->GetLockWord(false);  // it to thinLocked.
       LockWord::LockState new_state = lock_after.GetState();
 
       // Cannot use ASSERT only, as analysis thinks we'll keep holding the mutex.

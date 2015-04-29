@@ -63,13 +63,6 @@ class Compiler {
   virtual uintptr_t GetEntryPointOf(mirror::ArtMethod* method) const
      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) = 0;
 
-  virtual bool WriteElf(art::File* file,
-                        OatWriter* oat_writer,
-                        const std::vector<const art::DexFile*>& dex_files,
-                        const std::string& android_root,
-                        bool is_host) const
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) = 0;
-
   uint64_t GetMaximumCompilationTimeBeforeWarning() const {
     return maximum_compilation_time_before_warning_;
   }

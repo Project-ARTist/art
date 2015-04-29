@@ -19,6 +19,7 @@
 #include "arch/arm/instruction_set_features_arm.h"
 #include "arm_lir.h"
 #include "base/logging.h"
+#include "dex/mir_graph.h"
 #include "dex/quick/mir_to_lir-inl.h"
 #include "dex/reg_storage_eq.h"
 #include "driver/compiler_driver.h"
@@ -89,7 +90,7 @@ LIR* ArmMir2Lir::LoadFPConstantValue(int r_dest, int value) {
     }
   }
   LIR* data_target = ScanLiteralPool(literal_list_, value, 0);
-  if (data_target == NULL) {
+  if (data_target == nullptr) {
     data_target = AddWordData(&literal_list_, value);
   }
   ScopedMemRefType mem_ref_type(this, ResourceMask::kLiteral);
@@ -410,7 +411,7 @@ LIR* ArmMir2Lir::OpRegRegShift(OpKind op, RegStorage r_dest_src1, RegStorage r_s
     return NewLIR4(opcode, r_dest_src1.GetReg(), r_dest_src1.GetReg(), r_src2.GetReg(), shift);
   } else {
     LOG(FATAL) << "Unexpected encoding operand count";
-    return NULL;
+    return nullptr;
   }
 }
 
@@ -694,7 +695,7 @@ LIR* ArmMir2Lir::OpRegImm(OpKind op, RegStorage r_dest_src1, int value) {
 }
 
 LIR* ArmMir2Lir::LoadConstantWide(RegStorage r_dest, int64_t value) {
-  LIR* res = NULL;
+  LIR* res = nullptr;
   int32_t val_lo = Low32Bits(value);
   int32_t val_hi = High32Bits(value);
   if (r_dest.IsFloat()) {
@@ -720,10 +721,10 @@ LIR* ArmMir2Lir::LoadConstantWide(RegStorage r_dest, int64_t value) {
       LoadConstantNoClobber(r_dest.GetHigh(), val_hi);
     }
   }
-  if (res == NULL) {
+  if (res == nullptr) {
     // No short form - load from the literal pool.
     LIR* data_target = ScanLiteralPoolWide(literal_list_, val_lo, val_hi);
-    if (data_target == NULL) {
+    if (data_target == nullptr) {
       data_target = AddWideData(&literal_list_, val_lo, val_hi);
     }
     ScopedMemRefType mem_ref_type(this, ResourceMask::kLiteral);
@@ -813,7 +814,7 @@ LIR* ArmMir2Lir::LoadBaseIndexed(RegStorage r_base, RegStorage r_index, RegStora
 LIR* ArmMir2Lir::StoreBaseIndexed(RegStorage r_base, RegStorage r_index, RegStorage r_src,
                                   int scale, OpSize size) {
   bool all_low_regs = r_base.Low8() && r_index.Low8() && r_src.Low8();
-  LIR* store = NULL;
+  LIR* store = nullptr;
   ArmOpcode opcode = kThumbBkpt;
   bool thumb_form = (all_low_regs && (scale == 0));
   RegStorage reg_ptr;
@@ -1264,6 +1265,41 @@ size_t ArmMir2Lir::GetInstructionOffset(LIR* lir) {
     offset = offset * 4;
   }
   return offset;
+}
+
+void ArmMir2Lir::CountRefs(RefCounts* core_counts, RefCounts* fp_counts, size_t num_regs) {
+  // Start with the default counts.
+  Mir2Lir::CountRefs(core_counts, fp_counts, num_regs);
+
+  if (pc_rel_temp_ != nullptr) {
+    // Now, if the dex cache array base temp is used only once outside any loops (weight = 1),
+    // avoid the promotion, otherwise boost the weight by factor 3 because the full PC-relative
+    // load sequence is 4 instructions long and by promoting the PC base we save up to 3
+    // instructions per use.
+    int p_map_idx = SRegToPMap(pc_rel_temp_->s_reg_low);
+    if (core_counts[p_map_idx].count == 1) {
+      core_counts[p_map_idx].count = 0;
+    } else {
+      core_counts[p_map_idx].count *= 3;
+    }
+  }
+}
+
+void ArmMir2Lir::DoPromotion() {
+  if (CanUseOpPcRelDexCacheArrayLoad()) {
+    pc_rel_temp_ = mir_graph_->GetNewCompilerTemp(kCompilerTempBackend, false);
+  }
+
+  Mir2Lir::DoPromotion();
+
+  if (pc_rel_temp_ != nullptr) {
+    // Now, if the dex cache array base temp is promoted, remember the register but
+    // always remove the temp's stack location to avoid unnecessarily bloating the stack.
+    dex_cache_arrays_base_reg_ = mir_graph_->reg_location_[pc_rel_temp_->s_reg_low].reg;
+    DCHECK(!dex_cache_arrays_base_reg_.Valid() || !dex_cache_arrays_base_reg_.IsFloat());
+    mir_graph_->RemoveLastCompilerTemp(kCompilerTempBackend, false, pc_rel_temp_);
+    pc_rel_temp_ = nullptr;
+  }
 }
 
 }  // namespace art

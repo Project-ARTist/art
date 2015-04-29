@@ -35,6 +35,7 @@ void PassDriverMEOpts::SetupPasses(PassManager* pass_manager) {
    * Disadvantage is the passes can't change their internal states depending on CompilationUnit:
    *   - This is not yet an issue: no current pass would require it.
    */
+  pass_manager->AddPass(new StringChange);
   pass_manager->AddPass(new CacheFieldLoweringInfo);
   pass_manager->AddPass(new CacheMethodLoweringInfo);
   pass_manager->AddPass(new CalculatePredecessors);
@@ -46,6 +47,7 @@ void PassDriverMEOpts::SetupPasses(PassManager* pass_manager) {
   pass_manager->AddPass(new CodeLayout);
   pass_manager->AddPass(new GlobalValueNumberingPass);
   pass_manager->AddPass(new DeadCodeEliminationPass);
+  pass_manager->AddPass(new GlobalValueNumberingCleanupPass);
   pass_manager->AddPass(new ConstantPropagation);
   pass_manager->AddPass(new MethodUseCount);
   pass_manager->AddPass(new BBOptimizations);
@@ -66,7 +68,7 @@ void PassDriverMEOpts::ApplyPass(PassDataHolder* data, const Pass* pass) {
     // Is it dirty at least?
     if (pass_me_data_holder->dirty == true) {
       CompilationUnit* c_unit = pass_me_data_holder->c_unit;
-      c_unit->mir_graph.get()->CalculateBasicBlockInformation();
+      c_unit->mir_graph.get()->CalculateBasicBlockInformation(post_opt_pass_manager_);
     }
   }
 }

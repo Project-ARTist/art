@@ -60,8 +60,8 @@ Transaction::~Transaction() {
 
 void Transaction::Abort(const std::string& abort_message) {
   MutexLock mu(Thread::Current(), log_lock_);
-  // We may abort more than once if the java.lang.InternalError thrown at the
-  // time of the abort has been caught during execution of a class initializer.
+  // We may abort more than once if the exception thrown at the time of the
+  // previous abort has been caught during execution of a class initializer.
   // We just keep the message of the first abort because it will cause the
   // transaction to be rolled back anyway.
   if (!aborted_) {
@@ -70,12 +70,13 @@ void Transaction::Abort(const std::string& abort_message) {
   }
 }
 
-void Transaction::ThrowInternalError(Thread* self, bool rethrow) {
+void Transaction::ThrowAbortError(Thread* self, bool rethrow) {
   if (kIsDebugBuild && rethrow) {
-    CHECK(IsAborted()) << "Rethrow InternalError while transaction is not aborted";
+    CHECK(IsAborted()) << "Rethrow " << Transaction::kAbortExceptionDescriptor
+                       << " while transaction is not aborted";
   }
   std::string abort_msg(GetAbortMessage());
-  self->ThrowNewWrappedException("Ljava/lang/InternalError;", abort_msg.c_str());
+  self->ThrowNewWrappedException(Transaction::kAbortExceptionSignature, abort_msg.c_str());
 }
 
 bool Transaction::IsAborted() {
@@ -220,24 +221,24 @@ void Transaction::UndoInternStringTableModifications() {
   intern_string_logs_.clear();
 }
 
-void Transaction::VisitRoots(RootCallback* callback, void* arg) {
+void Transaction::VisitRoots(RootVisitor* visitor) {
   MutexLock mu(Thread::Current(), log_lock_);
-  VisitObjectLogs(callback, arg);
-  VisitArrayLogs(callback, arg);
-  VisitStringLogs(callback, arg);
+  VisitObjectLogs(visitor);
+  VisitArrayLogs(visitor);
+  VisitStringLogs(visitor);
 }
 
-void Transaction::VisitObjectLogs(RootCallback* callback, void* arg) {
+void Transaction::VisitObjectLogs(RootVisitor* visitor) {
   // List of moving roots.
   typedef std::pair<mirror::Object*, mirror::Object*> ObjectPair;
   std::list<ObjectPair> moving_roots;
 
   // Visit roots.
   for (auto it : object_logs_) {
-    it.second.VisitRoots(callback, arg);
+    it.second.VisitRoots(visitor);
     mirror::Object* old_root = it.first;
     mirror::Object* new_root = old_root;
-    callback(&new_root, arg, RootInfo(kRootUnknown));
+    visitor->VisitRoot(&new_root, RootInfo(kRootUnknown));
     if (new_root != old_root) {
       moving_roots.push_back(std::make_pair(old_root, new_root));
     }
@@ -255,7 +256,7 @@ void Transaction::VisitObjectLogs(RootCallback* callback, void* arg) {
   }
 }
 
-void Transaction::VisitArrayLogs(RootCallback* callback, void* arg) {
+void Transaction::VisitArrayLogs(RootVisitor* visitor) {
   // List of moving roots.
   typedef std::pair<mirror::Array*, mirror::Array*> ArrayPair;
   std::list<ArrayPair> moving_roots;
@@ -264,7 +265,7 @@ void Transaction::VisitArrayLogs(RootCallback* callback, void* arg) {
     mirror::Array* old_root = it.first;
     CHECK(!old_root->IsObjectArray());
     mirror::Array* new_root = old_root;
-    callback(reinterpret_cast<mirror::Object**>(&new_root), arg, RootInfo(kRootUnknown));
+    visitor->VisitRoot(reinterpret_cast<mirror::Object**>(&new_root), RootInfo(kRootUnknown));
     if (new_root != old_root) {
       moving_roots.push_back(std::make_pair(old_root, new_root));
     }
@@ -282,9 +283,9 @@ void Transaction::VisitArrayLogs(RootCallback* callback, void* arg) {
   }
 }
 
-void Transaction::VisitStringLogs(RootCallback* callback, void* arg) {
+void Transaction::VisitStringLogs(RootVisitor* visitor) {
   for (InternStringLog& log : intern_string_logs_) {
-    log.VisitRoots(callback, arg);
+    log.VisitRoots(visitor);
   }
 }
 
@@ -420,16 +421,12 @@ void Transaction::ObjectLog::UndoFieldWrite(mirror::Object* obj, MemberOffset fi
   }
 }
 
-void Transaction::ObjectLog::VisitRoots(RootCallback* callback, void* arg) {
+void Transaction::ObjectLog::VisitRoots(RootVisitor* visitor) {
   for (auto it : field_values_) {
     FieldValue& field_value = it.second;
     if (field_value.kind == ObjectLog::kReference) {
-      mirror::Object* obj =
-          reinterpret_cast<mirror::Object*>(static_cast<uintptr_t>(field_value.value));
-      if (obj != nullptr) {
-        callback(&obj, arg, RootInfo(kRootUnknown));
-        field_value.value = reinterpret_cast<uintptr_t>(obj);
-      }
+      visitor->VisitRootIfNonNull(reinterpret_cast<mirror::Object**>(&field_value.value),
+                                  RootInfo(kRootUnknown));
     }
   }
 }
@@ -471,8 +468,8 @@ void Transaction::InternStringLog::Undo(InternTable* intern_table) {
   }
 }
 
-void Transaction::InternStringLog::VisitRoots(RootCallback* callback, void* arg) {
-  callback(reinterpret_cast<mirror::Object**>(&str_), arg, RootInfo(kRootInternedString));
+void Transaction::InternStringLog::VisitRoots(RootVisitor* visitor) {
+  visitor->VisitRoot(reinterpret_cast<mirror::Object**>(&str_), RootInfo(kRootInternedString));
 }
 
 void Transaction::ArrayLog::LogValue(size_t index, uint64_t value) {

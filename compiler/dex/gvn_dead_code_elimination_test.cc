@@ -406,6 +406,15 @@ class GvnDeadCodeEliminationTest : public testing::Test {
     }
   }
 
+  template <size_t count>
+  void MarkAsWideSRegs(const int32_t (&sregs)[count]) {
+    for (int32_t sreg : sregs) {
+      cu_.mir_graph->reg_location_[sreg].wide = true;
+      cu_.mir_graph->reg_location_[sreg + 1].wide = true;
+      cu_.mir_graph->reg_location_[sreg + 1].high_word = true;
+    }
+  }
+
   void PerformDCE() {
     FillVregToSsaRegExitMaps();
     cu_.mir_graph->GetNumOfCodeAndTempVRs();
@@ -467,9 +476,11 @@ class GvnDeadCodeEliminationTest : public testing::Test {
     cu_.access_flags = kAccStatic;  // Don't let "this" interfere with this test.
     allocator_.reset(ScopedArenaAllocator::Create(&cu_.arena_stack));
     // By default, the zero-initialized reg_location_[.] with ref == false tells LVN that
-    // 0 constants are integral, not references. Nothing else is used by LVN/GVN.
+    // 0 constants are integral, not references, and the values are all narrow.
+    // Nothing else is used by LVN/GVN. Tests can override the default values as needed.
     cu_.mir_graph->reg_location_ = static_cast<RegLocation*>(cu_.arena.Alloc(
         kMaxSsaRegs * sizeof(cu_.mir_graph->reg_location_[0]), kArenaAllocRegAlloc));
+    cu_.mir_graph->num_ssa_regs_ = kMaxSsaRegs;
     // Bind all possible sregs to live vregs for test purposes.
     live_in_v_->SetInitialBits(kMaxSsaRegs);
     cu_.mir_graph->ssa_base_vregs_.reserve(kMaxSsaRegs);
@@ -705,6 +716,8 @@ TEST_F(GvnDeadCodeEliminationTestSimple, Rename4) {
   PrepareSRegToVRegMap(sreg_to_vreg_map);
 
   PrepareMIRs(mirs);
+  static const int32_t wide_sregs[] = { 3 };
+  MarkAsWideSRegs(wide_sregs);
   PerformGVN_DCE();
 
   ASSERT_EQ(arraysize(mirs), value_names_.size());
@@ -745,6 +758,8 @@ TEST_F(GvnDeadCodeEliminationTestSimple, Rename5) {
 
   PrepareIFields(ifields);
   PrepareMIRs(mirs);
+  static const int32_t wide_sregs[] = { 5 };
+  MarkAsWideSRegs(wide_sregs);
   PerformGVN_DCE();
 
   ASSERT_EQ(arraysize(mirs), value_names_.size());
@@ -777,6 +792,8 @@ TEST_F(GvnDeadCodeEliminationTestSimple, Rename6) {
   PrepareSRegToVRegMap(sreg_to_vreg_map);
 
   PrepareMIRs(mirs);
+  static const int32_t wide_sregs[] = { 0, 2 };
+  MarkAsWideSRegs(wide_sregs);
   PerformGVN_DCE();
 
   ASSERT_EQ(arraysize(mirs), value_names_.size());
@@ -1030,6 +1047,40 @@ TEST_F(GvnDeadCodeEliminationTestSimple, NoRename3) {
   }
 }
 
+TEST_F(GvnDeadCodeEliminationTestSimple, NoRename4) {
+  static const MIRDef mirs[] = {
+      DEF_CONST(3, Instruction::CONST, 0u, 1000u),
+      DEF_UNIQUE_REF(3, Instruction::NEW_INSTANCE, 1u),
+      DEF_CONST(3, Instruction::CONST, 2u, 100u),
+      DEF_CONST(3, Instruction::CONST, 3u, 200u),
+      DEF_BINOP(3, Instruction::OR_INT_2ADDR, 4u, 2u, 3u),   // 3. Find definition of the move src.
+      DEF_MOVE(3, Instruction::MOVE, 5u, 0u),                // 4. Uses move dest vreg.
+      DEF_MOVE(3, Instruction::MOVE, 6u, 4u),                // 2. Find overwritten move src.
+      DEF_CONST(3, Instruction::CONST, 7u, 2000u),           // 1. Overwrites 4u, look for moves.
+  };
+
+  static const int32_t sreg_to_vreg_map[] = { 0, 1, 2, 3, 2, 4, 0, 2 };
+  PrepareSRegToVRegMap(sreg_to_vreg_map);
+
+  PrepareMIRs(mirs);
+  PerformGVN_DCE();
+
+  ASSERT_EQ(arraysize(mirs), value_names_.size());
+  static const size_t diff_indexes[] = { 0, 1, 2, 3, 4, 7 };
+  ExpectValueNamesNE(diff_indexes);
+  EXPECT_EQ(value_names_[0], value_names_[5]);
+  EXPECT_EQ(value_names_[4], value_names_[6]);
+
+  static const bool eliminated[] = {
+      false, false, false, false, false, false, false, false
+  };
+  static_assert(arraysize(eliminated) == arraysize(mirs), "array size mismatch");
+  for (size_t i = 0; i != arraysize(eliminated); ++i) {
+    bool actually_eliminated = (static_cast<int>(mirs_[i].dalvikInsn.opcode) == kMirOpNop);
+    EXPECT_EQ(eliminated[i], actually_eliminated) << i;
+  }
+}
+
 TEST_F(GvnDeadCodeEliminationTestSimple, Simple1) {
   static const IFieldDef ifields[] = {
       { 0u, 1u, 0u, false, kDexMemAccessObject },
@@ -1221,6 +1272,8 @@ TEST_F(GvnDeadCodeEliminationTestSimple, Simple4) {
 
   PrepareIFields(ifields);
   PrepareMIRs(mirs);
+  static const int32_t wide_sregs[] = { 1, 6 };
+  MarkAsWideSRegs(wide_sregs);
   PerformGVN_DCE();
 
   ASSERT_EQ(arraysize(mirs), value_names_.size());

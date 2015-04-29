@@ -22,7 +22,6 @@
 #include "array-inl.h"
 #include "base/stringprintf.h"
 #include "gc/heap.h"
-#include "mirror/art_field.h"
 #include "mirror/class.h"
 #include "runtime.h"
 #include "handle_scope-inl.h"
@@ -36,13 +35,13 @@ template<class T>
 inline ObjectArray<T>* ObjectArray<T>::Alloc(Thread* self, Class* object_array_class,
                                              int32_t length, gc::AllocatorType allocator_type) {
   Array* array = Array::Alloc<true>(self, object_array_class, length,
-                                    ComponentSizeShiftWidth<sizeof(HeapReference<Object>)>(),
+                                    ComponentSizeShiftWidth(sizeof(HeapReference<Object>)),
                                     allocator_type);
   if (UNLIKELY(array == nullptr)) {
     return nullptr;
   } else {
     DCHECK_EQ(array->GetClass()->GetComponentSizeShift(),
-              ComponentSizeShiftWidth<sizeof(HeapReference<Object>)>());
+              ComponentSizeShiftWidth(sizeof(HeapReference<Object>)));
     return array->AsObjectArray<T>();
   }
 }
@@ -58,14 +57,14 @@ template<class T>
 inline T* ObjectArray<T>::Get(int32_t i) {
   if (!CheckIsValidIndex(i)) {
     DCHECK(Thread::Current()->IsExceptionPending());
-    return NULL;
+    return nullptr;
   }
   return GetFieldObject<T>(OffsetOfElement(i));
 }
 
 template<class T> template<VerifyObjectFlags kVerifyFlags>
 inline bool ObjectArray<T>::CheckAssignable(T* object) {
-  if (object != NULL) {
+  if (object != nullptr) {
     Class* element_class = GetClass<kVerifyFlags>()->GetComponentType();
     if (UNLIKELY(!object->InstanceOf(element_class))) {
       ThrowArrayStoreException(object);

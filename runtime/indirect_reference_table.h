@@ -218,7 +218,7 @@ class IrtEntry {
   uint32_t serial_;
   GcRoot<mirror::Object> references_[kIRTPrevCount];
 };
-static_assert(sizeof(IrtEntry) == (1 + kIRTPrevCount) * sizeof(uintptr_t),
+static_assert(sizeof(IrtEntry) == (1 + kIRTPrevCount) * sizeof(uint32_t),
               "Unexpected sizeof(IrtEntry)");
 
 class IrtIterator {
@@ -233,9 +233,9 @@ class IrtIterator {
     return *this;
   }
 
-  mirror::Object** operator*() {
+  GcRoot<mirror::Object>* operator*() {
     // This does not have a read barrier as this is used to visit roots.
-    return table_[i_].GetReference()->AddressWithoutBarrier();
+    return table_[i_].GetReference();
   }
 
   bool equals(const IrtIterator& rhs) const {
@@ -258,14 +258,19 @@ bool inline operator!=(const IrtIterator& lhs, const IrtIterator& rhs) {
 
 class IndirectReferenceTable {
  public:
-  IndirectReferenceTable(size_t initialCount, size_t maxCount, IndirectRefKind kind);
+  // WARNING: When using with abort_on_error = false, the object may be in a partially
+  //          initialized state. Use IsValid() to check.
+  IndirectReferenceTable(size_t initialCount, size_t maxCount, IndirectRefKind kind,
+                         bool abort_on_error = true);
 
   ~IndirectReferenceTable();
 
+  bool IsValid() const;
+
   /*
-   * Add a new entry.  "obj" must be a valid non-NULL object reference.
+   * Add a new entry.  "obj" must be a valid non-nullptr object reference.
    *
-   * Returns NULL if the table is full (max entries reached, or alloc
+   * Returns nullptr if the table is full (max entries reached, or alloc
    * failed during expansion).
    */
   IndirectRef Add(uint32_t cookie, mirror::Object* obj)
@@ -320,7 +325,7 @@ class IndirectReferenceTable {
     return IrtIterator(table_, Capacity(), Capacity());
   }
 
-  void VisitRoots(RootCallback* callback, void* arg, const RootInfo& root_info)
+  void VisitRoots(RootVisitor* visitor, const RootInfo& root_info)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   uint32_t GetSegmentState() const {

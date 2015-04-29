@@ -138,10 +138,10 @@ void ArmMir2Lir::GenCmpLong(RegLocation rl_dest, RegLocation rl_src1, RegLocatio
   RegStorage t_reg = AllocTemp();
   LoadConstant(t_reg, -1);
   OpRegReg(kOpCmp, rl_src1.reg.GetHigh(), rl_src2.reg.GetHigh());
-  LIR* branch1 = OpCondBranch(kCondLt, NULL);
-  LIR* branch2 = OpCondBranch(kCondGt, NULL);
+  LIR* branch1 = OpCondBranch(kCondLt, nullptr);
+  LIR* branch2 = OpCondBranch(kCondGt, nullptr);
   OpRegRegReg(kOpSub, t_reg, rl_src1.reg.GetLow(), rl_src2.reg.GetLow());
-  LIR* branch3 = OpCondBranch(kCondEq, NULL);
+  LIR* branch3 = OpCondBranch(kCondEq, nullptr);
 
   LIR* it = OpIT(kCondHi, "E");
   NewLIR2(kThumb2MovI8M, t_reg.GetReg(), ModifiedImmediate(-1));
@@ -389,7 +389,7 @@ LIR* ArmMir2Lir::OpCmpImmBranch(ConditionCode cond, RegStorage reg, int check_va
    * generate the long form in an attempt to avoid an extra assembly pass.
    * TODO: consider interspersing slowpaths in code following unconditional branches.
    */
-  bool skip = ((target != NULL) && (target->opcode == kPseudoThrowTarget));
+  bool skip = ((target != nullptr) && (target->opcode == kPseudoThrowTarget));
   skip &= ((mir_graph_->GetNumDalvikInsns() - current_dalvik_offset_) > 64);
   if (!skip && reg.Low8() && (check_value == 0)) {
     if (arm_cond == kArmCondEq || arm_cond == kArmCondNe) {
@@ -637,6 +637,9 @@ bool ArmMir2Lir::GetEasyMultiplyTwoOps(int lit, EasyMultiplyOp* ops) {
     return true;
   }
 
+  ops[1].op = kOpInvalid;
+  ops[1].shift = 0;
+
   return false;
 }
 
@@ -879,7 +882,7 @@ bool ArmMir2Lir::GenInlinedCas(CallInfo* info, bool is_long, bool is_object) {
   RegLocation rl_object = LoadValue(rl_src_obj, kRefReg);
   RegLocation rl_new_value;
   if (!is_long) {
-    rl_new_value = LoadValue(rl_src_new_value, LocToRegClass(rl_src_new_value));
+    rl_new_value = LoadValue(rl_src_new_value, is_object ? kRefReg : kCoreReg);
   } else if (load_early) {
     rl_new_value = LoadValueWide(rl_src_new_value, kCoreReg);
   }
@@ -902,7 +905,7 @@ bool ArmMir2Lir::GenInlinedCas(CallInfo* info, bool is_long, bool is_object) {
 
   RegLocation rl_expected;
   if (!is_long) {
-    rl_expected = LoadValue(rl_src_expected, LocToRegClass(rl_src_new_value));
+    rl_expected = LoadValue(rl_src_expected, is_object ? kRefReg : kCoreReg);
   } else if (load_early) {
     rl_expected = LoadValueWide(rl_src_expected, kCoreReg);
   } else {
@@ -1078,9 +1081,40 @@ bool ArmMir2Lir::GenInlinedArrayCopyCharArray(CallInfo* info) {
   return true;
 }
 
-LIR* ArmMir2Lir::OpPcRelLoad(RegStorage reg, LIR* target) {
+void ArmMir2Lir::OpPcRelLoad(RegStorage reg, LIR* target) {
   ScopedMemRefType mem_ref_type(this, ResourceMask::kLiteral);
-  return RawLIR(current_dalvik_offset_, kThumb2LdrPcRel12, reg.GetReg(), 0, 0, 0, 0, target);
+  LIR* lir = NewLIR2(kThumb2LdrPcRel12, reg.GetReg(), 0);
+  lir->target = target;
+}
+
+bool ArmMir2Lir::CanUseOpPcRelDexCacheArrayLoad() const {
+  return dex_cache_arrays_layout_.Valid();
+}
+
+void ArmMir2Lir::OpPcRelDexCacheArrayAddr(const DexFile* dex_file, int offset, RegStorage r_dest) {
+  LIR* movw = NewLIR2(kThumb2MovImm16, r_dest.GetReg(), 0);
+  LIR* movt = NewLIR2(kThumb2MovImm16H, r_dest.GetReg(), 0);
+  ArmOpcode add_pc_opcode = (r_dest.GetRegNum() < 8) ? kThumbAddRRLH : kThumbAddRRHH;
+  LIR* add_pc = NewLIR2(add_pc_opcode, r_dest.GetReg(), rs_rARM_PC.GetReg());
+  add_pc->flags.fixup = kFixupLabel;
+  movw->operands[2] = WrapPointer(dex_file);
+  movw->operands[3] = offset;
+  movw->operands[4] = WrapPointer(add_pc);
+  movt->operands[2] = movw->operands[2];
+  movt->operands[3] = movw->operands[3];
+  movt->operands[4] = movw->operands[4];
+  dex_cache_access_insns_.push_back(movw);
+  dex_cache_access_insns_.push_back(movt);
+}
+
+void ArmMir2Lir::OpPcRelDexCacheArrayLoad(const DexFile* dex_file, int offset, RegStorage r_dest) {
+  if (dex_cache_arrays_base_reg_.Valid()) {
+    LoadRefDisp(dex_cache_arrays_base_reg_, offset - dex_cache_arrays_min_offset_,
+                r_dest, kNotVolatile);
+  } else {
+    OpPcRelDexCacheArrayAddr(dex_file, offset, r_dest);
+    LoadRefDisp(r_dest, 0, r_dest, kNotVolatile);
+  }
 }
 
 LIR* ArmMir2Lir::OpVldm(RegStorage r_base, int count) {
@@ -1125,12 +1159,12 @@ void ArmMir2Lir::GenDivZeroCheckWide(RegStorage reg) {
 LIR* ArmMir2Lir::OpTestSuspend(LIR* target) {
 #ifdef ARM_R4_SUSPEND_FLAG
   NewLIR2(kThumbSubRI8, rs_rARM_SUSPEND.GetReg(), 1);
-  return OpCondBranch((target == NULL) ? kCondEq : kCondNe, target);
+  return OpCondBranch((target == nullptr) ? kCondEq : kCondNe, target);
 #else
   RegStorage t_reg = AllocTemp();
   LoadBaseDisp(rs_rARM_SELF, Thread::ThreadFlagsOffset<4>().Int32Value(),
     t_reg, kUnsignedHalf, kNotVolatile);
-  LIR* cmp_branch = OpCmpImmBranch((target == NULL) ? kCondNe : kCondEq, t_reg,
+  LIR* cmp_branch = OpCmpImmBranch((target == nullptr) ? kCondNe : kCondEq, t_reg,
     0, target);
   FreeTemp(t_reg);
   return cmp_branch;
@@ -1292,11 +1326,6 @@ void ArmMir2Lir::GenMulLong(Instruction::Code opcode, RegLocation rl_dest,
     }
   }
 
-  // Now, restore lr to its non-temp status.
-  FreeTemp(tmp1);
-  Clobber(rs_rARM_LR);
-  UnmarkTemp(rs_rARM_LR);
-
   if (reg_status != 0) {
     // We had manually allocated registers for rl_result.
     // Now construct a RegLocation.
@@ -1304,7 +1333,14 @@ void ArmMir2Lir::GenMulLong(Instruction::Code opcode, RegLocation rl_dest,
     rl_result.reg = RegStorage::MakeRegPair(res_lo, res_hi);
   }
 
+  // Free tmp1 but keep LR as temp for StoreValueWide() if needed.
+  FreeTemp(tmp1);
+
   StoreValueWide(rl_dest, rl_result);
+
+  // Now, restore lr to its non-temp status.
+  Clobber(rs_rARM_LR);
+  UnmarkTemp(rs_rARM_LR);
 }
 
 void ArmMir2Lir::GenArithOpLong(Instruction::Code opcode, RegLocation rl_dest, RegLocation rl_src1,

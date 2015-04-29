@@ -830,6 +830,10 @@ RegLocation X86Mir2Lir::GenDivRem(RegLocation rl_dest, RegLocation rl_src1,
   return rl_result;
 }
 
+static dwarf::Reg DwarfCoreReg(bool is_x86_64, int num) {
+  return is_x86_64 ? dwarf::Reg::X86_64Core(num) : dwarf::Reg::X86Core(num);
+}
+
 bool X86Mir2Lir::GenInlinedMinMax(CallInfo* info, bool is_min, bool is_long) {
   DCHECK(cu_->instruction_set == kX86 || cu_->instruction_set == kX86_64);
 
@@ -928,6 +932,7 @@ bool X86Mir2Lir::GenInlinedMinMax(CallInfo* info, bool is_min, bool is_long) {
 
     // Do we have a free register for intermediate calculations?
     RegStorage tmp = AllocTemp(false);
+    const int kRegSize = cu_->target64 ? 8 : 4;
     if (tmp == RegStorage::InvalidReg()) {
        /*
         * No, will use 'edi'.
@@ -946,6 +951,11 @@ bool X86Mir2Lir::GenInlinedMinMax(CallInfo* info, bool is_min, bool is_long) {
               IsTemp(rl_result.reg.GetHigh()));
        tmp = rs_rDI;
        NewLIR1(kX86Push32R, tmp.GetReg());
+       cfi_.AdjustCFAOffset(kRegSize);
+       // Record cfi only if it is not already spilled.
+       if (!CoreSpillMaskContains(tmp.GetReg())) {
+         cfi_.RelOffset(DwarfCoreReg(cu_->target64, tmp.GetReg()), 0);
+       }
     }
 
     // Now we are ready to do calculations.
@@ -957,6 +967,10 @@ bool X86Mir2Lir::GenInlinedMinMax(CallInfo* info, bool is_min, bool is_long) {
     // Let's put pop 'edi' here to break a bit the dependency chain.
     if (tmp == rs_rDI) {
       NewLIR1(kX86Pop32R, tmp.GetReg());
+      cfi_.AdjustCFAOffset(-kRegSize);
+      if (!CoreSpillMaskContains(tmp.GetReg())) {
+        cfi_.Restore(DwarfCoreReg(cu_->target64, tmp.GetReg()));
+      }
     } else {
       FreeTemp(tmp);
     }
@@ -1104,6 +1118,7 @@ bool X86Mir2Lir::GenInlinedCas(CallInfo* info, bool is_long, bool is_object) {
   // If is_long, high half is in info->args[5]
   RegLocation rl_src_new_value = info->args[is_long ? 6 : 5];  // int, long or Object
   // If is_long, high half is in info->args[7]
+  const int kRegSize = cu_->target64 ? 8 : 4;
 
   if (is_long && cu_->target64) {
     // RAX must hold expected for CMPXCHG. Neither rl_new_value, nor r_ptr may be in RAX.
@@ -1125,7 +1140,6 @@ bool X86Mir2Lir::GenInlinedCas(CallInfo* info, bool is_long, bool is_object) {
     FreeTemp(rs_r0q);
   } else if (is_long) {
     // TODO: avoid unnecessary loads of SI and DI when the values are in registers.
-    // TODO: CFI support.
     FlushAllRegs();
     LockCallTemps();
     RegStorage r_tmp1 = RegStorage::MakeRegPair(rs_rAX, rs_rDX);
@@ -1148,11 +1162,21 @@ bool X86Mir2Lir::GenInlinedCas(CallInfo* info, bool is_long, bool is_object) {
       NewLIR1(kX86Push32R, rs_rDI.GetReg());
       MarkTemp(rs_rDI);
       LockTemp(rs_rDI);
+      cfi_.AdjustCFAOffset(kRegSize);
+      // Record cfi only if it is not already spilled.
+      if (!CoreSpillMaskContains(rs_rDI.GetReg())) {
+        cfi_.RelOffset(DwarfCoreReg(cu_->target64, rs_rDI.GetReg()), 0);
+      }
     }
     if (push_si) {
       NewLIR1(kX86Push32R, rs_rSI.GetReg());
       MarkTemp(rs_rSI);
       LockTemp(rs_rSI);
+      cfi_.AdjustCFAOffset(kRegSize);
+      // Record cfi only if it is not already spilled.
+      if (!CoreSpillMaskContains(rs_rSI.GetReg())) {
+        cfi_.RelOffset(DwarfCoreReg(cu_->target64, rs_rSI.GetReg()), 0);
+      }
     }
     ScopedMemRefType mem_ref_type(this, ResourceMask::kDalvikReg);
     const size_t push_offset = (push_si ? 4u : 0u) + (push_di ? 4u : 0u);
@@ -1183,11 +1207,19 @@ bool X86Mir2Lir::GenInlinedCas(CallInfo* info, bool is_long, bool is_object) {
       FreeTemp(rs_rSI);
       UnmarkTemp(rs_rSI);
       NewLIR1(kX86Pop32R, rs_rSI.GetReg());
+      cfi_.AdjustCFAOffset(-kRegSize);
+      if (!CoreSpillMaskContains(rs_rSI.GetReg())) {
+        cfi_.Restore(DwarfCoreReg(cu_->target64, rs_rSI.GetRegNum()));
+      }
     }
     if (push_di) {
       FreeTemp(rs_rDI);
       UnmarkTemp(rs_rDI);
       NewLIR1(kX86Pop32R, rs_rDI.GetReg());
+      cfi_.AdjustCFAOffset(-kRegSize);
+      if (!CoreSpillMaskContains(rs_rDI.GetReg())) {
+        cfi_.Restore(DwarfCoreReg(cu_->target64, rs_rDI.GetRegNum()));
+      }
     }
     FreeCallTemps();
   } else {
@@ -1197,7 +1229,7 @@ bool X86Mir2Lir::GenInlinedCas(CallInfo* info, bool is_long, bool is_object) {
     LockTemp(rs_r0);
 
     RegLocation rl_object = LoadValue(rl_src_obj, kRefReg);
-    RegLocation rl_new_value = LoadValue(rl_src_new_value, LocToRegClass(rl_src_new_value));
+    RegLocation rl_new_value = LoadValue(rl_src_new_value, is_object ? kRefReg : kCoreReg);
 
     if (is_object && !mir_graph_->IsConstantNullRef(rl_new_value)) {
       // Mark card for object assuming new value is stored.
@@ -1324,40 +1356,80 @@ bool X86Mir2Lir::GenInlinedReverseBits(CallInfo* info, OpSize size) {
   return true;
 }
 
-LIR* X86Mir2Lir::OpPcRelLoad(RegStorage reg, LIR* target) {
+void X86Mir2Lir::OpPcRelLoad(RegStorage reg, LIR* target) {
   if (cu_->target64) {
     // We can do this directly using RIP addressing.
-    // We don't know the proper offset for the value, so pick one that will force
-    // 4 byte offset.  We will fix this up in the assembler later to have the right
-    // value.
     ScopedMemRefType mem_ref_type(this, ResourceMask::kLiteral);
-    LIR* res = NewLIR3(kX86Mov32RM, reg.GetReg(), kRIPReg, 256);
+    LIR* res = NewLIR3(kX86Mov32RM, reg.GetReg(), kRIPReg, kDummy32BitOffset);
     res->target = target;
     res->flags.fixup = kFixupLoad;
-    return res;
+    return;
   }
 
-  CHECK(base_of_code_ != nullptr);
-
-  // Address the start of the method
-  RegLocation rl_method = mir_graph_->GetRegLocation(base_of_code_->s_reg_low);
-  if (rl_method.wide) {
-    LoadValueDirectWideFixed(rl_method, reg);
-  } else {
-    LoadValueDirectFixed(rl_method, reg);
-  }
-  store_method_addr_used_ = true;
+  // Get the PC to a register and get the anchor.
+  LIR* anchor;
+  RegStorage r_pc = GetPcAndAnchor(&anchor);
 
   // Load the proper value from the literal area.
-  // We don't know the proper offset for the value, so pick one that will force
-  // 4 byte offset.  We will fix this up in the assembler later to have the right
-  // value.
   ScopedMemRefType mem_ref_type(this, ResourceMask::kLiteral);
-  LIR *res = RawLIR(current_dalvik_offset_, kX86Mov32RM, reg.GetReg(), reg.GetReg(), 256,
-                    0, 0, target);
+  LIR* res = NewLIR3(kX86Mov32RM, reg.GetReg(), r_pc.GetReg(), kDummy32BitOffset);
+  res->operands[4] = WrapPointer(anchor);
   res->target = target;
   res->flags.fixup = kFixupLoad;
-  return res;
+}
+
+bool X86Mir2Lir::CanUseOpPcRelDexCacheArrayLoad() const {
+  return dex_cache_arrays_layout_.Valid();
+}
+
+LIR* X86Mir2Lir::OpLoadPc(RegStorage r_dest) {
+  DCHECK(!cu_->target64);
+  LIR* call = NewLIR1(kX86CallI, 0);
+  call->flags.fixup = kFixupLabel;
+  LIR* pop = NewLIR1(kX86Pop32R, r_dest.GetReg());
+  pop->flags.fixup = kFixupLabel;
+  DCHECK(NEXT_LIR(call) == pop);
+  return call;
+}
+
+RegStorage X86Mir2Lir::GetPcAndAnchor(LIR** anchor, RegStorage r_tmp) {
+  if (pc_rel_base_reg_.Valid()) {
+    DCHECK(setup_pc_rel_base_reg_ != nullptr);
+    *anchor = NEXT_LIR(setup_pc_rel_base_reg_);
+    DCHECK(*anchor != nullptr);
+    DCHECK_EQ((*anchor)->opcode, kX86Pop32R);
+    pc_rel_base_reg_used_ = true;
+    return pc_rel_base_reg_;
+  } else {
+    RegStorage r_pc = r_tmp.Valid() ? r_tmp : AllocTempRef();
+    LIR* load_pc = OpLoadPc(r_pc);
+    *anchor = NEXT_LIR(load_pc);
+    DCHECK(*anchor != nullptr);
+    DCHECK_EQ((*anchor)->opcode, kX86Pop32R);
+    return r_pc;
+  }
+}
+
+void X86Mir2Lir::OpPcRelDexCacheArrayLoad(const DexFile* dex_file, int offset,
+                                          RegStorage r_dest) {
+  if (cu_->target64) {
+    LIR* mov = NewLIR3(kX86Mov32RM, r_dest.GetReg(), kRIPReg, kDummy32BitOffset);
+    mov->flags.fixup = kFixupLabel;
+    mov->operands[3] = WrapPointer(dex_file);
+    mov->operands[4] = offset;
+    mov->target = mov;  // Used for pc_insn_offset (not used by x86-64 relative patcher).
+    dex_cache_access_insns_.push_back(mov);
+  } else {
+    // Get the PC to a register and get the anchor. Use r_dest for the temp if needed.
+    LIR* anchor;
+    RegStorage r_pc = GetPcAndAnchor(&anchor, r_dest);
+    LIR* mov = NewLIR3(kX86Mov32RM, r_dest.GetReg(), r_pc.GetReg(), kDummy32BitOffset);
+    mov->flags.fixup = kFixupLabel;
+    mov->operands[3] = WrapPointer(dex_file);
+    mov->operands[4] = offset;
+    mov->target = anchor;  // Used for pc_insn_offset.
+    dex_cache_access_insns_.push_back(mov);
+  }
 }
 
 LIR* X86Mir2Lir::OpVldm(RegStorage r_base, int count) {
@@ -1412,7 +1484,7 @@ void X86Mir2Lir::GenArrayBoundsCheck(RegStorage index,
    public:
     ArrayBoundsCheckSlowPath(Mir2Lir* m2l, LIR* branch_in,
                              RegStorage index_in, RegStorage array_base_in, int32_t len_offset_in)
-        : LIRSlowPath(m2l, m2l->GetCurrentDexPc(), branch_in),
+        : LIRSlowPath(m2l, branch_in),
           index_(index_in), array_base_(array_base_in), len_offset_(len_offset_in) {
     }
 
@@ -1460,7 +1532,7 @@ void X86Mir2Lir::GenArrayBoundsCheck(int32_t index,
    public:
     ArrayBoundsCheckSlowPath(Mir2Lir* m2l, LIR* branch_in,
                              int32_t index_in, RegStorage array_base_in, int32_t len_offset_in)
-        : LIRSlowPath(m2l, m2l->GetCurrentDexPc(), branch_in),
+        : LIRSlowPath(m2l, branch_in),
           index_(index_in), array_base_(array_base_in), len_offset_(len_offset_in) {
     }
 
@@ -1497,7 +1569,7 @@ LIR* X86Mir2Lir::OpTestSuspend(LIR* target) {
   } else {
     OpTlsCmp(Thread::ThreadFlagsOffset<4>(), 0);
   }
-  return OpCondBranch((target == NULL) ? kCondNe : kCondEq, target);
+  return OpCondBranch((target == nullptr) ? kCondNe : kCondEq, target);
 }
 
 // Decrement register and branch on condition
@@ -2933,7 +3005,7 @@ void X86Mir2Lir::GenInstanceofFinal(bool use_declaring_class, uint32_t type_idx,
 
   // Assume that there is no match.
   LoadConstant(result_reg, 0);
-  LIR* null_branchover = OpCmpImmBranch(kCondEq, object.reg, 0, NULL);
+  LIR* null_branchover = OpCmpImmBranch(kCondEq, object.reg, 0, nullptr);
 
   // We will use this register to compare to memory below.
   // References are 32 bit in memory, and 64 bit in registers (in 64 bit mode).

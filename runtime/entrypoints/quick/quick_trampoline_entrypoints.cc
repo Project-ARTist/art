@@ -26,10 +26,12 @@
 #include "mirror/art_method-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/dex_cache-inl.h"
+#include "mirror/method.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 #include "runtime.h"
 #include "scoped_thread_state_change.h"
+#include "debugger.h"
 
 namespace art {
 
@@ -87,7 +89,7 @@ class QuickArgumentVisitor {
   // | LR         |
   // | X29        |
   // |  :         |
-  // | X20        |
+  // | X19        |
   // | X7         |
   // | :          |
   // | X1         |
@@ -639,6 +641,14 @@ extern "C" uint64_t artQuickToInterpreterBridge(mirror::ArtMethod* method, Threa
     JValue result = interpreter::EnterInterpreterFromEntryPoint(self, code_item, shadow_frame);
     // Pop transition.
     self->PopManagedStackFragment(fragment);
+
+    // Request a stack deoptimization if needed
+    mirror::ArtMethod* caller = QuickArgumentVisitor::GetCallingMethod(sp);
+    if (UNLIKELY(Dbg::IsForcedInterpreterNeededForUpcall(self, caller))) {
+      self->SetException(Thread::GetDeoptimizationException());
+      self->SetDeoptimizationReturnValue(result);
+    }
+
     // No need to restore the args since the method has already been run by the interpreter.
     return result.GetJ();
   }
@@ -751,11 +761,12 @@ extern "C" uint64_t artQuickProxyInvokeHandler(mirror::ArtMethod* proxy_method,
   mirror::ArtMethod* interface_method = proxy_method->FindOverriddenMethod();
   DCHECK(interface_method != nullptr) << PrettyMethod(proxy_method);
   DCHECK(!interface_method->IsProxyMethod()) << PrettyMethod(interface_method);
-  jobject interface_method_jobj = soa.AddLocalReference<jobject>(interface_method);
+  self->EndAssertNoThreadSuspension(old_cause);
+  jobject interface_method_jobj = soa.AddLocalReference<jobject>(
+      mirror::Method::CreateFromArtMethod(soa.Self(), interface_method));
 
   // All naked Object*s should now be in jobjects, so its safe to go into the main invoke code
   // that performs allocations.
-  self->EndAssertNoThreadSuspension(old_cause);
   JValue result = InvokeProxyInvocationHandler(soa, shorty, rcvr_jobj, interface_method_jobj, args);
   // Restore references which might have moved.
   local_ref_visitor.FixupReferences();
@@ -950,14 +961,37 @@ extern "C" const void* artQuickResolutionTrampoline(mirror::ArtMethod* called,
         called->GetDexCache()->SetResolvedMethod(called_dex_method_idx, called);
       }
     }
+
     // Ensure that the called method's class is initialized.
     StackHandleScope<1> hs(soa.Self());
     Handle<mirror::Class> called_class(hs.NewHandle(called->GetDeclaringClass()));
     linker->EnsureInitialized(soa.Self(), called_class, true, true);
     if (LIKELY(called_class->IsInitialized())) {
-      code = called->GetEntryPointFromQuickCompiledCode();
+      if (UNLIKELY(Dbg::IsForcedInterpreterNeededForResolution(self, called))) {
+        // If we are single-stepping or the called method is deoptimized (by a
+        // breakpoint, for example), then we have to execute the called method
+        // with the interpreter.
+        code = GetQuickToInterpreterBridge();
+      } else if (UNLIKELY(Dbg::IsForcedInstrumentationNeededForResolution(self, caller))) {
+        // If the caller is deoptimized (by a breakpoint, for example), we have to
+        // continue its execution with interpreter when returning from the called
+        // method. Because we do not want to execute the called method with the
+        // interpreter, we wrap its execution into the instrumentation stubs.
+        // When the called method returns, it will execute the instrumentation
+        // exit hook that will determine the need of the interpreter with a call
+        // to Dbg::IsForcedInterpreterNeededForUpcall and deoptimize the stack if
+        // it is needed.
+        code = GetQuickInstrumentationEntryPoint();
+      } else {
+        code = called->GetEntryPointFromQuickCompiledCode();
+      }
     } else if (called_class->IsInitializing()) {
-      if (invoke_type == kStatic) {
+      if (UNLIKELY(Dbg::IsForcedInterpreterNeededForResolution(self, called))) {
+        // If we are single-stepping or the called method is deoptimized (by a
+        // breakpoint, for example), then we have to execute the called method
+        // with the interpreter.
+        code = GetQuickToInterpreterBridge();
+      } else if (invoke_type == kStatic) {
         // Class is still initializing, go to oat and grab code (trampoline must be left in place
         // until class is initialized to stop races between threads).
         code = linker->GetQuickOatCodeFor(called);
@@ -1152,7 +1186,7 @@ template<class T> class BuildNativeCallFrameStateMachine {
       gpr_index_--;
       if (kMultiGPRegistersWidened) {
         DCHECK_EQ(sizeof(uintptr_t), sizeof(int64_t));
-        PushGpr(static_cast<int64_t>(bit_cast<uint32_t, int32_t>(val)));
+        PushGpr(static_cast<int64_t>(bit_cast<int32_t, uint32_t>(val)));
       } else {
         PushGpr(val);
       }
@@ -1160,7 +1194,7 @@ template<class T> class BuildNativeCallFrameStateMachine {
       stack_entries_++;
       if (kMultiGPRegistersWidened) {
         DCHECK_EQ(sizeof(uintptr_t), sizeof(int64_t));
-        PushStack(static_cast<int64_t>(bit_cast<uint32_t, int32_t>(val)));
+        PushStack(static_cast<int64_t>(bit_cast<int32_t, uint32_t>(val)));
       } else {
         PushStack(val);
       }
@@ -1220,16 +1254,16 @@ template<class T> class BuildNativeCallFrameStateMachine {
 
   void AdvanceFloat(float val) {
     if (kNativeSoftFloatAbi) {
-      AdvanceInt(bit_cast<float, uint32_t>(val));
+      AdvanceInt(bit_cast<uint32_t, float>(val));
     } else {
       if (HaveFloatFpr()) {
         fpr_index_--;
         if (kRegistersNeededForDouble == 1) {
           if (kMultiFPRegistersWidened) {
-            PushFpr8(bit_cast<double, uint64_t>(val));
+            PushFpr8(bit_cast<uint64_t, double>(val));
           } else {
             // No widening, just use the bits.
-            PushFpr8(bit_cast<float, uint64_t>(val));
+            PushFpr8(static_cast<uint64_t>(bit_cast<uint32_t, float>(val)));
           }
         } else {
           PushFpr4(val);
@@ -1240,9 +1274,9 @@ template<class T> class BuildNativeCallFrameStateMachine {
           // Need to widen before storing: Note the "double" in the template instantiation.
           // Note: We need to jump through those hoops to make the compiler happy.
           DCHECK_EQ(sizeof(uintptr_t), sizeof(uint64_t));
-          PushStack(static_cast<uintptr_t>(bit_cast<double, uint64_t>(val)));
+          PushStack(static_cast<uintptr_t>(bit_cast<uint64_t, double>(val)));
         } else {
-          PushStack(bit_cast<float, uintptr_t>(val));
+          PushStack(static_cast<uintptr_t>(bit_cast<uint32_t, float>(val)));
         }
         fpr_index_ = 0;
       }
@@ -1876,8 +1910,8 @@ extern "C" uint64_t artQuickGenericJniEndTrampoline(Thread* self, jvalue result,
       case 'F': {
         if (kRuntimeISA == kX86) {
           // Convert back the result to float.
-          double d = bit_cast<uint64_t, double>(result_f);
-          return bit_cast<float, uint32_t>(static_cast<float>(d));
+          double d = bit_cast<double, uint64_t>(result_f);
+          return bit_cast<uint32_t, float>(static_cast<float>(d));
         } else {
           return result_f;
         }

@@ -185,19 +185,17 @@ class MarkSweep : public GarbageCollector {
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
       EXCLUSIVE_LOCKS_REQUIRED(Locks::heap_bitmap_lock_);
 
-  static void MarkRootCallback(mirror::Object** root, void* arg, const RootInfo& root_info)
+  virtual void VisitRoots(mirror::Object*** roots, size_t count, const RootInfo& info) OVERRIDE
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
       EXCLUSIVE_LOCKS_REQUIRED(Locks::heap_bitmap_lock_);
 
-  static void VerifyRootMarked(mirror::Object** root, void* arg, const RootInfo& root_info)
+  virtual void VisitRoots(mirror::CompressedReference<mirror::Object>** roots, size_t count,
+                          const RootInfo& info) OVERRIDE
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
       EXCLUSIVE_LOCKS_REQUIRED(Locks::heap_bitmap_lock_);
 
   static void ProcessMarkStackCallback(void* arg)
       EXCLUSIVE_LOCKS_REQUIRED(Locks::heap_bitmap_lock_)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
-  static void MarkRootParallelCallback(mirror::Object** root, void* arg, const RootInfo& root_info)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Marks an object.
@@ -249,10 +247,6 @@ class MarkSweep : public GarbageCollector {
   // Returns how many threads we should use for the current GC phase based on if we are paused,
   // whether or not we care about pauses.
   size_t GetThreadCount(bool paused) const;
-
-  static void VerifyRootCallback(mirror::Object** root, void* arg, const RootInfo& root_info);
-
-  void VerifyRoot(const mirror::Object* root, const RootInfo& root_info) NO_THREAD_SAFETY_ANALYSIS;
 
   // Push a single reference on a mark stack.
   void PushOnMarkStack(mirror::Object* obj) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
@@ -326,18 +320,21 @@ class MarkSweep : public GarbageCollector {
   friend class CardScanTask;
   friend class CheckBitmapVisitor;
   friend class CheckReferenceVisitor;
+  friend class CheckpointMarkThreadRoots;
   friend class art::gc::Heap;
+  friend class FifoMarkStackChunk;
   friend class MarkObjectVisitor;
+  template<bool kUseFinger> friend class MarkStackTask;
+  friend class MarkSweepMarkObjectSlowPath;
   friend class ModUnionCheckReferences;
   friend class ModUnionClearCardVisitor;
   friend class ModUnionReferenceVisitor;
-  friend class ModUnionVisitor;
+  friend class ModUnionScanImageRootVisitor;
   friend class ModUnionTableBitmap;
   friend class ModUnionTableReferenceCache;
-  friend class ModUnionScanImageRootVisitor;
-  template<bool kUseFinger> friend class MarkStackTask;
-  friend class FifoMarkStackChunk;
-  friend class MarkSweepMarkObjectSlowPath;
+  friend class ModUnionVisitor;
+  friend class VerifyRootMarkedVisitor;
+  friend class VerifyRootVisitor;
 
   DISALLOW_COPY_AND_ASSIGN(MarkSweep);
 };

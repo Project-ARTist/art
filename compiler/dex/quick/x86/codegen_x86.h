@@ -28,7 +28,7 @@
 
 namespace art {
 
-class X86Mir2Lir : public Mir2Lir {
+class X86Mir2Lir FINAL : public Mir2Lir {
  protected:
   class InToRegStorageX86_64Mapper : public InToRegStorageMapper {
    public:
@@ -103,6 +103,9 @@ class X86Mir2Lir : public Mir2Lir {
 
   /// @copydoc Mir2Lir::UnconditionallyMarkGCCard(RegStorage)
   void UnconditionallyMarkGCCard(RegStorage tgt_addr_reg) OVERRIDE;
+
+  bool CanUseOpPcRelDexCacheArrayLoad() const OVERRIDE;
+  void OpPcRelDexCacheArrayLoad(const DexFile* dex_file, int offset, RegStorage r_dest) OVERRIDE;
 
   void GenImplicitNullCheck(RegStorage reg, int opt_flags) OVERRIDE;
 
@@ -296,7 +299,7 @@ class X86Mir2Lir : public Mir2Lir {
   LIR* OpIT(ConditionCode cond, const char* guide) OVERRIDE;
   void OpEndIT(LIR* it) OVERRIDE;
   LIR* OpMem(OpKind op, RegStorage r_base, int disp) OVERRIDE;
-  LIR* OpPcRelLoad(RegStorage reg, LIR* target) OVERRIDE;
+  void OpPcRelLoad(RegStorage reg, LIR* target) OVERRIDE;
   LIR* OpReg(OpKind op, RegStorage r_dest_src) OVERRIDE;
   void OpRegCopy(RegStorage r_dest, RegStorage r_src) OVERRIDE;
   LIR* OpRegCopyNoInsert(RegStorage r_dest, RegStorage r_src) OVERRIDE;
@@ -372,16 +375,14 @@ class X86Mir2Lir : public Mir2Lir {
    */
   LIR* GenCallInsn(const MirMethodLoweringInfo& method_info) OVERRIDE;
 
+  void AnalyzeMIR(RefCounts* core_counts, MIR* mir, uint32_t weight) OVERRIDE;
+  void CountRefs(RefCounts* core_counts, RefCounts* fp_counts, size_t num_regs) OVERRIDE;
+  void DoPromotion() OVERRIDE;
+
   /*
    * @brief Handle x86 specific literals
    */
   void InstallLiteralPools() OVERRIDE;
-
-  /*
-   * @brief Generate the debug_frame FDE information.
-   * @returns pointer to vector containing CFE information
-   */
-  std::vector<uint8_t>* ReturnFrameDescriptionEntry() OVERRIDE;
 
   LIR* InvokeTrampoline(OpKind op, RegStorage r_tgt, QuickEntrypointEnum trampoline) OVERRIDE;
 
@@ -431,7 +432,7 @@ class X86Mir2Lir : public Mir2Lir {
 
   int AssignInsnOffsets();
   void AssignOffsets();
-  AssemblerStatus AssembleInstructions(CodeOffset start_addr);
+  AssemblerStatus AssembleInstructions(LIR* first_lir_insn, CodeOffset start_addr);
 
   size_t ComputeSize(const X86EncodingMap* entry, int32_t raw_reg, int32_t raw_index,
                      int32_t raw_base, int32_t displacement);
@@ -491,7 +492,6 @@ class X86Mir2Lir : public Mir2Lir {
   void EmitCallThread(const X86EncodingMap* entry, int32_t disp);
   void EmitPcRel(const X86EncodingMap* entry, int32_t raw_reg, int32_t raw_base_or_table,
                  int32_t raw_index, int scale, int32_t table_or_disp);
-  void EmitMacro(const X86EncodingMap* entry, int32_t raw_reg, int32_t offset);
   void EmitUnimplemented(const X86EncodingMap* entry, LIR* lir);
   void GenFusedLongCmpImmBranch(BasicBlock* bb, RegLocation rl_src1,
                                 int64_t val, ConditionCode ccode);
@@ -862,12 +862,6 @@ class X86Mir2Lir : public Mir2Lir {
   void SpillFPRegs();
 
   /*
-   * @brief Perform MIR analysis before compiling method.
-   * @note Invokes Mir2LiR::Materialize after analysis.
-   */
-  void Materialize();
-
-  /*
    * Mir2Lir's UpdateLoc() looks to see if the Dalvik value is currently live in any temp register
    * without regard to data type.  In practice, this can result in UpdateLoc returning a
    * location record for a Dalvik float value in a core register, and vis-versa.  For targets
@@ -881,67 +875,39 @@ class X86Mir2Lir : public Mir2Lir {
   RegLocation UpdateLocWideTyped(RegLocation loc);
 
   /*
-   * @brief Analyze MIR before generating code, to prepare for the code generation.
-   */
-  void AnalyzeMIR();
-
-  /*
-   * @brief Analyze one basic block.
-   * @param bb Basic block to analyze.
-   */
-  void AnalyzeBB(BasicBlock* bb);
-
-  /*
-   * @brief Analyze one extended MIR instruction
-   * @param opcode MIR instruction opcode.
-   * @param bb Basic block containing instruction.
-   * @param mir Extended instruction to analyze.
-   */
-  void AnalyzeExtendedMIR(int opcode, BasicBlock* bb, MIR* mir);
-
-  /*
-   * @brief Analyze one MIR instruction
-   * @param opcode MIR instruction opcode.
-   * @param bb Basic block containing instruction.
-   * @param mir Instruction to analyze.
-   */
-  virtual void AnalyzeMIR(int opcode, BasicBlock* bb, MIR* mir);
-
-  /*
    * @brief Analyze one MIR float/double instruction
    * @param opcode MIR instruction opcode.
-   * @param bb Basic block containing instruction.
    * @param mir Instruction to analyze.
+   * @return true iff the instruction needs to load a literal using PC-relative addressing.
    */
-  virtual void AnalyzeFPInstruction(int opcode, BasicBlock* bb, MIR* mir);
+  bool AnalyzeFPInstruction(int opcode, MIR* mir);
 
   /*
    * @brief Analyze one use of a double operand.
    * @param rl_use Double RegLocation for the operand.
+   * @return true iff the instruction needs to load a literal using PC-relative addressing.
    */
-  void AnalyzeDoubleUse(RegLocation rl_use);
+  bool AnalyzeDoubleUse(RegLocation rl_use);
 
   /*
    * @brief Analyze one invoke-static MIR instruction
-   * @param opcode MIR instruction opcode.
-   * @param bb Basic block containing instruction.
    * @param mir Instruction to analyze.
+   * @return true iff the instruction needs to load a literal using PC-relative addressing.
    */
-  void AnalyzeInvokeStatic(int opcode, BasicBlock* bb, MIR* mir);
+  bool AnalyzeInvokeStaticIntrinsic(MIR* mir);
 
   // Information derived from analysis of MIR
 
-  // The compiler temporary for the code address of the method.
-  CompilerTemp *base_of_code_;
+  // The base register for PC-relative addressing if promoted (32-bit only).
+  RegStorage pc_rel_base_reg_;
 
-  // Have we decided to compute a ptr to code and store in temporary VR?
-  bool store_method_addr_;
+  // Have we actually used the pc_rel_base_reg_?
+  bool pc_rel_base_reg_used_;
 
-  // Have we used the stored method address?
-  bool store_method_addr_used_;
-
-  // Instructions to remove if we didn't use the stored method address.
-  LIR* setup_method_address_[2];
+  // Pointer to the "call +0" insn that sets up the promoted register for PC-relative addressing.
+  // The anchor "pop" insn is NEXT_LIR(setup_pc_rel_base_reg_). The whole "call +0; pop <reg>"
+  // sequence will be removed in AssembleLIR() if we do not actually use PC-relative addressing.
+  LIR* setup_pc_rel_base_reg_;  // There are 2 chained insns (no reordering allowed).
 
   // Instructions needing patching with Method* values.
   ArenaVector<LIR*> method_address_insns_;
@@ -952,11 +918,8 @@ class X86Mir2Lir : public Mir2Lir {
   // Instructions needing patching with PC relative code addresses.
   ArenaVector<LIR*> call_method_insns_;
 
-  // Prologue decrement of stack pointer.
-  LIR* stack_decrement_;
-
-  // Epilogue increment of stack pointer.
-  LIR* stack_increment_;
+  // Instructions needing patching with PC relative code addresses.
+  ArenaVector<LIR*> dex_cache_access_insns_;
 
   // The list of const vector literals.
   LIR* const_vectors_;
@@ -992,9 +955,26 @@ class X86Mir2Lir : public Mir2Lir {
   void SwapBits(RegStorage result_reg, int shift, int32_t value);
   void SwapBits64(RegStorage result_reg, int shift, int64_t value);
 
+  static int X86NextSDCallInsn(CompilationUnit* cu, CallInfo* info,
+                               int state, const MethodReference& target_method,
+                               uint32_t,
+                               uintptr_t direct_code, uintptr_t direct_method,
+                               InvokeType type);
+
+  LIR* OpLoadPc(RegStorage r_dest);
+  RegStorage GetPcAndAnchor(LIR** anchor, RegStorage r_tmp = RegStorage::InvalidReg());
+
+  // When we don't know the proper offset for the value, pick one that will force
+  // 4 byte offset.  We will fix this up in the assembler or linker later to have
+  // the right value.
+  static constexpr int kDummy32BitOffset = 256;
+
   static const X86EncodingMap EncodingMap[kX86Last];
 
   friend std::ostream& operator<<(std::ostream& os, const X86OpCode& rhs);
+  friend class QuickAssembleX86Test;
+  friend class QuickAssembleX86MacroTest;
+  friend class QuickAssembleX86LowLevelTest;
 
   DISALLOW_COPY_AND_ASSIGN(X86Mir2Lir);
 };

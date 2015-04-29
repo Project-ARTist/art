@@ -16,6 +16,7 @@
 
 #include "art_method.h"
 
+#include "abstract_method.h"
 #include "arch/context.h"
 #include "art_field-inl.h"
 #include "art_method-inl.h"
@@ -53,16 +54,13 @@ GcRoot<Class> ArtMethod::java_lang_reflect_ArtMethod_;
 
 ArtMethod* ArtMethod::FromReflectedMethod(const ScopedObjectAccessAlreadyRunnable& soa,
                                           jobject jlr_method) {
-  mirror::ArtField* f =
-      soa.DecodeField(WellKnownClasses::java_lang_reflect_AbstractMethod_artMethod);
-  mirror::ArtMethod* method = f->GetObject(soa.Decode<mirror::Object*>(jlr_method))->AsArtMethod();
-  DCHECK(method != nullptr);
-  return method;
+  auto* abstract_method = soa.Decode<mirror::AbstractMethod*>(jlr_method);
+  DCHECK(abstract_method != nullptr);
+  return abstract_method->GetArtMethod();
 }
 
-
-void ArtMethod::VisitRoots(RootCallback* callback, void* arg) {
-  java_lang_reflect_ArtMethod_.VisitRootIfNonNull(callback, arg, RootInfo(kRootStickyClass));
+void ArtMethod::VisitRoots(RootVisitor* visitor) {
+  java_lang_reflect_ArtMethod_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
 }
 
 mirror::String* ArtMethod::GetNameAsString(Thread* self) {
@@ -202,8 +200,8 @@ uint32_t ArtMethod::ToDexPc(const uintptr_t pc, bool abort_on_failure) {
   const void* entry_point = GetQuickOatEntryPoint(sizeof(void*));
   uint32_t sought_offset = pc - reinterpret_cast<uintptr_t>(entry_point);
   if (IsOptimized(sizeof(void*))) {
-    uint32_t ret = GetStackMap(sought_offset).GetDexPc();
-    return ret;
+    CodeInfo code_info = GetOptimizedCodeInfo();
+    return code_info.GetStackMapForNativePcOffset(sought_offset).GetDexPc(code_info);
   }
 
   MappingTable table(entry_point != nullptr ?
@@ -364,7 +362,7 @@ const void* ArtMethod::GetQuickOatEntryPoint(size_t pointer_size) {
   Runtime* runtime = Runtime::Current();
   ClassLinker* class_linker = runtime->GetClassLinker();
   const void* code = runtime->GetInstrumentation()->GetQuickCodeFor(this, pointer_size);
-  // On failure, instead of nullptr we get the quick-generic-jni-trampoline for native method
+  // On failure, instead of null we get the quick-generic-jni-trampoline for native method
   // indicating the generic JNI, or the quick-to-interpreter-bridge (but not the trampoline)
   // for non-native methods.
   if (class_linker->IsQuickToInterpreterBridge(code) ||
@@ -401,7 +399,9 @@ void ArtMethod::Invoke(Thread* self, uint32_t* args, uint32_t args_size, JValue*
 
   Runtime* runtime = Runtime::Current();
   // Call the invoke stub, passing everything as arguments.
-  if (UNLIKELY(!runtime->IsStarted())) {
+  // If the runtime is not yet started or it is required by the debugger, then perform the
+  // Invocation by the interpreter.
+  if (UNLIKELY(!runtime->IsStarted() || Dbg::IsForcedInterpreterNeededForCalling(self, this))) {
     if (IsStatic()) {
       art::interpreter::EnterInterpreterFromInvoke(self, this, nullptr, args, result);
     } else {
@@ -503,7 +503,7 @@ QuickMethodFrameInfo ArtMethod::GetQuickFrameInfo() {
 
   const void* entry_point = runtime->GetInstrumentation()->GetQuickCodeFor(this, sizeof(void*));
   ClassLinker* class_linker = runtime->GetClassLinker();
-  // On failure, instead of nullptr we get the quick-generic-jni-trampoline for native method
+  // On failure, instead of null we get the quick-generic-jni-trampoline for native method
   // indicating the generic JNI, or the quick-to-interpreter-bridge (but not the trampoline)
   // for non-native methods. And we really shouldn't see a failure for non-native methods here.
   DCHECK(!class_linker->IsQuickToInterpreterBridge(entry_point));
@@ -543,6 +543,32 @@ void ArtMethod::UnregisterNative() {
   CHECK(IsNative() && !IsFastNative()) << PrettyMethod(this);
   // restore stub to lookup native pointer via dlsym
   RegisterNative(GetJniDlsymLookupStub(), false);
+}
+
+bool ArtMethod::EqualParameters(Handle<mirror::ObjectArray<mirror::Class>> params) {
+  auto* dex_cache = GetDexCache();
+  auto* dex_file = dex_cache->GetDexFile();
+  const auto& method_id = dex_file->GetMethodId(GetDexMethodIndex());
+  const auto& proto_id = dex_file->GetMethodPrototype(method_id);
+  const DexFile::TypeList* proto_params = dex_file->GetProtoParameters(proto_id);
+  auto count = proto_params != nullptr ? proto_params->Size() : 0u;
+  auto param_len = params.Get() != nullptr ? params->GetLength() : 0u;
+  if (param_len != count) {
+    return false;
+  }
+  auto* cl = Runtime::Current()->GetClassLinker();
+  for (size_t i = 0; i < count; ++i) {
+    auto type_idx = proto_params->GetTypeItem(i).type_idx_;
+    auto* type = cl->ResolveType(type_idx, this);
+    if (type == nullptr) {
+      Thread::Current()->AssertPendingException();
+      return false;
+    }
+    if (type != params->GetWithoutChecks(i)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace mirror

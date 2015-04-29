@@ -19,9 +19,10 @@
 
 #include <stdint.h>
 #include <cstddef>
+#include <map>
 #include <memory>
 
-#include "driver/compiler_driver.h"
+#include "linker/relative_patcher.h"  // For linker::RelativePatcherTargetProvider.
 #include "mem_map.h"
 #include "method_reference.h"
 #include "oat.h"
@@ -32,8 +33,10 @@ namespace art {
 
 class BitVector;
 class CompiledMethod;
+class CompilerDriver;
 class ImageWriter;
 class OutputStream;
+class TimingLogger;
 
 // OatHeader         variable length with count of D OatDexFiles
 //
@@ -79,6 +82,8 @@ class OutputStream;
 //
 class OatWriter {
  public:
+  typedef std::map<std::string, std::unique_ptr<std::vector<uintptr_t>>> PatchLocationsMap;
+
   OatWriter(const std::vector<const DexFile*>& dex_files,
             uint32_t image_file_location_oat_checksum,
             uintptr_t image_file_location_oat_begin,
@@ -100,8 +105,17 @@ class OatWriter {
     return bss_size_;
   }
 
-  const std::vector<uintptr_t>& GetAbsolutePatchLocations() const {
+  const PatchLocationsMap& GetAbsolutePatchLocations() const {
     return absolute_patch_locations_;
+  }
+
+  std::vector<uintptr_t>* GetAbsolutePatchLocationsFor(const char* section_name) {
+    auto it = absolute_patch_locations_.emplace(
+        std::string(section_name), std::unique_ptr<std::vector<uintptr_t>>());
+    if (it.second) {  // Inserted new item.
+      it.first->second.reset(new std::vector<uintptr_t>());
+    }
+    return it.first->second.get();
   }
 
   void SetOatDataOffset(size_t oat_data_offset) {
@@ -113,23 +127,23 @@ class OatWriter {
   ~OatWriter();
 
   struct DebugInfo {
-    DebugInfo(const std::string& method_name, const char* src_file_name,
-              uint32_t low_pc, uint32_t high_pc, const uint8_t* dbgstream,
-              CompiledMethod* compiled_method)
-      : method_name_(method_name), src_file_name_(src_file_name),
-        low_pc_(low_pc), high_pc_(high_pc), dbgstream_(dbgstream),
-        compiled_method_(compiled_method) {
-    }
-    std::string method_name_;  // Note: this name is a pretty-printed name.
-    const char* src_file_name_;
-    uint32_t    low_pc_;
-    uint32_t    high_pc_;
-    const uint8_t* dbgstream_;
+    const DexFile* dex_file_;
+    size_t class_def_index_;
+    uint32_t dex_method_index_;
+    uint32_t access_flags_;
+    const DexFile::CodeItem *code_item_;
+    bool deduped_;
+    uint32_t low_pc_;
+    uint32_t high_pc_;
     CompiledMethod* compiled_method_;
   };
 
-  const std::vector<DebugInfo>& GetCFIMethodInfo() const {
+  const std::vector<DebugInfo>& GetMethodDebugInfo() const {
     return method_info_;
+  }
+
+  const CompilerDriver* GetCompilerDriver() {
+    return compiler_driver_;
   }
 
  private:
@@ -221,13 +235,13 @@ class OatWriter {
     // used to validate file position when writing.
     size_t offset_;
 
-    // CompiledMethods for each class_def_method_index, or NULL if no method is available.
+    // CompiledMethods for each class_def_method_index, or null if no method is available.
     std::vector<CompiledMethod*> compiled_methods_;
 
     // Offset from OatClass::offset_ to the OatMethodOffsets for the
     // class_def_method_index. If 0, it means the corresponding
     // CompiledMethod entry in OatClass::compiled_methods_ should be
-    // NULL and that the OatClass::type_ should be kOatClassBitmap.
+    // null and that the OatClass::type_ should be kOatClassBitmap.
     std::vector<uint32_t> oat_method_offsets_offsets_from_oat_class_;
 
     // data to write
@@ -244,12 +258,12 @@ class OatWriter {
     // OatClassType::type_ is kOatClassBitmap, a set bit indicates the
     // method has an OatMethodOffsets in methods_offsets_, otherwise
     // the entry was ommited to save space. If OatClassType::type_ is
-    // not is kOatClassBitmap, the bitmap will be NULL.
+    // not is kOatClassBitmap, the bitmap will be null.
     BitVector* method_bitmap_;
 
     // OatMethodOffsets and OatMethodHeaders for each CompiledMethod
     // present in the OatClass. Note that some may be missing if
-    // OatClass::compiled_methods_ contains NULL values (and
+    // OatClass::compiled_methods_ contains null values (and
     // oat_method_offsets_offsets_from_oat_class_ should contain 0
     // values in this case).
     std::vector<OatMethodOffsets> method_offsets_;
@@ -312,6 +326,7 @@ class OatWriter {
   uint32_t size_code_;
   uint32_t size_code_alignment_;
   uint32_t size_relative_call_thunks_;
+  uint32_t size_misc_thunks_;
   uint32_t size_mapping_table_;
   uint32_t size_vmap_table_;
   uint32_t size_gc_map_;
@@ -325,50 +340,20 @@ class OatWriter {
   uint32_t size_oat_class_method_bitmaps_;
   uint32_t size_oat_class_method_offsets_;
 
-  class RelativeCallPatcher;
-  class NoRelativeCallPatcher;
-  class X86RelativeCallPatcher;
-  class ArmBaseRelativeCallPatcher;
-  class Thumb2RelativeCallPatcher;
-  class Arm64RelativeCallPatcher;
+  std::unique_ptr<linker::RelativePatcher> relative_patcher_;
 
-  std::unique_ptr<RelativeCallPatcher> relative_call_patcher_;
+  // The locations of absolute patches relative to the start of section.
+  // The map's key is the ELF's section name (including the dot).
+  PatchLocationsMap absolute_patch_locations_;
 
-  // The locations of absolute patches relative to the start of the executable section.
-  std::vector<uintptr_t> absolute_patch_locations_;
-
-  SafeMap<MethodReference, uint32_t, MethodReferenceComparator> method_offset_map_;
-
-  struct CodeOffsetsKeyComparator {
-    bool operator()(const CompiledMethod* lhs, const CompiledMethod* rhs) const {
-      if (lhs->GetQuickCode() != rhs->GetQuickCode()) {
-        return lhs->GetQuickCode() < rhs->GetQuickCode();
-      }
-      // If the code is the same, all other fields are likely to be the same as well.
-      if (UNLIKELY(lhs->GetMappingTable() != rhs->GetMappingTable())) {
-        return lhs->GetMappingTable() < rhs->GetMappingTable();
-      }
-      if (UNLIKELY(lhs->GetVmapTable() != rhs->GetVmapTable())) {
-        return lhs->GetVmapTable() < rhs->GetVmapTable();
-      }
-      if (UNLIKELY(lhs->GetGcMap() != rhs->GetGcMap())) {
-        return lhs->GetGcMap() < rhs->GetGcMap();
-      }
-      const auto& lhs_patches = lhs->GetPatches();
-      const auto& rhs_patches = rhs->GetPatches();
-      if (UNLIKELY(lhs_patches.size() != rhs_patches.size())) {
-        return lhs_patches.size() < rhs_patches.size();
-      }
-      auto rit = rhs_patches.begin();
-      for (const LinkerPatch& lpatch : lhs_patches) {
-        if (UNLIKELY(!(lpatch == *rit))) {
-          return lpatch < *rit;
-        }
-        ++rit;
-      }
-      return false;
-    }
+  // Map method reference to assigned offset.
+  // Wrap the map in a class implementing linker::RelativePatcherTargetProvider.
+  class MethodOffsetMap FINAL : public linker::RelativePatcherTargetProvider {
+   public:
+    std::pair<bool, uint32_t> FindMethodOffset(MethodReference ref) OVERRIDE;
+    SafeMap<MethodReference, uint32_t, MethodReferenceComparator> map;
   };
+  MethodOffsetMap method_offset_map_;
 
   DISALLOW_COPY_AND_ASSIGN(OatWriter);
 };

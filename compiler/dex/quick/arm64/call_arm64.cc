@@ -21,12 +21,15 @@
 #include "arm64_lir.h"
 #include "base/logging.h"
 #include "dex/mir_graph.h"
+#include "dex/quick/dex_file_to_method_inliner_map.h"
 #include "dex/quick/mir_to_lir-inl.h"
 #include "driver/compiler_driver.h"
+#include "driver/compiler_options.h"
 #include "gc/accounting/card_table.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "mirror/art_method.h"
 #include "mirror/object_array-inl.h"
+#include "utils/dex_cache_arrays_layout-inl.h"
 
 namespace art {
 
@@ -125,7 +128,7 @@ void Arm64Mir2Lir::GenLargePackedSwitch(MIR* mir, uint32_t table_offset, RegLoca
   }
   // Bounds check - if < 0 or >= size continue following switch
   OpRegImm(kOpCmp, key_reg, size - 1);
-  LIR* branch_over = OpCondBranch(kCondHi, NULL);
+  LIR* branch_over = OpCondBranch(kCondHi, nullptr);
 
   // Load the displacement from the switch table
   RegStorage disp_reg = AllocTemp();
@@ -165,7 +168,7 @@ void Arm64Mir2Lir::GenMonitorEnter(int opt_flags, RegLocation rl_src) {
   } else {
     // If the null-check fails its handled by the slow-path to reduce exception related meta-data.
     if (!cu_->compiler_driver->GetCompilerOptions().GetImplicitNullChecks()) {
-      null_check_branch = OpCmpImmBranch(kCondEq, rs_x0, 0, NULL);
+      null_check_branch = OpCmpImmBranch(kCondEq, rs_x0, 0, nullptr);
     }
   }
   Load32Disp(rs_xSELF, Thread::ThinLockIdOffset<8>().Int32Value(), rs_w1);
@@ -174,12 +177,12 @@ void Arm64Mir2Lir::GenMonitorEnter(int opt_flags, RegLocation rl_src) {
   MarkPossibleNullPointerException(opt_flags);
   // Zero out the read barrier bits.
   OpRegRegImm(kOpAnd, rs_w2, rs_w3, LockWord::kReadBarrierStateMaskShiftedToggled);
-  LIR* not_unlocked_branch = OpCmpImmBranch(kCondNe, rs_w2, 0, NULL);
+  LIR* not_unlocked_branch = OpCmpImmBranch(kCondNe, rs_w2, 0, nullptr);
   // w3 is zero except for the rb bits here. Copy the read barrier bits into w1.
   OpRegRegReg(kOpOr, rs_w1, rs_w1, rs_w3);
   OpRegRegImm(kOpAdd, rs_x2, rs_x0, mirror::Object::MonitorOffset().Int32Value());
   NewLIR3(kA64Stxr3wrX, rw3, rw1, rx2);
-  LIR* lock_success_branch = OpCmpImmBranch(kCondEq, rs_w3, 0, NULL);
+  LIR* lock_success_branch = OpCmpImmBranch(kCondEq, rs_w3, 0, nullptr);
 
   LIR* slow_path_target = NewLIR0(kPseudoTargetLabel);
   not_unlocked_branch->target = slow_path_target;
@@ -218,7 +221,7 @@ void Arm64Mir2Lir::GenMonitorExit(int opt_flags, RegLocation rl_src) {
   } else {
     // If the null-check fails its handled by the slow-path to reduce exception related meta-data.
     if (!cu_->compiler_driver->GetCompilerOptions().GetImplicitNullChecks()) {
-      null_check_branch = OpCmpImmBranch(kCondEq, rs_x0, 0, NULL);
+      null_check_branch = OpCmpImmBranch(kCondEq, rs_x0, 0, nullptr);
     }
   }
   Load32Disp(rs_xSELF, Thread::ThinLockIdOffset<8>().Int32Value(), rs_w1);
@@ -233,16 +236,16 @@ void Arm64Mir2Lir::GenMonitorExit(int opt_flags, RegLocation rl_src) {
   OpRegRegImm(kOpAnd, rs_w3, rs_w2, LockWord::kReadBarrierStateMaskShiftedToggled);
   // Zero out except the read barrier bits.
   OpRegRegImm(kOpAnd, rs_w2, rs_w2, LockWord::kReadBarrierStateMaskShifted);
-  LIR* slow_unlock_branch = OpCmpBranch(kCondNe, rs_w3, rs_w1, NULL);
+  LIR* slow_unlock_branch = OpCmpBranch(kCondNe, rs_w3, rs_w1, nullptr);
   GenMemBarrier(kAnyStore);
   LIR* unlock_success_branch;
   if (!kUseReadBarrier) {
     Store32Disp(rs_x0, mirror::Object::MonitorOffset().Int32Value(), rs_w2);
-    unlock_success_branch = OpUnconditionalBranch(NULL);
+    unlock_success_branch = OpUnconditionalBranch(nullptr);
   } else {
     OpRegRegImm(kOpAdd, rs_x3, rs_x0, mirror::Object::MonitorOffset().Int32Value());
     NewLIR3(kA64Stxr3wrX, rw1, rw2, rx3);
-    unlock_success_branch = OpCmpImmBranch(kCondEq, rs_w1, 0, NULL);
+    unlock_success_branch = OpCmpImmBranch(kCondEq, rs_w1, 0, nullptr);
   }
   LIR* slow_path_target = NewLIR0(kPseudoTargetLabel);
   slow_unlock_branch->target = slow_path_target;
@@ -280,7 +283,13 @@ void Arm64Mir2Lir::UnconditionallyMarkGCCard(RegStorage tgt_addr_reg) {
   FreeTemp(reg_card_no);
 }
 
+static dwarf::Reg DwarfCoreReg(int num) {
+  return dwarf::Reg::Arm64Core(num);
+}
+
 void Arm64Mir2Lir::GenEntrySequence(RegLocation* ArgLocs, RegLocation rl_method) {
+  DCHECK_EQ(cfi_.GetCurrentCFAOffset(), 0);  // empty stack.
+
   /*
    * On entry, x0 to x7 are live.  Let the register allocation
    * mechanism know so it doesn't try to use any of them when
@@ -309,8 +318,6 @@ void Arm64Mir2Lir::GenEntrySequence(RegLocation* ArgLocs, RegLocation rl_method)
    */
   bool skip_overflow_check = mir_graph_->MethodIsLeaf() &&
     !FrameNeedsStackCheck(frame_size_, kArm64);
-
-  NewLIR0(kPseudoMethodEntry);
 
   const size_t kStackOverflowReservedUsableBytes = GetStackOverflowReservedBytes(kArm64);
   const bool large_frame = static_cast<size_t>(frame_size_) > kStackOverflowReservedUsableBytes;
@@ -345,14 +352,15 @@ void Arm64Mir2Lir::GenEntrySequence(RegLocation* ArgLocs, RegLocation rl_method)
 
   if (spilled_already != frame_size_) {
     OpRegImm(kOpSub, rs_sp, frame_size_without_spills);
+    cfi_.AdjustCFAOffset(frame_size_without_spills);
   }
 
   if (!skip_overflow_check) {
     if (generate_explicit_stack_overflow_check) {
       class StackOverflowSlowPath: public LIRSlowPath {
       public:
-        StackOverflowSlowPath(Mir2Lir* m2l, LIR* branch, size_t sp_displace) :
-              LIRSlowPath(m2l, m2l->GetCurrentDexPc(), branch, nullptr),
+        StackOverflowSlowPath(Mir2Lir* m2l, LIR* branch, size_t sp_displace)
+            : LIRSlowPath(m2l, branch),
               sp_displace_(sp_displace) {
         }
         void Compile() OVERRIDE {
@@ -361,12 +369,14 @@ void Arm64Mir2Lir::GenEntrySequence(RegLocation* ArgLocs, RegLocation rl_method)
           GenerateTargetLabel(kPseudoThrowTarget);
           // Unwinds stack.
           m2l_->OpRegImm(kOpAdd, rs_sp, sp_displace_);
+          m2l_->cfi().AdjustCFAOffset(-sp_displace_);
           m2l_->ClobberCallerSave();
           ThreadOffset<8> func_offset = QUICK_ENTRYPOINT_OFFSET(8, pThrowStackOverflow);
           m2l_->LockTemp(rs_xIP0);
           m2l_->LoadWordDisp(rs_xSELF, func_offset.Int32Value(), rs_xIP0);
           m2l_->NewLIR1(kA64Br1x, rs_xIP0.GetReg());
           m2l_->FreeTemp(rs_xIP0);
+          m2l_->cfi().AdjustCFAOffset(sp_displace_);
         }
 
       private:
@@ -393,19 +403,20 @@ void Arm64Mir2Lir::GenEntrySequence(RegLocation* ArgLocs, RegLocation rl_method)
 }
 
 void Arm64Mir2Lir::GenExitSequence() {
+  cfi_.RememberState();
   /*
    * In the exit path, r0/r1 are live - make sure they aren't
    * allocated by the register utilities as temps.
    */
   LockTemp(rs_x0);
   LockTemp(rs_x1);
-
-  NewLIR0(kPseudoMethodExit);
-
   UnspillRegs(rs_sp, core_spill_mask_, fp_spill_mask_, frame_size_);
 
   // Finally return.
   NewLIR0(kA64Ret);
+  // The CFI should be restored for any code that follows the exit block.
+  cfi_.RestoreState();
+  cfi_.DefCFAOffset(frame_size_);
 }
 
 void Arm64Mir2Lir::GenSpecialExitSequence() {
@@ -422,11 +433,16 @@ void Arm64Mir2Lir::GenSpecialEntryForSuspend() {
   core_vmap_table_.clear();
   fp_vmap_table_.clear();
   NewLIR4(WIDE(kA64StpPre4rrXD), rs_x0.GetReg(), rs_xLR.GetReg(), rs_sp.GetReg(), -frame_size_ / 8);
+  cfi_.AdjustCFAOffset(frame_size_);
+  // Do not generate CFI for scratch register x0.
+  cfi_.RelOffset(DwarfCoreReg(rxLR), 8);
 }
 
 void Arm64Mir2Lir::GenSpecialExitForSuspend() {
   // Pop the frame. (ArtMethod* no longer needed but restore it anyway.)
   NewLIR4(WIDE(kA64LdpPost4rrXD), rs_x0.GetReg(), rs_xLR.GetReg(), rs_sp.GetReg(), frame_size_ / 8);
+  cfi_.AdjustCFAOffset(-frame_size_);
+  cfi_.Restore(DwarfCoreReg(rxLR));
 }
 
 static bool Arm64UseRelativeCall(CompilationUnit* cu, const MethodReference& target_method) {
@@ -438,14 +454,32 @@ static bool Arm64UseRelativeCall(CompilationUnit* cu, const MethodReference& tar
  * Bit of a hack here - in the absence of a real scheduling pass,
  * emit the next instruction in static & direct invoke sequences.
  */
-static int Arm64NextSDCallInsn(CompilationUnit* cu, CallInfo* info,
-                               int state, const MethodReference& target_method,
-                               uint32_t unused_idx,
-                               uintptr_t direct_code, uintptr_t direct_method,
-                               InvokeType type) {
+int Arm64Mir2Lir::Arm64NextSDCallInsn(CompilationUnit* cu, CallInfo* info,
+                                      int state, const MethodReference& target_method,
+                                      uint32_t unused_idx,
+                                      uintptr_t direct_code, uintptr_t direct_method,
+                                      InvokeType type) {
   UNUSED(info, unused_idx);
-  Mir2Lir* cg = static_cast<Mir2Lir*>(cu->cg.get());
-  if (direct_code != 0 && direct_method != 0) {
+  Arm64Mir2Lir* cg = static_cast<Arm64Mir2Lir*>(cu->cg.get());
+  if (info->string_init_offset != 0) {
+    RegStorage arg0_ref = cg->TargetReg(kArg0, kRef);
+    switch (state) {
+    case 0: {  // Grab target method* from thread pointer
+      cg->LoadRefDisp(rs_xSELF, info->string_init_offset, arg0_ref, kNotVolatile);
+      break;
+    }
+    case 1:  // Grab the code from the method*
+      if (direct_code == 0) {
+        // kInvokeTgt := arg0_ref->entrypoint
+        cg->LoadWordDisp(arg0_ref,
+                         mirror::ArtMethod::EntryPointFromQuickCompiledCodeOffset(
+                             kArm64PointerSize).Int32Value(), cg->TargetPtrReg(kInvokeTgt));
+      }
+      break;
+    default:
+      return -1;
+    }
+  } else if (direct_code != 0 && direct_method != 0) {
     switch (state) {
     case 0:  // Get the current Method* [sets kArg0]
       if (direct_code != static_cast<uintptr_t>(-1)) {
@@ -465,17 +499,24 @@ static int Arm64NextSDCallInsn(CompilationUnit* cu, CallInfo* info,
       return -1;
     }
   } else {
+    bool use_pc_rel = cg->CanUseOpPcRelDexCacheArrayLoad();
     RegStorage arg0_ref = cg->TargetReg(kArg0, kRef);
     switch (state) {
     case 0:  // Get the current Method* [sets kArg0]
       // TUNING: we can save a reg copy if Method* has been promoted.
-      cg->LoadCurrMethodDirect(arg0_ref);
-      break;
+      if (!use_pc_rel) {
+        cg->LoadCurrMethodDirect(arg0_ref);
+        break;
+      }
+      ++state;
+      FALLTHROUGH_INTENDED;
     case 1:  // Get method->dex_cache_resolved_methods_
-      cg->LoadRefDisp(arg0_ref,
-                      mirror::ArtMethod::DexCacheResolvedMethodsOffset().Int32Value(),
-                      arg0_ref,
-                      kNotVolatile);
+      if (!use_pc_rel) {
+        cg->LoadRefDisp(arg0_ref,
+                        mirror::ArtMethod::DexCacheResolvedMethodsOffset().Int32Value(),
+                        arg0_ref,
+                        kNotVolatile);
+      }
       // Set up direct code if known.
       if (direct_code != 0) {
         if (direct_code != static_cast<uintptr_t>(-1)) {
@@ -487,14 +528,23 @@ static int Arm64NextSDCallInsn(CompilationUnit* cu, CallInfo* info,
           cg->LoadCodeAddress(target_method, type, kInvokeTgt);
         }
       }
-      break;
+      if (!use_pc_rel || direct_code != 0) {
+        break;
+      }
+      ++state;
+      FALLTHROUGH_INTENDED;
     case 2:  // Grab target method*
       CHECK_EQ(cu->dex_file, target_method.dex_file);
-      cg->LoadRefDisp(arg0_ref,
-                      mirror::ObjectArray<mirror::Object>::OffsetOfElement(
-                          target_method.dex_method_index).Int32Value(),
-                      arg0_ref,
-                      kNotVolatile);
+      if (!use_pc_rel) {
+        cg->LoadRefDisp(arg0_ref,
+                        mirror::ObjectArray<mirror::Object>::OffsetOfElement(
+                            target_method.dex_method_index).Int32Value(),
+                        arg0_ref,
+                        kNotVolatile);
+      } else {
+        size_t offset = cg->dex_cache_arrays_layout_.MethodOffset(target_method.dex_method_index);
+        cg->OpPcRelDexCacheArrayLoad(cu->dex_file, offset, arg0_ref);
+      }
       break;
     case 3:  // Grab the code from the method*
       if (direct_code == 0) {
@@ -525,7 +575,7 @@ LIR* Arm64Mir2Lir::CallWithLinkerFixup(const MethodReference& target_method, Inv
   // NOTE: Method deduplication takes linker patches into account, so we can just pass 0
   // as a placeholder for the offset.
   LIR* call = RawLIR(current_dalvik_offset_, kA64Bl1t, 0,
-                     target_method_idx, WrapPointer(const_cast<DexFile*>(target_dex_file)), type);
+                     target_method_idx, WrapPointer(target_dex_file), type);
   AppendLIR(call);
   call_method_insns_.push_back(call);
   return call;

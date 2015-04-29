@@ -18,6 +18,7 @@
 #define ART_COMPILER_UTILS_X86_MANAGED_REGISTER_X86_H_
 
 #include "constants_x86.h"
+#include "dwarf/register.h"
 #include "utils/managed_register.h"
 
 namespace art {
@@ -88,14 +89,6 @@ const int kNumberOfAllocIds = kNumberOfCpuAllocIds + kNumberOfXmmAllocIds +
 // There is a one-to-one mapping between ManagedRegister and register id.
 class X86ManagedRegister : public ManagedRegister {
  public:
-  int DWARFRegId() const {
-    CHECK(IsCpuRegister());
-    // For all the X86 registers we care about:
-    // EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI,
-    // DWARF register id is the same as id_.
-    return static_cast<int>(id_);
-  }
-
   ByteRegister AsByteRegister() const {
     CHECK(IsCpuRegister());
     CHECK_LT(AsCpuRegister(), ESP);  // ESP, EBP, ESI and EDI cannot be encoded as byte registers.

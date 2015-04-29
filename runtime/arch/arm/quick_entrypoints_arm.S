@@ -320,7 +320,7 @@ ONE_ARG_RUNTIME_EXCEPTION art_quick_throw_no_such_method, artThrowNoSuchMethodFr
      * The helper will attempt to locate the target and return a 64-bit result in r0/r1 consisting
      * of the target Method* in r0 and method->code_ in r1.
      *
-     * If unsuccessful, the helper will return NULL/NULL. There will bea pending exception in the
+     * If unsuccessful, the helper will return null/null. There will bea pending exception in the
      * thread and we branch to another stub to deliver it.
      *
      * On success this wrapper will restore arguments and *jump* to the target, leaving the lr
@@ -359,7 +359,7 @@ INVOKE_TRAMPOLINE art_quick_invoke_virtual_trampoline_with_access_check, artInvo
      * Quick invocation stub internal.
      * On entry:
      *   r0 = method pointer
-     *   r1 = argument array or NULL for no argument methods
+     *   r1 = argument array or null for no argument methods
      *   r2 = size of argument array in bytes
      *   r3 = (managed) thread pointer
      *   [sp] = JValue* result
@@ -409,7 +409,7 @@ ENTRY art_quick_invoke_stub_internal
     add    r0, sp, #4                      @ pass stack pointer + method ptr as dest for memcpy
     bl     memcpy                          @ memcpy (dest, src, bytes)
     mov    ip, #0                          @ set ip to 0
-    str    ip, [sp]                        @ store NULL for method* at bottom of frame
+    str    ip, [sp]                        @ store null for method* at bottom of frame
 
     ldr    ip, [r11, #48]                  @ load fp register argument array pointer
     vldm   ip, {s0-s15}                    @ copy s0 - s15
@@ -669,6 +669,18 @@ ENTRY art_quick_aput_obj
 END art_quick_aput_obj
 
 // Macro to facilitate adding new allocation entrypoints.
+.macro ONE_ARG_DOWNCALL name, entrypoint, return
+    .extern \entrypoint
+ENTRY \name
+    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME  r1, r2  @ save callee saves in case of GC
+    mov    r1, r9                     @ pass Thread::Current
+    bl     \entrypoint     @ (uint32_t type_idx, Method* method, Thread*)
+    RESTORE_REFS_ONLY_CALLEE_SAVE_FRAME
+    \return
+END \name
+.endm
+
+// Macro to facilitate adding new allocation entrypoints.
 .macro TWO_ARG_DOWNCALL name, entrypoint, return
     .extern \entrypoint
 ENTRY \name
@@ -693,10 +705,25 @@ ENTRY \name
 END \name
 .endm
 
-TWO_ARG_DOWNCALL art_quick_initialize_static_storage, artInitializeStaticStorageFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+// Macro to facilitate adding new allocation entrypoints.
+.macro FOUR_ARG_DOWNCALL name, entrypoint, return
+    .extern \entrypoint
+ENTRY \name
+    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME  r3, r12  @ save callee saves in case of GC
+    str    r9, [sp, #-16]!            @ expand the frame and pass Thread::Current
+    .pad #16
+    .cfi_adjust_cfa_offset 16
+    bl     \entrypoint
+    add    sp, #16                    @ strip the extra frame
+    .cfi_adjust_cfa_offset -16
+    RESTORE_REFS_ONLY_CALLEE_SAVE_FRAME
+    \return
+END \name
+.endm
 
-TWO_ARG_DOWNCALL art_quick_initialize_type, artInitializeTypeFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
-TWO_ARG_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_DOWNCALL art_quick_initialize_static_storage, artInitializeStaticStorageFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_DOWNCALL art_quick_initialize_type, artInitializeTypeFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
 
     /*
      * Called by managed code to resolve a static field and load a non-wide value.
@@ -805,11 +832,10 @@ END art_quick_set64_instance
 
     /*
      * Entry from managed code to resolve a string, this stub will allocate a String and deliver an
-     * exception on error. On success the String is returned. R0 holds the referring method,
-     * R1 holds the string index. The fast path check for hit in strings cache has already been
-     * performed.
+     * exception on error. On success the String is returned. R0 holds the string index. The fast
+     * path check for hit in strings cache has already been performed.
      */
-TWO_ARG_DOWNCALL art_quick_resolve_string, artResolveStringFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_DOWNCALL art_quick_resolve_string, artResolveStringFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
 
 // Generate the allocation entrypoints for each allocator.
 GENERATE_ALL_ALLOC_ENTRYPOINTS
@@ -1178,8 +1204,7 @@ ENTRY art_quick_indexof
     .cfi_rel_offset r11, 8
     .cfi_rel_offset lr, 12
     ldr   r3, [r0, #MIRROR_STRING_COUNT_OFFSET]
-    ldr   r12, [r0, #MIRROR_STRING_OFFSET_OFFSET]
-    ldr   r0, [r0, #MIRROR_STRING_VALUE_OFFSET]
+    add   r0, #MIRROR_STRING_VALUE_OFFSET
 
     /* Clamp start to [0..count] */
     cmp   r2, #0
@@ -1188,10 +1213,6 @@ ENTRY art_quick_indexof
     cmp   r2, r3
     it    gt
     movgt r2, r3
-
-    /* Build a pointer to the start of string data */
-    add   r0, #MIRROR_CHAR_ARRAY_DATA_OFFSET
-    add   r0, r0, r12, lsl #1
 
     /* Save a copy in r12 to later compute result */
     mov   r12, r0
@@ -1298,12 +1319,10 @@ ENTRY art_quick_string_compareto
     .cfi_rel_offset r12, 24
     .cfi_rel_offset lr, 28
 
-    ldr    r4, [r2, #MIRROR_STRING_OFFSET_OFFSET]
-    ldr    r9, [r1, #MIRROR_STRING_OFFSET_OFFSET]
     ldr    r7, [r2, #MIRROR_STRING_COUNT_OFFSET]
     ldr    r10, [r1, #MIRROR_STRING_COUNT_OFFSET]
-    ldr    r2, [r2, #MIRROR_STRING_VALUE_OFFSET]
-    ldr    r1, [r1, #MIRROR_STRING_VALUE_OFFSET]
+    add    r2, #MIRROR_STRING_VALUE_OFFSET
+    add    r1, #MIRROR_STRING_VALUE_OFFSET
 
     /*
      * At this point, we have:
@@ -1318,15 +1337,12 @@ ENTRY art_quick_string_compareto
      it    ls
      movls r10, r7
 
-     /* Now, build pointers to the string data */
-     add   r2, r2, r4, lsl #1
-     add   r1, r1, r9, lsl #1
      /*
       * Note: data pointers point to previous element so we can use pre-index
       * mode with base writeback.
       */
-     add   r2, #MIRROR_CHAR_ARRAY_DATA_OFFSET-2   @ offset to contents[-1]
-     add   r1, #MIRROR_CHAR_ARRAY_DATA_OFFSET-2   @ offset to contents[-1]
+     subs  r2, #2   @ offset to contents[-1]
+     subs  r1, #2   @ offset to contents[-1]
 
      /*
       * At this point we have:

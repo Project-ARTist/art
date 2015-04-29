@@ -24,6 +24,7 @@
 #include <iostream>
 #include <sstream>
 
+#include "art_field-inl.h"
 #include "base/logging.h"
 #include "base/macros.h"
 #include "class_linker-inl.h"
@@ -32,7 +33,6 @@
 #include "dex_instruction-inl.h"
 #include "entrypoints/entrypoint_utils-inl.h"
 #include "handle_scope-inl.h"
-#include "mirror/art_field-inl.h"
 #include "mirror/art_method-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
@@ -41,7 +41,6 @@
 #include "thread.h"
 #include "well_known_classes.h"
 
-using ::art::mirror::ArtField;
 using ::art::mirror::ArtMethod;
 using ::art::mirror::Array;
 using ::art::mirror::BooleanArray;
@@ -81,7 +80,11 @@ static inline void DoMonitorExit(Thread* self, Object* ref) NO_THREAD_SAFETY_ANA
   ref->MonitorExit(self);
 }
 
-void AbortTransaction(Thread* self, const char* fmt, ...)
+void AbortTransactionF(Thread* self, const char* fmt, ...)
+    __attribute__((__format__(__printf__, 2, 3)))
+    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+void AbortTransactionV(Thread* self, const char* fmt, va_list args)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
 void RecordArrayElementsInTransaction(mirror::Array* array, int32_t count)
@@ -317,7 +320,10 @@ static inline int32_t DoSparseSwitch(const Instruction* inst, const ShadowFrame&
   int32_t test_val = shadow_frame.GetVReg(inst->VRegA_31t(inst_data));
   DCHECK_EQ(switch_data[0], static_cast<uint16_t>(Instruction::kSparseSwitchSignature));
   uint16_t size = switch_data[1];
-  DCHECK_GT(size, 0);
+  // Return length of SPARSE_SWITCH if size is 0.
+  if (size == 0) {
+    return 3;
+  }
   const int32_t* keys = reinterpret_cast<const int32_t*>(&switch_data[2]);
   DCHECK(IsAligned<4>(keys));
   const int32_t* entries = keys + size;
@@ -361,9 +367,9 @@ static inline void TraceExecution(const ShadowFrame& shadow_frame, const Instruc
       uint32_t raw_value = shadow_frame.GetVReg(i);
       Object* ref_value = shadow_frame.GetVRegReference(i);
       oss << StringPrintf(" vreg%u=0x%08X", i, raw_value);
-      if (ref_value != NULL) {
+      if (ref_value != nullptr) {
         if (ref_value->GetClass()->IsStringClass() &&
-            ref_value->AsString()->GetCharArray() != NULL) {
+            ref_value->AsString()->GetValue() != nullptr) {
           oss << "/java.lang.String \"" << ref_value->AsString()->ToModifiedUtf8() << "\"";
         } else {
           oss << "/" << PrettyTypeOf(ref_value);

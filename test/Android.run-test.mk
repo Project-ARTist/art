@@ -95,9 +95,9 @@ ifeq ($(ART_TEST_RUN_TEST_NO_RELOCATE),true)
   RELOCATE_TYPES += no-relocate
 endif
 ifeq ($(ART_TEST_RUN_TEST_RELOCATE_NO_PATCHOAT),true)
-  RELOCATE_TYPES := relocate-no-patchoat
+  RELOCATE_TYPES += relocate-npatchoat
 endif
-TRACE_TYPES := no-trace
+TRACE_TYPES := ntrace
 ifeq ($(ART_TEST_TRACE),true)
   TRACE_TYPES += trace
 endif
@@ -119,7 +119,7 @@ endif
 ifeq ($(ART_TEST_PIC_IMAGE),true)
   IMAGE_TYPES += picimage
 endif
-PICTEST_TYPES := nopictest
+PICTEST_TYPES := npictest
 ifeq ($(ART_TEST_PIC_TEST),true)
   PICTEST_TYPES += pictest
 endif
@@ -130,7 +130,7 @@ endif
 ifeq ($(ART_TEST_RUN_TEST_NDEBUG),true)
   RUN_TYPES += ndebug
 endif
-DEBUGGABLE_TYPES := nondebuggable
+DEBUGGABLE_TYPES := ndebuggable
 ifeq ($(ART_TEST_RUN_TEST_DEBUGGABLE),true)
 DEBUGGABLE_TYPES += debuggable
 endif
@@ -250,6 +250,12 @@ ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,target,$(RUN_TYPES),$(PREBUIL
     $(COMPILER_TYPES),$(RELOCATE_TYPES),$(TRACE_TYPES),$(GC_TYPES),$(JNI_TYPES),$(IMAGE_TYPES), \
     $(PICTEST_TYPES),$(DEBUGGABLE_TYPES),130-hprof,$(ALL_ADDRESS_SIZES))
 
+# 131 is an old test. The functionality has been implemented at an earlier stage and is checked
+# in tests 138.
+ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
+    $(COMPILER_TYPES),$(RELOCATE_TYPES),$(TRACE_TYPES),$(GC_TYPES),$(JNI_TYPES),$(IMAGE_TYPES), \
+    $(PICTEST_TYPES),$(DEBUGGABLE_TYPES),131-structural-change,$(ALL_ADDRESS_SIZES))
+
 # All these tests check that we have sane behavior if we don't have a patchoat or dex2oat.
 # Therefore we shouldn't run them in situations where we actually don't have these since they
 # explicitly test for them. These all also assume we have an image.
@@ -257,7 +263,12 @@ TEST_ART_BROKEN_FALLBACK_RUN_TESTS := \
   116-nodex2oat \
   117-nopatchoat \
   118-noimage-dex2oat \
-  119-noimage-patchoat
+  119-noimage-patchoat \
+  138-duplicate-classes-check2
+
+# This test fails without an image.
+TEST_ART_BROKEN_NO_IMAGE_RUN_TESTS := \
+  138-duplicate-classes-check
 
 ifneq (,$(filter no-dex2oat,$(PREBUILD_TYPES)))
   ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),no-dex2oat, \
@@ -270,11 +281,14 @@ ifneq (,$(filter no-image,$(IMAGE_TYPES)))
   ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
       $(COMPILER_TYPES), $(RELOCATE_TYPES),$(TRACE_TYPES),$(GC_TYPES),$(JNI_TYPES),no-image, \
       $(PICTEST_TYPES), $(DEBUGGABLE_TYPES), $(TEST_ART_BROKEN_FALLBACK_RUN_TESTS),$(ALL_ADDRESS_SIZES))
+  ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
+      $(COMPILER_TYPES), $(RELOCATE_TYPES),$(TRACE_TYPES),$(GC_TYPES),$(JNI_TYPES),no-image, \
+      $(PICTEST_TYPES), $(DEBUGGABLE_TYPES), $(TEST_ART_BROKEN_NO_IMAGE_RUN_TESTS),$(ALL_ADDRESS_SIZES))
 endif
 
-ifneq (,$(filter relocate-no-patchoat,$(RELOCATE_TYPES)))
+ifneq (,$(filter relocate-npatchoat,$(RELOCATE_TYPES)))
   ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
-      $(COMPILER_TYPES), relocate-no-patchoat,$(TRACE_TYPES),$(GC_TYPES),$(JNI_TYPES), \
+      $(COMPILER_TYPES), relocate-npatchoat,$(TRACE_TYPES),$(GC_TYPES),$(JNI_TYPES), \
       $(IMAGE_TYPES),$(PICTEST_TYPES),$(DEBUGGABLE_TYPES), $(TEST_ART_BROKEN_FALLBACK_RUN_TESTS),$(ALL_ADDRESS_SIZES))
 endif
 
@@ -313,6 +327,7 @@ TEST_ART_BROKEN_NDEBUG_TESTS := \
   455-set-vreg \
   457-regs \
   461-get-reference-vreg \
+  466-get-live-vreg \
 
 ifneq (,$(filter ndebug,$(RUN_TYPES)))
   ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),ndebug,$(PREBUILD_TYPES), \
@@ -334,6 +349,29 @@ endif
 
 TEST_ART_BROKEN_DEFAULT_RUN_TESTS :=
 
+# Known broken tests for Quick's and Optimizing's ARM back ends.
+TEST_ART_BROKEN_ARM_RUN_TESTS := 477-long-to-float-conversion-precision  # b/20413424
+
+ifeq ($(TARGET_ARCH),arm)
+  ifneq (,$(filter 32,$(ALL_ADDRESS_SIZES)))
+    ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,target,$(RUN_TYPES),$(PREBUILD_TYPES), \
+        $(COMPILER_TYPES),$(RELOCATE_TYPES),$(TRACE_TYPES),$(GC_TYPES),$(JNI_TYPES), \
+        $(IMAGE_TYPES),$(PICTEST_TYPES),$(DEBUGGABLE_TYPES),$(TEST_ART_BROKEN_ARM_RUN_TESTS),32)
+  endif
+endif
+
+ifdef TARGET_2ND_ARCH
+  ifeq ($(TARGET_2ND_ARCH),arm)
+    ifneq (,$(filter 32,$(ALL_ADDRESS_SIZES)))
+      ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,target,$(RUN_TYPES),$(PREBUILD_TYPES), \
+          $(COMPILER_TYPES),$(RELOCATE_TYPES),$(TRACE_TYPES),$(GC_TYPES),$(JNI_TYPES), \
+          $(IMAGE_TYPES),$(PICTEST_TYPES),$(DEBUGGABLE_TYPES),$(TEST_ART_BROKEN_ARM_RUN_TESTS),32)
+    endif
+  endif
+endif
+
+TEST_ART_BROKEN_ARM_RUN_TESTS :=
+
 # Known broken tests for the arm64 optimizing compiler backend.
 TEST_ART_BROKEN_OPTIMIZING_ARM64_RUN_TESTS :=
 
@@ -347,8 +385,7 @@ TEST_ART_BROKEN_OPTIMIZING_ARM64_RUN_TESTS :=
 
 # Known broken tests for the optimizing compiler.
 TEST_ART_BROKEN_OPTIMIZING_RUN_TESTS :=
-TEST_ART_BROKEN_OPTIMIZING_RUN_TESTS += 099-vmdebug # b/18098594
-TEST_ART_BROKEN_OPTIMIZING_RUN_TESTS += 802-deoptimization # b/18547544
+TEST_ART_BROKEN_OPTIMIZING_RUN_TESTS += 472-unreachable-if-regression # b/19988134
 
 ifneq (,$(filter optimizing,$(COMPILER_TYPES)))
   ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
@@ -375,7 +412,7 @@ TEST_ART_BROKEN_OPTIMIZING_NONDEBUGGABLE_RUN_TESTS := \
 ifneq (,$(filter optimizing,$(COMPILER_TYPES)))
   ART_TEST_KNOWN_BROKEN += $(call all-run-test-names,$(TARGET_TYPES),$(RUN_TYPES),$(PREBUILD_TYPES), \
       optimizing,$(RELOCATE_TYPES),$(TRACE_TYPES),$(GC_TYPES),$(JNI_TYPES), \
-      $(IMAGE_TYPES),$(PICTEST_TYPES),nondebuggable,$(TEST_ART_BROKEN_OPTIMIZING_NONDEBUGGABLE_RUN_TESTS),$(ALL_ADDRESS_SIZES))
+      $(IMAGE_TYPES),$(PICTEST_TYPES),ndebuggable,$(TEST_ART_BROKEN_OPTIMIZING_NONDEBUGGABLE_RUN_TESTS),$(ALL_ADDRESS_SIZES))
 endif
 
 TEST_ART_BROKEN_OPTIMIZING_NONDEBUGGABLE_RUN_TESTS :=
@@ -461,10 +498,10 @@ endif
 
 # Create a rule to build and run a tests following the form:
 # test-art-{1: host or target}-run-test-{2: debug ndebug}-{3: prebuild no-prebuild no-dex2oat}-
-#    {4: interpreter default optimizing jit}-{5: relocate no-relocate relocate-no-patchoat}-
-#    {6: trace or no-trace}-{7: gcstress gcverify cms}-{8: forcecopy checkjni jni}-
-#    {9: no-image image picimage}-{10: pictest nopictest}-
-#    {11: nondebuggable debuggable}-{12: test name}{13: 32 or 64}
+#    {4: interpreter default optimizing jit}-{5: relocate nrelocate relocate-npatchoat}-
+#    {6: trace or ntrace}-{7: gcstress gcverify cms}-{8: forcecopy checkjni jni}-
+#    {9: no-image image picimage}-{10: pictest npictest}-
+#    {11: ndebuggable debuggable}-{12: test name}{13: 32 or 64}
 define define-test-art-run-test
   run_test_options :=
   prereq_rule :=
@@ -543,7 +580,7 @@ define define-test-art-run-test
       test_groups += ART_RUN_TEST_$$(uc_host_or_target)_NO_RELOCATE_RULES
       run_test_options += --no-relocate
     else
-      ifeq ($(5),relocate-no-patchoat)
+      ifeq ($(5),relocate-npatchoat)
         test_groups += ART_RUN_TEST_$$(uc_host_or_target)_RELOCATE_NO_PATCHOAT_RULES
         run_test_options += --relocate --no-patchoat
       else
@@ -555,7 +592,7 @@ define define-test-art-run-test
     test_groups += ART_RUN_TEST_$$(uc_host_or_target)_TRACE_RULES
     run_test_options += --trace
   else
-    ifeq ($(6),no-trace)
+    ifeq ($(6),ntrace)
       test_groups += ART_RUN_TEST_$$(uc_host_or_target)_NO_TRACE_RULES
     else
       $$(error found $(6) expected $(TRACE_TYPES))
@@ -635,7 +672,7 @@ define define-test-art-run-test
   ifeq ($(10),pictest)
     run_test_options += --pic-test
   else
-    ifeq ($(10),nopictest)
+    ifeq ($(10),npictest)
       # Nothing to be done.
     else
       $$(error found $(10) expected $(PICTEST_TYPES))
@@ -645,7 +682,7 @@ define define-test-art-run-test
     test_groups += ART_RUN_TEST_$$(uc_host_or_target)_DEBUGGABLE_RULES
     run_test_options += --debuggable
   else
-    ifeq ($(11),nondebuggable)
+    ifeq ($(11),ndebuggable)
     test_groups += ART_RUN_TEST_$$(uc_host_or_target)_NONDEBUGGABLE_RULES
       # Nothing to be done.
     else

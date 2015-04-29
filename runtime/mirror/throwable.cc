@@ -45,7 +45,7 @@ void Throwable::SetCause(Throwable* cause) {
   CHECK(cause != nullptr);
   CHECK(cause != this);
   Throwable* current_cause = GetFieldObject<Throwable>(OFFSET_OF_OBJECT_MEMBER(Throwable, cause_));
-  CHECK(current_cause == NULL || current_cause == this);
+  CHECK(current_cause == nullptr || current_cause == this);
   if (Runtime::Current()->IsActiveTransaction()) {
     SetFieldObject<true>(OFFSET_OF_OBJECT_MEMBER(Throwable, cause_), cause);
   } else {
@@ -80,7 +80,7 @@ std::string Throwable::Dump() {
   std::string result(PrettyTypeOf(this));
   result += ": ";
   String* msg = GetDetailMessage();
-  if (msg != NULL) {
+  if (msg != nullptr) {
     result += msg->ToModifiedUtf8();
   }
   result += "\n";
@@ -115,10 +115,14 @@ std::string Throwable::Dump() {
       } else {
         for (int32_t i = 0; i < ste_array->GetLength(); ++i) {
           StackTraceElement* ste = ste_array->Get(i);
-          result += StringPrintf("  at %s (%s:%d)\n",
-                                 ste->GetMethodName()->ToModifiedUtf8().c_str(),
-                                 ste->GetFileName()->ToModifiedUtf8().c_str(),
-                                 ste->GetLineNumber());
+          DCHECK(ste != nullptr);
+          auto* method_name = ste->GetMethodName();
+          auto* file_name = ste->GetFileName();
+          result += StringPrintf(
+              "  at %s (%s:%d)\n",
+              method_name != nullptr ? method_name->ToModifiedUtf8().c_str() : "<unknown method>",
+              file_name != nullptr ? file_name->ToModifiedUtf8().c_str() : "(Unknown Source)",
+              ste->GetLineNumber());
         }
       }
     } else {
@@ -135,7 +139,7 @@ std::string Throwable::Dump() {
 
 void Throwable::SetClass(Class* java_lang_Throwable) {
   CHECK(java_lang_Throwable_.IsNull());
-  CHECK(java_lang_Throwable != NULL);
+  CHECK(java_lang_Throwable != nullptr);
   java_lang_Throwable_ = GcRoot<Class>(java_lang_Throwable);
 }
 
@@ -144,8 +148,8 @@ void Throwable::ResetClass() {
   java_lang_Throwable_ = GcRoot<Class>(nullptr);
 }
 
-void Throwable::VisitRoots(RootCallback* callback, void* arg) {
-  java_lang_Throwable_.VisitRootIfNonNull(callback, arg, RootInfo(kRootStickyClass));
+void Throwable::VisitRoots(RootVisitor* visitor) {
+  java_lang_Throwable_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
 }
 
 }  // namespace mirror

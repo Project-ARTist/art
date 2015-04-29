@@ -75,13 +75,13 @@ MemMap* MallocSpace::CreateMemMap(const std::string& name, size_t starting_size,
     LOG(ERROR) << "Failed to create alloc space (" << name << ") where the initial size ("
         << PrettySize(*initial_size) << ") is larger than its capacity ("
         << PrettySize(*growth_limit) << ")";
-    return NULL;
+    return nullptr;
   }
   if (*growth_limit > *capacity) {
     LOG(ERROR) << "Failed to create alloc space (" << name << ") where the growth limit capacity ("
         << PrettySize(*growth_limit) << ") is larger than the capacity ("
         << PrettySize(*capacity) << ")";
-    return NULL;
+    return nullptr;
   }
 
   // Page align growth limit and capacity which will be used to manage mmapped storage
@@ -253,9 +253,12 @@ void MallocSpace::ClampGrowthLimit() {
   CHECK_LE(new_capacity, NonGrowthLimitCapacity());
   GetLiveBitmap()->SetHeapSize(new_capacity);
   GetMarkBitmap()->SetHeapSize(new_capacity);
+  if (temp_bitmap_.get() != nullptr) {
+    // If the bitmaps are clamped, then the temp bitmap is actually the mark bitmap.
+    temp_bitmap_->SetHeapSize(new_capacity);
+  }
   GetMemMap()->SetSize(new_capacity);
   limit_ = Begin() + new_capacity;
-  CHECK(temp_bitmap_.get() == nullptr);
 }
 
 }  // namespace space

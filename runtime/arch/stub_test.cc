@@ -16,9 +16,10 @@
 
 #include <cstdio>
 
+#include "art_field-inl.h"
+#include "class_linker-inl.h"
 #include "common_runtime_test.h"
 #include "entrypoints/quick/quick_entrypoints_enum.h"
-#include "mirror/art_field-inl.h"
 #include "mirror/art_method-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/string-inl.h"
@@ -116,7 +117,7 @@ class StubTest : public CommonRuntimeTest {
         "add sp, sp, #20\n\t"
 
         "blx r3\n\t"                // Call the stub
-        "add sp, sp, #12\n\t"       // Pop nullptr and padding
+        "add sp, sp, #12\n\t"       // Pop null and padding
         ".cfi_adjust_cfa_offset -12\n\t"
         "pop {r1-r12, lr}\n\t"      // Restore state
         ".cfi_adjust_cfa_offset -52\n\t"
@@ -268,7 +269,7 @@ class StubTest : public CommonRuntimeTest {
         "pushq (%%rsp)\n\t"             // & 16B alignment padding
         ".cfi_adjust_cfa_offset 16\n\t"
         "call *%%rax\n\t"              // Call the stub
-        "addq $16, %%rsp\n\t"          // Pop nullptr and padding
+        "addq $16, %%rsp\n\t"          // Pop null and padding
         ".cfi_adjust_cfa_offset -16\n\t"
         : "=a" (result)
           // Use the result from rax
@@ -343,7 +344,7 @@ class StubTest : public CommonRuntimeTest {
         "add sp, sp, #24\n\t"
 
         "blx r3\n\t"                // Call the stub
-        "add sp, sp, #12\n\t"       // Pop nullptr and padding
+        "add sp, sp, #12\n\t"       // Pop null and padding
         ".cfi_adjust_cfa_offset -12\n\t"
         "pop {r1-r12, lr}\n\t"      // Restore state
         ".cfi_adjust_cfa_offset -52\n\t"
@@ -494,7 +495,7 @@ class StubTest : public CommonRuntimeTest {
         "pushq (%%rsp)\n\t"            // & 16B alignment padding
         ".cfi_adjust_cfa_offset 16\n\t"
         "call *%%rbx\n\t"              // Call the stub
-        "addq $16, %%rsp\n\t"          // Pop nullptr and padding
+        "addq $16, %%rsp\n\t"          // Pop null and padding
         ".cfi_adjust_cfa_offset -16\n\t"
         : "=a" (result)
         // Use the result from rax
@@ -1031,7 +1032,7 @@ TEST_F(StubTest, AllocObject) {
   }
 
   {
-    // We can use nullptr in the second argument as we do not need a method here (not used in
+    // We can use null in the second argument as we do not need a method here (not used in
     // resolved/initialized cases)
     size_t result = Invoke3(reinterpret_cast<size_t>(c.Get()), reinterpret_cast<size_t>(nullptr), 0U,
                             StubTest::GetEntrypoint(self, kQuickAllocObjectResolved),
@@ -1045,7 +1046,7 @@ TEST_F(StubTest, AllocObject) {
   }
 
   {
-    // We can use nullptr in the second argument as we do not need a method here (not used in
+    // We can use null in the second argument as we do not need a method here (not used in
     // resolved/initialized cases)
     size_t result = Invoke3(reinterpret_cast<size_t>(c.Get()), reinterpret_cast<size_t>(nullptr), 0U,
                             StubTest::GetEntrypoint(self, kQuickAllocObjectInitialized),
@@ -1165,7 +1166,7 @@ TEST_F(StubTest, AllocObjectArray) {
   }
 
   {
-    // We can use nullptr in the second argument as we do not need a method here (not used in
+    // We can use null in the second argument as we do not need a method here (not used in
     // resolved/initialized cases)
     size_t result = Invoke3(reinterpret_cast<size_t>(c.Get()), 10U,
                             reinterpret_cast<size_t>(nullptr),
@@ -1228,30 +1229,13 @@ TEST_F(StubTest, StringCompareTo) {
       "aacaacaacaacaacaacaacaacaacaacaacaac",     // This one's over.
       "aacaacaacaacaacaacaacaacaacaacaacaaca" };  // As is this one. We need a separate one to
                                                   // defeat object-equal optimizations.
-  static constexpr size_t kBaseStringCount  = arraysize(c);
-  static constexpr size_t kStringCount = 2 * kBaseStringCount;
+  static constexpr size_t kStringCount = arraysize(c);
 
   StackHandleScope<kStringCount> hs(self);
   Handle<mirror::String> s[kStringCount];
 
-  for (size_t i = 0; i < kBaseStringCount; ++i) {
+  for (size_t i = 0; i < kStringCount; ++i) {
     s[i] = hs.NewHandle(mirror::String::AllocFromModifiedUtf8(soa.Self(), c[i]));
-  }
-
-  RandGen r(0x1234);
-
-  for (size_t i = kBaseStringCount; i < kStringCount; ++i) {
-    s[i] = hs.NewHandle(mirror::String::AllocFromModifiedUtf8(soa.Self(), c[i - kBaseStringCount]));
-    int32_t length = s[i]->GetLength();
-    if (length > 1) {
-      // Set a random offset and length.
-      int32_t new_offset = 1 + (r.next() % (length - 1));
-      int32_t rest = length - new_offset - 1;
-      int32_t new_length = 1 + (rest > 0 ? r.next() % rest : 0);
-
-      s[i]->SetField32<false>(mirror::String::CountOffset(), new_length);
-      s[i]->SetField32<false>(mirror::String::OffsetOffset(), new_offset);
-    }
   }
 
   // TODO: wide characters
@@ -1305,7 +1289,7 @@ TEST_F(StubTest, StringCompareTo) {
 }
 
 
-static void GetSetBooleanStatic(Handle<mirror::ArtField>* f, Thread* self,
+static void GetSetBooleanStatic(ArtField* f, Thread* self,
                                 mirror::ArtMethod* referrer, StubTest* test)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__))
@@ -1313,14 +1297,14 @@ static void GetSetBooleanStatic(Handle<mirror::ArtField>* f, Thread* self,
   uint8_t values[num_values] = { 0, 1, 2, 128, 0xFF };
 
   for (size_t i = 0; i < num_values; ++i) {
-    test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                               static_cast<size_t>(values[i]),
                               0U,
                               StubTest::GetEntrypoint(self, kQuickSet8Static),
                               self,
                               referrer);
 
-    size_t res = test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    size_t res = test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                                            0U, 0U,
                                            StubTest::GetEntrypoint(self, kQuickGetBooleanStatic),
                                            self,
@@ -1335,21 +1319,21 @@ static void GetSetBooleanStatic(Handle<mirror::ArtField>* f, Thread* self,
   std::cout << "Skipping set_boolean_static as I don't know how to do that on " << kRuntimeISA << std::endl;
 #endif
 }
-static void GetSetByteStatic(Handle<mirror::ArtField>* f, Thread* self,
-                             mirror::ArtMethod* referrer, StubTest* test)
+static void GetSetByteStatic(ArtField* f, Thread* self, mirror::ArtMethod* referrer,
+                             StubTest* test)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__))
   int8_t values[] = { -128, -64, 0, 64, 127 };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
-    test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                               static_cast<size_t>(values[i]),
                               0U,
                               StubTest::GetEntrypoint(self, kQuickSet8Static),
                               self,
                               referrer);
 
-    size_t res = test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    size_t res = test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                                            0U, 0U,
                                            StubTest::GetEntrypoint(self, kQuickGetByteStatic),
                                            self,
@@ -1365,26 +1349,26 @@ static void GetSetByteStatic(Handle<mirror::ArtField>* f, Thread* self,
 }
 
 
-static void GetSetBooleanInstance(Handle<mirror::Object>* obj, Handle<mirror::ArtField>* f,
-                                  Thread* self, mirror::ArtMethod* referrer, StubTest* test)
+static void GetSetBooleanInstance(Handle<mirror::Object>* obj, ArtField* f, Thread* self,
+                                  mirror::ArtMethod* referrer, StubTest* test)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__))
   uint8_t values[] = { 0, true, 2, 128, 0xFF };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
-    test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                               reinterpret_cast<size_t>(obj->Get()),
                               static_cast<size_t>(values[i]),
                               StubTest::GetEntrypoint(self, kQuickSet8Instance),
                               self,
                               referrer);
 
-    uint8_t res = f->Get()->GetBoolean(obj->Get());
+    uint8_t res = f->GetBoolean(obj->Get());
     EXPECT_EQ(values[i], res) << "Iteration " << i;
 
-    f->Get()->SetBoolean<false>(obj->Get(), res);
+    f->SetBoolean<false>(obj->Get(), res);
 
-    size_t res2 = test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    size_t res2 = test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                                             reinterpret_cast<size_t>(obj->Get()),
                                             0U,
                                             StubTest::GetEntrypoint(self, kQuickGetBooleanInstance),
@@ -1399,25 +1383,25 @@ static void GetSetBooleanInstance(Handle<mirror::Object>* obj, Handle<mirror::Ar
   std::cout << "Skipping set_boolean_instance as I don't know how to do that on " << kRuntimeISA << std::endl;
 #endif
 }
-static void GetSetByteInstance(Handle<mirror::Object>* obj, Handle<mirror::ArtField>* f,
+static void GetSetByteInstance(Handle<mirror::Object>* obj, ArtField* f,
                              Thread* self, mirror::ArtMethod* referrer, StubTest* test)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__))
   int8_t values[] = { -128, -64, 0, 64, 127 };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
-    test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                               reinterpret_cast<size_t>(obj->Get()),
                               static_cast<size_t>(values[i]),
                               StubTest::GetEntrypoint(self, kQuickSet8Instance),
                               self,
                               referrer);
 
-    int8_t res = f->Get()->GetByte(obj->Get());
+    int8_t res = f->GetByte(obj->Get());
     EXPECT_EQ(res, values[i]) << "Iteration " << i;
-    f->Get()->SetByte<false>(obj->Get(), ++res);
+    f->SetByte<false>(obj->Get(), ++res);
 
-    size_t res2 = test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    size_t res2 = test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                                             reinterpret_cast<size_t>(obj->Get()),
                                             0U,
                                             StubTest::GetEntrypoint(self, kQuickGetByteInstance),
@@ -1433,21 +1417,21 @@ static void GetSetByteInstance(Handle<mirror::Object>* obj, Handle<mirror::ArtFi
 #endif
 }
 
-static void GetSetCharStatic(Handle<mirror::ArtField>* f, Thread* self, mirror::ArtMethod* referrer,
+static void GetSetCharStatic(ArtField* f, Thread* self, mirror::ArtMethod* referrer,
                              StubTest* test)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__))
   uint16_t values[] = { 0, 1, 2, 255, 32768, 0xFFFF };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
-    test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                               static_cast<size_t>(values[i]),
                               0U,
                               StubTest::GetEntrypoint(self, kQuickSet16Static),
                               self,
                               referrer);
 
-    size_t res = test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    size_t res = test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                                            0U, 0U,
                                            StubTest::GetEntrypoint(self, kQuickGetCharStatic),
                                            self,
@@ -1462,21 +1446,21 @@ static void GetSetCharStatic(Handle<mirror::ArtField>* f, Thread* self, mirror::
   std::cout << "Skipping set_char_static as I don't know how to do that on " << kRuntimeISA << std::endl;
 #endif
 }
-static void GetSetShortStatic(Handle<mirror::ArtField>* f, Thread* self,
+static void GetSetShortStatic(ArtField* f, Thread* self,
                               mirror::ArtMethod* referrer, StubTest* test)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__))
   int16_t values[] = { -0x7FFF, -32768, 0, 255, 32767, 0x7FFE };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
-    test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                               static_cast<size_t>(values[i]),
                               0U,
                               StubTest::GetEntrypoint(self, kQuickSet16Static),
                               self,
                               referrer);
 
-    size_t res = test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    size_t res = test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                                            0U, 0U,
                                            StubTest::GetEntrypoint(self, kQuickGetShortStatic),
                                            self,
@@ -1492,25 +1476,25 @@ static void GetSetShortStatic(Handle<mirror::ArtField>* f, Thread* self,
 #endif
 }
 
-static void GetSetCharInstance(Handle<mirror::Object>* obj, Handle<mirror::ArtField>* f,
-                             Thread* self, mirror::ArtMethod* referrer, StubTest* test)
+static void GetSetCharInstance(Handle<mirror::Object>* obj, ArtField* f,
+                               Thread* self, mirror::ArtMethod* referrer, StubTest* test)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__))
   uint16_t values[] = { 0, 1, 2, 255, 32768, 0xFFFF };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
-    test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                               reinterpret_cast<size_t>(obj->Get()),
                               static_cast<size_t>(values[i]),
                               StubTest::GetEntrypoint(self, kQuickSet16Instance),
                               self,
                               referrer);
 
-    uint16_t res = f->Get()->GetChar(obj->Get());
+    uint16_t res = f->GetChar(obj->Get());
     EXPECT_EQ(res, values[i]) << "Iteration " << i;
-    f->Get()->SetChar<false>(obj->Get(), ++res);
+    f->SetChar<false>(obj->Get(), ++res);
 
-    size_t res2 = test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    size_t res2 = test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                                             reinterpret_cast<size_t>(obj->Get()),
                                             0U,
                                             StubTest::GetEntrypoint(self, kQuickGetCharInstance),
@@ -1525,25 +1509,25 @@ static void GetSetCharInstance(Handle<mirror::Object>* obj, Handle<mirror::ArtFi
   std::cout << "Skipping set_char_instance as I don't know how to do that on " << kRuntimeISA << std::endl;
 #endif
 }
-static void GetSetShortInstance(Handle<mirror::Object>* obj, Handle<mirror::ArtField>* f,
+static void GetSetShortInstance(Handle<mirror::Object>* obj, ArtField* f,
                              Thread* self, mirror::ArtMethod* referrer, StubTest* test)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__))
   int16_t values[] = { -0x7FFF, -32768, 0, 255, 32767, 0x7FFE };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
-    test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                               reinterpret_cast<size_t>(obj->Get()),
                               static_cast<size_t>(values[i]),
                               StubTest::GetEntrypoint(self, kQuickSet16Instance),
                               self,
                               referrer);
 
-    int16_t res = f->Get()->GetShort(obj->Get());
+    int16_t res = f->GetShort(obj->Get());
     EXPECT_EQ(res, values[i]) << "Iteration " << i;
-    f->Get()->SetShort<false>(obj->Get(), ++res);
+    f->SetShort<false>(obj->Get(), ++res);
 
-    size_t res2 = test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    size_t res2 = test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                                             reinterpret_cast<size_t>(obj->Get()),
                                             0U,
                                             StubTest::GetEntrypoint(self, kQuickGetShortInstance),
@@ -1559,21 +1543,21 @@ static void GetSetShortInstance(Handle<mirror::Object>* obj, Handle<mirror::ArtF
 #endif
 }
 
-static void GetSet32Static(Handle<mirror::ArtField>* f, Thread* self, mirror::ArtMethod* referrer,
+static void GetSet32Static(ArtField* f, Thread* self, mirror::ArtMethod* referrer,
                            StubTest* test)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__))
   uint32_t values[] = { 0, 1, 2, 255, 32768, 1000000, 0xFFFFFFFF };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
-    test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                               static_cast<size_t>(values[i]),
                               0U,
                               StubTest::GetEntrypoint(self, kQuickSet32Static),
                               self,
                               referrer);
 
-    size_t res = test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    size_t res = test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                                            0U, 0U,
                                            StubTest::GetEntrypoint(self, kQuickGet32Static),
                                            self,
@@ -1590,27 +1574,27 @@ static void GetSet32Static(Handle<mirror::ArtField>* f, Thread* self, mirror::Ar
 }
 
 
-static void GetSet32Instance(Handle<mirror::Object>* obj, Handle<mirror::ArtField>* f,
+static void GetSet32Instance(Handle<mirror::Object>* obj, ArtField* f,
                              Thread* self, mirror::ArtMethod* referrer, StubTest* test)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__))
   uint32_t values[] = { 0, 1, 2, 255, 32768, 1000000, 0xFFFFFFFF };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
-    test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                               reinterpret_cast<size_t>(obj->Get()),
                               static_cast<size_t>(values[i]),
                               StubTest::GetEntrypoint(self, kQuickSet32Instance),
                               self,
                               referrer);
 
-    int32_t res = f->Get()->GetInt(obj->Get());
+    int32_t res = f->GetInt(obj->Get());
     EXPECT_EQ(res, static_cast<int32_t>(values[i])) << "Iteration " << i;
 
     res++;
-    f->Get()->SetInt<false>(obj->Get(), res);
+    f->SetInt<false>(obj->Get(), res);
 
-    size_t res2 = test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    size_t res2 = test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                                             reinterpret_cast<size_t>(obj->Get()),
                                             0U,
                                             StubTest::GetEntrypoint(self, kQuickGet32Instance),
@@ -1649,17 +1633,17 @@ static void set_and_check_static(uint32_t f_idx, mirror::Object* val, Thread* se
 }
 #endif
 
-static void GetSetObjStatic(Handle<mirror::ArtField>* f, Thread* self, mirror::ArtMethod* referrer,
+static void GetSetObjStatic(ArtField* f, Thread* self, mirror::ArtMethod* referrer,
                             StubTest* test)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__))
-  set_and_check_static((*f)->GetDexFieldIndex(), nullptr, self, referrer, test);
+  set_and_check_static(f->GetDexFieldIndex(), nullptr, self, referrer, test);
 
   // Allocate a string object for simplicity.
   mirror::String* str = mirror::String::AllocFromModifiedUtf8(self, "Test");
-  set_and_check_static((*f)->GetDexFieldIndex(), str, self, referrer, test);
+  set_and_check_static(f->GetDexFieldIndex(), str, self, referrer, test);
 
-  set_and_check_static((*f)->GetDexFieldIndex(), nullptr, self, referrer, test);
+  set_and_check_static(f->GetDexFieldIndex(), nullptr, self, referrer, test);
 #else
   UNUSED(f, self, referrer, test);
   LOG(INFO) << "Skipping setObjstatic as I don't know how to do that on " << kRuntimeISA;
@@ -1670,18 +1654,18 @@ static void GetSetObjStatic(Handle<mirror::ArtField>* f, Thread* self, mirror::A
 
 
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__))
-static void set_and_check_instance(Handle<mirror::ArtField>* f, mirror::Object* trg,
+static void set_and_check_instance(ArtField* f, mirror::Object* trg,
                                    mirror::Object* val, Thread* self, mirror::ArtMethod* referrer,
                                    StubTest* test)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+  test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                             reinterpret_cast<size_t>(trg),
                             reinterpret_cast<size_t>(val),
                             StubTest::GetEntrypoint(self, kQuickSetObjInstance),
                             self,
                             referrer);
 
-  size_t res = test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+  size_t res = test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                                          reinterpret_cast<size_t>(trg),
                                          0U,
                                          StubTest::GetEntrypoint(self, kQuickGetObjInstance),
@@ -1690,11 +1674,11 @@ static void set_and_check_instance(Handle<mirror::ArtField>* f, mirror::Object* 
 
   EXPECT_EQ(res, reinterpret_cast<size_t>(val)) << "Value " << val;
 
-  EXPECT_EQ(val, f->Get()->GetObj(trg));
+  EXPECT_EQ(val, f->GetObj(trg));
 }
 #endif
 
-static void GetSetObjInstance(Handle<mirror::Object>* obj, Handle<mirror::ArtField>* f,
+static void GetSetObjInstance(Handle<mirror::Object>* obj, ArtField* f,
                               Thread* self, mirror::ArtMethod* referrer, StubTest* test)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__))
@@ -1716,20 +1700,20 @@ static void GetSetObjInstance(Handle<mirror::Object>* obj, Handle<mirror::ArtFie
 
 // TODO: Complete these tests for 32b architectures.
 
-static void GetSet64Static(Handle<mirror::ArtField>* f, Thread* self, mirror::ArtMethod* referrer,
+static void GetSet64Static(ArtField* f, Thread* self, mirror::ArtMethod* referrer,
                            StubTest* test)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 #if (defined(__x86_64__) && !defined(__APPLE__)) || defined(__aarch64__)
   uint64_t values[] = { 0, 1, 2, 255, 32768, 1000000, 0xFFFFFFFF, 0xFFFFFFFFFFFF };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
-    test->Invoke3UWithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    test->Invoke3UWithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                                values[i],
                                StubTest::GetEntrypoint(self, kQuickSet64Static),
                                self,
                                referrer);
 
-    size_t res = test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    size_t res = test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                                            0U, 0U,
                                            StubTest::GetEntrypoint(self, kQuickGet64Static),
                                            self,
@@ -1746,27 +1730,27 @@ static void GetSet64Static(Handle<mirror::ArtField>* f, Thread* self, mirror::Ar
 }
 
 
-static void GetSet64Instance(Handle<mirror::Object>* obj, Handle<mirror::ArtField>* f,
+static void GetSet64Instance(Handle<mirror::Object>* obj, ArtField* f,
                              Thread* self, mirror::ArtMethod* referrer, StubTest* test)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 #if (defined(__x86_64__) && !defined(__APPLE__)) || defined(__aarch64__)
   uint64_t values[] = { 0, 1, 2, 255, 32768, 1000000, 0xFFFFFFFF, 0xFFFFFFFFFFFF };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
-    test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                               reinterpret_cast<size_t>(obj->Get()),
                               static_cast<size_t>(values[i]),
                               StubTest::GetEntrypoint(self, kQuickSet64Instance),
                               self,
                               referrer);
 
-    int64_t res = f->Get()->GetLong(obj->Get());
+    int64_t res = f->GetLong(obj->Get());
     EXPECT_EQ(res, static_cast<int64_t>(values[i])) << "Iteration " << i;
 
     res++;
-    f->Get()->SetLong<false>(obj->Get(), res);
+    f->SetLong<false>(obj->Get(), res);
 
-    size_t res2 = test->Invoke3WithReferrer(static_cast<size_t>((*f)->GetDexFieldIndex()),
+    size_t res2 = test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
                                             reinterpret_cast<size_t>(obj->Get()),
                                             0U,
                                             StubTest::GetEntrypoint(self, kQuickGet64Instance),
@@ -1787,12 +1771,12 @@ static void TestFields(Thread* self, StubTest* test, Primitive::Type test_type) 
 
   JNIEnv* env = Thread::Current()->GetJniEnv();
   jclass jc = env->FindClass("AllFields");
-  CHECK(jc != NULL);
+  CHECK(jc != nullptr);
   jobject o = env->AllocObject(jc);
-  CHECK(o != NULL);
+  CHECK(o != nullptr);
 
   ScopedObjectAccess soa(self);
-  StackHandleScope<5> hs(self);
+  StackHandleScope<4> hs(self);
   Handle<mirror::Object> obj(hs.NewHandle(soa.Decode<mirror::Object*>(o)));
   Handle<mirror::Class> c(hs.NewHandle(obj->GetClass()));
   // Need a method as a referrer
@@ -1801,112 +1785,80 @@ static void TestFields(Thread* self, StubTest* test, Primitive::Type test_type) 
   // Play with it...
 
   // Static fields.
-  {
-    Handle<mirror::ObjectArray<mirror::ArtField>> fields(hs.NewHandle(c.Get()->GetSFields()));
-    int32_t num_fields = fields->GetLength();
-    for (int32_t i = 0; i < num_fields; ++i) {
-      StackHandleScope<1> hs2(self);
-      Handle<mirror::ArtField> f(hs2.NewHandle(fields->Get(i)));
-
-      Primitive::Type type = f->GetTypeAsPrimitiveType();
-      switch (type) {
-        case Primitive::Type::kPrimBoolean:
-          if (test_type == type) {
-            GetSetBooleanStatic(&f, self, m.Get(), test);
-          }
-          break;
-        case Primitive::Type::kPrimByte:
-          if (test_type == type) {
-            GetSetByteStatic(&f, self, m.Get(), test);
-          }
-          break;
-        case Primitive::Type::kPrimChar:
-          if (test_type == type) {
-            GetSetCharStatic(&f, self, m.Get(), test);
-          }
-          break;
-        case Primitive::Type::kPrimShort:
-          if (test_type == type) {
-            GetSetShortStatic(&f, self, m.Get(), test);
-          }
-          break;
-        case Primitive::Type::kPrimInt:
-          if (test_type == type) {
-            GetSet32Static(&f, self, m.Get(), test);
-          }
-          break;
-
-        case Primitive::Type::kPrimLong:
-          if (test_type == type) {
-            GetSet64Static(&f, self, m.Get(), test);
-          }
-          break;
-
-        case Primitive::Type::kPrimNot:
-          // Don't try array.
-          if (test_type == type && f->GetTypeDescriptor()[0] != '[') {
-            GetSetObjStatic(&f, self, m.Get(), test);
-          }
-          break;
-
-        default:
-          break;  // Skip.
-      }
+  ArtField* fields = c->GetSFields();
+  size_t num_fields = c->NumStaticFields();
+  for (size_t i = 0; i < num_fields; ++i) {
+    ArtField* f = &fields[i];
+    Primitive::Type type = f->GetTypeAsPrimitiveType();
+    if (test_type != type) {
+     continue;
+    }
+    switch (type) {
+      case Primitive::Type::kPrimBoolean:
+        GetSetBooleanStatic(f, self, m.Get(), test);
+        break;
+      case Primitive::Type::kPrimByte:
+        GetSetByteStatic(f, self, m.Get(), test);
+        break;
+      case Primitive::Type::kPrimChar:
+        GetSetCharStatic(f, self, m.Get(), test);
+        break;
+      case Primitive::Type::kPrimShort:
+        GetSetShortStatic(f, self, m.Get(), test);
+        break;
+      case Primitive::Type::kPrimInt:
+        GetSet32Static(f, self, m.Get(), test);
+        break;
+      case Primitive::Type::kPrimLong:
+        GetSet64Static(f, self, m.Get(), test);
+        break;
+      case Primitive::Type::kPrimNot:
+        // Don't try array.
+        if (f->GetTypeDescriptor()[0] != '[') {
+          GetSetObjStatic(f, self, m.Get(), test);
+        }
+        break;
+      default:
+        break;  // Skip.
     }
   }
 
   // Instance fields.
-  {
-    Handle<mirror::ObjectArray<mirror::ArtField>> fields(hs.NewHandle(c.Get()->GetIFields()));
-    int32_t num_fields = fields->GetLength();
-    for (int32_t i = 0; i < num_fields; ++i) {
-      StackHandleScope<1> hs2(self);
-      Handle<mirror::ArtField> f(hs2.NewHandle(fields->Get(i)));
-
-      Primitive::Type type = f->GetTypeAsPrimitiveType();
-      switch (type) {
-        case Primitive::Type::kPrimBoolean:
-          if (test_type == type) {
-            GetSetBooleanInstance(&obj, &f, self, m.Get(), test);
-          }
-          break;
-        case Primitive::Type::kPrimByte:
-          if (test_type == type) {
-            GetSetByteInstance(&obj, &f, self, m.Get(), test);
-          }
-          break;
-        case Primitive::Type::kPrimChar:
-          if (test_type == type) {
-            GetSetCharInstance(&obj, &f, self, m.Get(), test);
-          }
-          break;
-        case Primitive::Type::kPrimShort:
-          if (test_type == type) {
-            GetSetShortInstance(&obj, &f, self, m.Get(), test);
-          }
-          break;
-        case Primitive::Type::kPrimInt:
-          if (test_type == type) {
-            GetSet32Instance(&obj, &f, self, m.Get(), test);
-          }
-          break;
-
-        case Primitive::Type::kPrimLong:
-          if (test_type == type) {
-            GetSet64Instance(&obj, &f, self, m.Get(), test);
-          }
-          break;
-
-        case Primitive::Type::kPrimNot:
-          // Don't try array.
-          if (test_type == type && f->GetTypeDescriptor()[0] != '[') {
-            GetSetObjInstance(&obj, &f, self, m.Get(), test);
-          }
-          break;
-
-        default:
-          break;  // Skip.
-      }
+  fields = c->GetIFields();
+  num_fields = c->NumInstanceFields();
+  for (size_t i = 0; i < num_fields; ++i) {
+    ArtField* f = &fields[i];
+    Primitive::Type type = f->GetTypeAsPrimitiveType();
+    if (test_type != type) {
+      continue;
+    }
+    switch (type) {
+      case Primitive::Type::kPrimBoolean:
+        GetSetBooleanInstance(&obj, f, self, m.Get(), test);
+        break;
+      case Primitive::Type::kPrimByte:
+        GetSetByteInstance(&obj, f, self, m.Get(), test);
+        break;
+      case Primitive::Type::kPrimChar:
+        GetSetCharInstance(&obj, f, self, m.Get(), test);
+        break;
+      case Primitive::Type::kPrimShort:
+        GetSetShortInstance(&obj, f, self, m.Get(), test);
+        break;
+      case Primitive::Type::kPrimInt:
+        GetSet32Instance(&obj, f, self, m.Get(), test);
+        break;
+      case Primitive::Type::kPrimLong:
+        GetSet64Instance(&obj, f, self, m.Get(), test);
+        break;
+      case Primitive::Type::kPrimNot:
+        // Don't try array.
+        if (f->GetTypeDescriptor()[0] != '[') {
+          GetSetObjInstance(&obj, f, self, m.Get(), test);
+        }
+        break;
+      default:
+        break;  // Skip.
     }
   }
 

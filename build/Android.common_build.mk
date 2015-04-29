@@ -135,6 +135,22 @@ art_clang_cflags += -Wfloat-equal
 # Enable warning of converting ints to void*.
 art_clang_cflags += -Wint-to-void-pointer-cast
 
+# Enable warning of wrong unused annotations.
+art_clang_cflags += -Wused-but-marked-unused
+
+# Enable warning for deprecated language features.
+art_clang_cflags += -Wdeprecated
+
+# Enable warning for unreachable break & return.
+art_clang_cflags += -Wunreachable-code-break -Wunreachable-code-return
+
+# Enable missing-noreturn only on non-Mac. As lots of things are not implemented for Apple, it's
+# a pain.
+ifneq ($(HOST_OS),darwin)
+  art_clang_cflags += -Wmissing-noreturn
+endif
+
+
 # GCC-only warnings.
 art_gcc_cflags := -Wunused-but-set-parameter
 # Suggest const: too many false positives, but good for a trial run.
@@ -173,6 +189,7 @@ ART_CPP_EXTENSION := .cc
 
 ART_C_INCLUDES := \
   external/gtest/include \
+  external/icu/icu4c/source/common \
   external/valgrind/main/include \
   external/valgrind/main \
   external/vixl/src \
@@ -217,6 +234,10 @@ endif
 
 ifeq ($(ART_USE_READ_BARRIER),true)
   art_cflags += -DART_USE_READ_BARRIER=1
+endif
+
+ifeq ($(ART_USE_TLAB),true)
+  art_cflags += -DART_USE_TLAB=1
 endif
 
 # Cflags for non-debug ART and ART tools.

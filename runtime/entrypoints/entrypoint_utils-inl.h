@@ -22,6 +22,8 @@
 #include "class_linker-inl.h"
 #include "common_throws.h"
 #include "dex_file.h"
+#include "entrypoints/quick/callee_save_frame.h"
+#include "handle_scope-inl.h"
 #include "indirect_reference_table.h"
 #include "invoke_type.h"
 #include "jni_internal.h"
@@ -30,10 +32,30 @@
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/throwable.h"
-#include "handle_scope-inl.h"
+#include "nth_caller_visitor.h"
+#include "runtime.h"
 #include "thread.h"
 
 namespace art {
+
+inline mirror::ArtMethod* GetCalleeSaveMethodCaller(Thread* self, Runtime::CalleeSaveType type)
+    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+  auto* refs_only_sp = self->GetManagedStack()->GetTopQuickFrame();
+  DCHECK_EQ(refs_only_sp->AsMirrorPtr(), Runtime::Current()->GetCalleeSaveMethod(type));
+
+  const size_t callee_frame_size = GetCalleeSaveFrameSize(kRuntimeISA, type);
+  auto* caller_sp = reinterpret_cast<StackReference<mirror::ArtMethod>*>(
+          reinterpret_cast<uintptr_t>(refs_only_sp) + callee_frame_size);
+  auto* caller = caller_sp->AsMirrorPtr();
+
+  if (kIsDebugBuild) {
+    NthCallerVisitor visitor(self, 1, true);
+    visitor.WalkStack();
+    CHECK(caller == visitor.caller);
+  }
+
+  return caller;
+}
 
 template <const bool kAccessCheck>
 ALWAYS_INLINE
@@ -41,10 +63,10 @@ inline mirror::Class* CheckObjectAlloc(uint32_t type_idx,
                                        mirror::ArtMethod* method,
                                        Thread* self, bool* slow_path) {
   mirror::Class* klass = method->GetDexCacheResolvedType<false>(type_idx);
-  if (UNLIKELY(klass == NULL)) {
+  if (UNLIKELY(klass == nullptr)) {
     klass = Runtime::Current()->GetClassLinker()->ResolveType(type_idx, method);
     *slow_path = true;
-    if (klass == NULL) {
+    if (klass == nullptr) {
       DCHECK(self->IsExceptionPending());
       return nullptr;  // Failure
     } else {
@@ -252,7 +274,7 @@ inline mirror::Array* AllocArrayFromCodeResolved(mirror::Class* klass,
 }
 
 template<FindFieldType type, bool access_check>
-inline mirror::ArtField* FindFieldFromCode(uint32_t field_idx, mirror::ArtMethod* referrer,
+inline ArtField* FindFieldFromCode(uint32_t field_idx, mirror::ArtMethod* referrer,
                                            Thread* self, size_t expected_size) {
   bool is_primitive;
   bool is_set;
@@ -269,7 +291,7 @@ inline mirror::ArtField* FindFieldFromCode(uint32_t field_idx, mirror::ArtMethod
     default:                     is_primitive = true;  is_set = true;  is_static = true;  break;
   }
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  mirror::ArtField* resolved_field = class_linker->ResolveField(field_idx, referrer, is_static);
+  ArtField* resolved_field = class_linker->ResolveField(field_idx, referrer, is_static);
   if (UNLIKELY(resolved_field == nullptr)) {
     DCHECK(self->IsExceptionPending());  // Throw exception and unwind.
     return nullptr;  // Failure.
@@ -324,7 +346,7 @@ inline mirror::ArtField* FindFieldFromCode(uint32_t field_idx, mirror::ArtMethod
 // Explicit template declarations of FindFieldFromCode for all field access types.
 #define EXPLICIT_FIND_FIELD_FROM_CODE_TEMPLATE_DECL(_type, _access_check) \
 template SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) ALWAYS_INLINE \
-mirror::ArtField* FindFieldFromCode<_type, _access_check>(uint32_t field_idx, \
+ArtField* FindFieldFromCode<_type, _access_check>(uint32_t field_idx, \
                                                           mirror::ArtMethod* referrer, \
                                                           Thread* self, size_t expected_size) \
 
@@ -469,11 +491,11 @@ EXPLICIT_FIND_METHOD_FROM_CODE_TYPED_TEMPLATE_DECL(kInterface);
 #undef EXPLICIT_FIND_METHOD_FROM_CODE_TEMPLATE_DECL
 
 // Fast path field resolution that can't initialize classes or throw exceptions.
-inline mirror::ArtField* FindFieldFast(uint32_t field_idx,
+inline ArtField* FindFieldFast(uint32_t field_idx,
                                        mirror::ArtMethod* referrer,
                                        FindFieldType type, size_t expected_size) {
-  mirror::ArtField* resolved_field =
-      referrer->GetDeclaringClass()->GetDexCache()->GetResolvedField(field_idx);
+  ArtField* resolved_field =
+      referrer->GetDeclaringClass()->GetDexCache()->GetResolvedField(field_idx, sizeof(void*));
   if (UNLIKELY(resolved_field == nullptr)) {
     return nullptr;
   }
@@ -526,19 +548,19 @@ inline mirror::ArtMethod* FindMethodFast(uint32_t method_idx,
                                          mirror::Object* this_object,
                                          mirror::ArtMethod* referrer,
                                          bool access_check, InvokeType type) {
-  if (UNLIKELY(this_object == NULL && type != kStatic)) {
-    return NULL;
+  if (UNLIKELY(this_object == nullptr && type != kStatic)) {
+    return nullptr;
   }
   mirror::ArtMethod* resolved_method =
       referrer->GetDeclaringClass()->GetDexCache()->GetResolvedMethod(method_idx);
-  if (UNLIKELY(resolved_method == NULL)) {
-    return NULL;
+  if (UNLIKELY(resolved_method == nullptr)) {
+    return nullptr;
   }
   if (access_check) {
     // Check for incompatible class change errors and access.
     bool icce = resolved_method->CheckIncompatibleClassChange(type);
     if (UNLIKELY(icce)) {
-      return NULL;
+      return nullptr;
     }
     mirror::Class* methods_class = resolved_method->GetDeclaringClass();
     mirror::Class* referring_class = referrer->GetDeclaringClass();
@@ -546,7 +568,7 @@ inline mirror::ArtMethod* FindMethodFast(uint32_t method_idx,
                  !referring_class->CanAccessMember(methods_class,
                                                    resolved_method->GetAccessFlags()))) {
       // Potential illegal access, may need to refine the method's class.
-      return NULL;
+      return nullptr;
     }
   }
   if (type == kInterface) {  // Most common form of slow path dispatch.
@@ -606,7 +628,7 @@ inline mirror::String* ResolveStringFromCode(mirror::ArtMethod* referrer,
 
 inline void UnlockJniSynchronizedMethod(jobject locked, Thread* self) {
   // Save any pending exception over monitor exit call.
-  mirror::Throwable* saved_exception = NULL;
+  mirror::Throwable* saved_exception = nullptr;
   if (UNLIKELY(self->IsExceptionPending())) {
     saved_exception = self->GetException();
     self->ClearException();
@@ -620,7 +642,7 @@ inline void UnlockJniSynchronizedMethod(jobject locked, Thread* self) {
         << self->GetException()->Dump();
   }
   // Restore pending exception.
-  if (saved_exception != NULL) {
+  if (saved_exception != nullptr) {
     self->SetException(saved_exception);
   }
 }

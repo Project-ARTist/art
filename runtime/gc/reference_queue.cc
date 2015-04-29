@@ -30,7 +30,7 @@ ReferenceQueue::ReferenceQueue(Mutex* lock) : lock_(lock), list_(nullptr) {
 }
 
 void ReferenceQueue::AtomicEnqueueIfNotEnqueued(Thread* self, mirror::Reference* ref) {
-  DCHECK(ref != NULL);
+  DCHECK(ref != nullptr);
   MutexLock mu(self, *lock_);
   if (!ref->IsEnqueued()) {
     EnqueuePendingReference(ref);
@@ -43,7 +43,7 @@ void ReferenceQueue::EnqueueReference(mirror::Reference* ref) {
 }
 
 void ReferenceQueue::EnqueuePendingReference(mirror::Reference* ref) {
-  DCHECK(ref != NULL);
+  DCHECK(ref != nullptr);
   if (IsEmpty()) {
     // 1 element cyclic queue, ie: Reference ref = ..; ref.pendingNext = ref;
     list_ = ref;
@@ -96,11 +96,11 @@ mirror::Reference* ReferenceQueue::DequeuePendingReference() {
         << "ref=" << ref << " rb_ptr=" << ref->GetReadBarrierPointer();
     if (heap->ConcurrentCopyingCollector()->RegionSpace()->IsInToSpace(ref)) {
       // Moving objects.
-      ref->SetReadBarrierPointer(ReadBarrier::WhitePtr());
+      ref->AtomicSetReadBarrierPointer(ReadBarrier::GrayPtr(), ReadBarrier::WhitePtr());
       CHECK_EQ(ref->GetReadBarrierPointer(), ReadBarrier::WhitePtr());
     } else {
       // Non-moving objects.
-      ref->SetReadBarrierPointer(ReadBarrier::BlackPtr());
+      ref->AtomicSetReadBarrierPointer(ReadBarrier::GrayPtr(), ReadBarrier::BlackPtr());
       CHECK_EQ(ref->GetReadBarrierPointer(), ReadBarrier::BlackPtr());
     }
   }

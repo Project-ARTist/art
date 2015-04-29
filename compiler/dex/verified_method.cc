@@ -40,6 +40,7 @@ namespace art {
 const VerifiedMethod* VerifiedMethod::Create(verifier::MethodVerifier* method_verifier,
                                              bool compile) {
   std::unique_ptr<VerifiedMethod> verified_method(new VerifiedMethod);
+  verified_method->has_verification_failures_ = method_verifier->HasFailures();
   if (compile) {
     /* Generate a register map. */
     if (!verified_method->GenerateGcMap(method_verifier)) {
@@ -63,6 +64,9 @@ const VerifiedMethod* VerifiedMethod::Create(verifier::MethodVerifier* method_ve
   if (method_verifier->HasCheckCasts()) {
     verified_method->GenerateSafeCastSet(method_verifier);
   }
+
+  verified_method->SetStringInitPcRegMap(method_verifier->GetStringInitPcRegMap());
+
   return verified_method.release();
 }
 
@@ -165,7 +169,7 @@ void VerifiedMethod::VerifyGcMap(verifier::MethodVerifier* method_verifier,
         }
       }
     } else {
-      DCHECK(i >= 65536 || reg_bitmap == NULL);
+      DCHECK(i >= 65536 || reg_bitmap == nullptr);
     }
   }
 }
@@ -222,7 +226,7 @@ bool VerifiedMethod::GenerateDequickenMap(verifier::MethodVerifier* method_verif
     } else if (IsInstructionIGetQuickOrIPutQuick(inst->Opcode())) {
       uint32_t dex_pc = inst->GetDexPc(insns);
       verifier::RegisterLine* line = method_verifier->GetRegLine(dex_pc);
-      mirror::ArtField* field = method_verifier->GetQuickFieldAccess(inst, line);
+      ArtField* field = method_verifier->GetQuickFieldAccess(inst, line);
       if (field == nullptr) {
         // It can be null if the line wasn't verified since it was unreachable.
         return false;
@@ -282,7 +286,7 @@ void VerifiedMethod::GenerateDevirtMap(verifier::MethodVerifier* method_verifier
     }
     mirror::ArtMethod* abstract_method = method_verifier->GetDexCache()->GetResolvedMethod(
         is_range ? inst->VRegB_3rc() : inst->VRegB_35c());
-    if (abstract_method == NULL) {
+    if (abstract_method == nullptr) {
       // If the method is not found in the cache this means that it was never found
       // by ResolveMethodAndCheckAccess() called when verifying invoke_*.
       continue;

@@ -42,6 +42,12 @@ class GraphChecker : public HGraphDelegateVisitor {
   // Check `instruction`.
   void VisitInstruction(HInstruction* instruction) OVERRIDE;
 
+  // Perform control-flow graph checks on instruction.
+  void VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) OVERRIDE;
+
+  // Check that the HasBoundsChecks() flag is set for bounds checks.
+  void VisitBoundsCheck(HBoundsCheck* check) OVERRIDE;
+
   // Was the last visit of the graph valid?
   bool IsValid() const {
     return errors_.empty();
@@ -85,6 +91,7 @@ class SSAChecker : public GraphChecker {
  public:
   typedef GraphChecker super_type;
 
+  // TODO: There's no need to pass a separate allocator as we could get it from the graph.
   SSAChecker(ArenaAllocator* allocator, HGraph* graph)
     : GraphChecker(allocator, graph, "art::SSAChecker: ") {}
 
@@ -107,6 +114,10 @@ class SSAChecker : public GraphChecker {
   void VisitBinaryOperation(HBinaryOperation* op) OVERRIDE;
   void VisitCondition(HCondition* op) OVERRIDE;
   void VisitIf(HIf* instruction) OVERRIDE;
+  void VisitBooleanNot(HBooleanNot* instruction) OVERRIDE;
+  void VisitConstant(HConstant* instruction) OVERRIDE;
+
+  void HandleBooleanInput(HInstruction* instruction, size_t input_index);
 
  private:
   DISALLOW_COPY_AND_ASSIGN(SSAChecker);

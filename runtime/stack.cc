@@ -36,12 +36,12 @@ namespace art {
 mirror::Object* ShadowFrame::GetThisObject() const {
   mirror::ArtMethod* m = GetMethod();
   if (m->IsStatic()) {
-    return NULL;
+    return nullptr;
   } else if (m->IsNative()) {
     return GetVRegReference(0);
   } else {
     const DexFile::CodeItem* code_item = m->GetCodeItem();
-    CHECK(code_item != NULL) << PrettyMethod(m);
+    CHECK(code_item != nullptr) << PrettyMethod(m);
     uint16_t reg = code_item->registers_size_ - code_item->ins_size_;
     return GetVRegReference(reg);
   }
@@ -50,7 +50,7 @@ mirror::Object* ShadowFrame::GetThisObject() const {
 mirror::Object* ShadowFrame::GetThisObject(uint16_t num_ins) const {
   mirror::ArtMethod* m = GetMethod();
   if (m->IsStatic()) {
-    return NULL;
+    return nullptr;
   } else {
     return GetVRegReference(NumberOfVRegs() - num_ins);
   }
@@ -58,9 +58,9 @@ mirror::Object* ShadowFrame::GetThisObject(uint16_t num_ins) const {
 
 size_t ManagedStack::NumJniShadowFrameReferences() const {
   size_t count = 0;
-  for (const ManagedStack* current_fragment = this; current_fragment != NULL;
+  for (const ManagedStack* current_fragment = this; current_fragment != nullptr;
        current_fragment = current_fragment->GetLink()) {
-    for (ShadowFrame* current_frame = current_fragment->top_shadow_frame_; current_frame != NULL;
+    for (ShadowFrame* current_frame = current_fragment->top_shadow_frame_; current_frame != nullptr;
          current_frame = current_frame->GetLink()) {
       if (current_frame->GetMethod()->IsNative()) {
         // The JNI ShadowFrame only contains references. (For indirect reference.)
@@ -72,9 +72,9 @@ size_t ManagedStack::NumJniShadowFrameReferences() const {
 }
 
 bool ManagedStack::ShadowFramesContain(StackReference<mirror::Object>* shadow_frame_entry) const {
-  for (const ManagedStack* current_fragment = this; current_fragment != NULL;
+  for (const ManagedStack* current_fragment = this; current_fragment != nullptr;
        current_fragment = current_fragment->GetLink()) {
-    for (ShadowFrame* current_frame = current_fragment->top_shadow_frame_; current_frame != NULL;
+    for (ShadowFrame* current_frame = current_fragment->top_shadow_frame_; current_frame != nullptr;
          current_frame = current_frame->GetLink()) {
       if (current_frame->Contains(shadow_frame_entry)) {
         return true;
@@ -85,23 +85,23 @@ bool ManagedStack::ShadowFramesContain(StackReference<mirror::Object>* shadow_fr
 }
 
 StackVisitor::StackVisitor(Thread* thread, Context* context)
-    : thread_(thread), cur_shadow_frame_(NULL),
-      cur_quick_frame_(NULL), cur_quick_frame_pc_(0), num_frames_(0), cur_depth_(0),
+    : thread_(thread), cur_shadow_frame_(nullptr),
+      cur_quick_frame_(nullptr), cur_quick_frame_pc_(0), num_frames_(0), cur_depth_(0),
       context_(context) {
   DCHECK(thread == Thread::Current() || thread->IsSuspended()) << *thread;
 }
 
 StackVisitor::StackVisitor(Thread* thread, Context* context, size_t num_frames)
-    : thread_(thread), cur_shadow_frame_(NULL),
-      cur_quick_frame_(NULL), cur_quick_frame_pc_(0), num_frames_(num_frames), cur_depth_(0),
+    : thread_(thread), cur_shadow_frame_(nullptr),
+      cur_quick_frame_(nullptr), cur_quick_frame_pc_(0), num_frames_(num_frames), cur_depth_(0),
       context_(context) {
   DCHECK(thread == Thread::Current() || thread->IsSuspended()) << *thread;
 }
 
 uint32_t StackVisitor::GetDexPc(bool abort_on_failure) const {
-  if (cur_shadow_frame_ != NULL) {
+  if (cur_shadow_frame_ != nullptr) {
     return cur_shadow_frame_->GetDexPC();
-  } else if (cur_quick_frame_ != NULL) {
+  } else if (cur_quick_frame_ != nullptr) {
     return GetMethod()->ToDexPc(cur_quick_frame_pc_, abort_on_failure);
   } else {
     return 0;
@@ -183,7 +183,7 @@ bool StackVisitor::GetVRegFromQuickCode(mirror::ArtMethod* m, uint16_t vreg, VRe
     return GetRegisterIfAccessible(reg, kind, val);
   } else {
     const DexFile::CodeItem* code_item = m->GetCodeItem();
-    DCHECK(code_item != nullptr) << PrettyMethod(m);  // Can't be NULL or how would we compile
+    DCHECK(code_item != nullptr) << PrettyMethod(m);  // Can't be null or how would we compile
                                                       // its instructions?
     *val = *GetVRegAddrFromQuickCode(cur_quick_frame_, code_item, frame_info.CoreSpillMask(),
                                      frame_info.FpSpillMask(), frame_info.FrameSizeInBytes(), vreg);
@@ -199,28 +199,29 @@ bool StackVisitor::GetVRegFromOptimizedCode(mirror::ArtMethod* m, uint16_t vreg,
   CodeInfo code_info = m->GetOptimizedCodeInfo();
   StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset);
   const DexFile::CodeItem* code_item = m->GetCodeItem();
-  DCHECK(code_item != nullptr) << PrettyMethod(m);  // Can't be NULL or how would we compile
+  DCHECK(code_item != nullptr) << PrettyMethod(m);  // Can't be null or how would we compile
                                                     // its instructions?
   DCHECK_LT(vreg, code_item->registers_size_);
   uint16_t number_of_dex_registers = code_item->registers_size_;
   DexRegisterMap dex_register_map =
       code_info.GetDexRegisterMapOf(stack_map, number_of_dex_registers);
   DexRegisterLocation::Kind location_kind =
-      dex_register_map.GetLocationKind(vreg, number_of_dex_registers);
+      dex_register_map.GetLocationKind(vreg, number_of_dex_registers, code_info);
   switch (location_kind) {
     case DexRegisterLocation::Kind::kInStack: {
-      const int32_t offset = dex_register_map.GetStackOffsetInBytes(vreg, number_of_dex_registers);
+      const int32_t offset =
+          dex_register_map.GetStackOffsetInBytes(vreg, number_of_dex_registers, code_info);
       const uint8_t* addr = reinterpret_cast<const uint8_t*>(cur_quick_frame_) + offset;
       *val = *reinterpret_cast<const uint32_t*>(addr);
       return true;
     }
     case DexRegisterLocation::Kind::kInRegister:
     case DexRegisterLocation::Kind::kInFpuRegister: {
-      uint32_t reg = dex_register_map.GetMachineRegister(vreg, number_of_dex_registers);
+      uint32_t reg = dex_register_map.GetMachineRegister(vreg, number_of_dex_registers, code_info);
       return GetRegisterIfAccessible(reg, kind, val);
     }
     case DexRegisterLocation::Kind::kConstant:
-      *val = dex_register_map.GetConstant(vreg, number_of_dex_registers);
+      *val = dex_register_map.GetConstant(vreg, number_of_dex_registers, code_info);
       return true;
     case DexRegisterLocation::Kind::kNone:
       return false;
@@ -228,7 +229,7 @@ bool StackVisitor::GetVRegFromOptimizedCode(mirror::ArtMethod* m, uint16_t vreg,
       LOG(FATAL)
           << "Unexpected location kind"
           << DexRegisterLocation::PrettyDescriptor(
-                dex_register_map.GetLocationInternalKind(vreg, number_of_dex_registers));
+                dex_register_map.GetLocationInternalKind(vreg, number_of_dex_registers, code_info));
       UNREACHABLE();
   }
 }
@@ -296,7 +297,7 @@ bool StackVisitor::GetVRegPairFromQuickCode(mirror::ArtMethod* m, uint16_t vreg,
     return GetRegisterPairIfAccessible(reg_lo, reg_hi, kind_lo, val);
   } else {
     const DexFile::CodeItem* code_item = m->GetCodeItem();
-    DCHECK(code_item != nullptr) << PrettyMethod(m);  // Can't be NULL or how would we compile
+    DCHECK(code_item != nullptr) << PrettyMethod(m);  // Can't be null or how would we compile
                                                       // its instructions?
     uint32_t* addr = GetVRegAddrFromQuickCode(
         cur_quick_frame_, code_item, frame_info.CoreSpillMask(),
@@ -344,7 +345,7 @@ bool StackVisitor::SetVReg(mirror::ArtMethod* m, uint16_t vreg, uint32_t new_val
       DCHECK(context_ != nullptr);  // You can't reliably write registers without a context.
       DCHECK(m == GetMethod());
       if (m->IsOptimized(sizeof(void*))) {
-        return SetVRegFromOptimizedCode(m, vreg, new_value, kind);
+        return false;
       } else {
         return SetVRegFromQuickCode(m, vreg, new_value, kind);
       }
@@ -371,63 +372,13 @@ bool StackVisitor::SetVRegFromQuickCode(mirror::ArtMethod* m, uint16_t vreg, uin
     return SetRegisterIfAccessible(reg, new_value, kind);
   } else {
     const DexFile::CodeItem* code_item = m->GetCodeItem();
-    DCHECK(code_item != nullptr) << PrettyMethod(m);  // Can't be NULL or how would we compile
+    DCHECK(code_item != nullptr) << PrettyMethod(m);  // Can't be null or how would we compile
                                                       // its instructions?
     uint32_t* addr = GetVRegAddrFromQuickCode(
         cur_quick_frame_, code_item, frame_info.CoreSpillMask(),
         frame_info.FpSpillMask(), frame_info.FrameSizeInBytes(), vreg);
     *addr = new_value;
     return true;
-  }
-}
-
-bool StackVisitor::SetVRegFromOptimizedCode(mirror::ArtMethod* m, uint16_t vreg, uint32_t new_value,
-                                            VRegKind kind) {
-  const void* code_pointer = m->GetQuickOatCodePointer(sizeof(void*));
-  DCHECK(code_pointer != nullptr);
-  uint32_t native_pc_offset = m->NativeQuickPcOffset(cur_quick_frame_pc_);
-  CodeInfo code_info = m->GetOptimizedCodeInfo();
-  StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset);
-  const DexFile::CodeItem* code_item = m->GetCodeItem();
-  DCHECK(code_item != nullptr) << PrettyMethod(m);  // Can't be NULL or how would we compile
-                                                    // its instructions?
-  uint16_t number_of_dex_registers = code_item->registers_size_;
-  DCHECK_LT(vreg, number_of_dex_registers);
-  DexRegisterMap dex_register_map =
-      code_info.GetDexRegisterMapOf(stack_map, number_of_dex_registers);
-  DexRegisterLocation::Kind location_kind =
-      dex_register_map.GetLocationKind(vreg, number_of_dex_registers);
-  uint32_t dex_pc = m->ToDexPc(cur_quick_frame_pc_, false);
-  switch (location_kind) {
-    case DexRegisterLocation::Kind::kInStack: {
-      const int32_t offset = dex_register_map.GetStackOffsetInBytes(vreg, number_of_dex_registers);
-      uint8_t* addr = reinterpret_cast<uint8_t*>(cur_quick_frame_) + offset;
-      *reinterpret_cast<uint32_t*>(addr) = new_value;
-      return true;
-    }
-    case DexRegisterLocation::Kind::kInRegister:
-    case DexRegisterLocation::Kind::kInFpuRegister: {
-      uint32_t reg = dex_register_map.GetMachineRegister(vreg, number_of_dex_registers);
-      return SetRegisterIfAccessible(reg, new_value, kind);
-    }
-    case DexRegisterLocation::Kind::kConstant:
-      LOG(ERROR) << StringPrintf("Cannot change value of DEX register v%u used as a constant at "
-                                 "DEX pc 0x%x (native pc 0x%x) of method %s",
-                                 vreg, dex_pc, native_pc_offset,
-                                 PrettyMethod(cur_quick_frame_->AsMirrorPtr()).c_str());
-      return false;
-    case DexRegisterLocation::Kind::kNone:
-      LOG(ERROR) << StringPrintf("No location for DEX register v%u at DEX pc 0x%x "
-                                 "(native pc 0x%x) of method %s",
-                                 vreg, dex_pc, native_pc_offset,
-                                 PrettyMethod(cur_quick_frame_->AsMirrorPtr()).c_str());
-      return false;
-    default:
-      LOG(FATAL) << StringPrintf("Unknown location for DEX register v%u at DEX pc 0x%x "
-                                 "(native pc 0x%x) of method %s",
-                                 vreg, dex_pc, native_pc_offset,
-                                 PrettyMethod(cur_quick_frame_->AsMirrorPtr()).c_str());
-      UNREACHABLE();
   }
 }
 
@@ -475,7 +426,7 @@ bool StackVisitor::SetVRegPair(mirror::ArtMethod* m, uint16_t vreg, uint64_t new
     DCHECK(context_ != nullptr);  // You can't reliably write registers without a context.
     DCHECK(m == GetMethod());
     if (m->IsOptimized(sizeof(void*))) {
-      return SetVRegPairFromOptimizedCode(m, vreg, new_value, kind_lo, kind_hi);
+      return false;
     } else {
       return SetVRegPairFromQuickCode(m, vreg, new_value, kind_lo, kind_hi);
     }
@@ -486,8 +437,8 @@ bool StackVisitor::SetVRegPair(mirror::ArtMethod* m, uint16_t vreg, uint64_t new
   }
 }
 
-bool StackVisitor::SetVRegPairFromQuickCode(mirror::ArtMethod* m, uint16_t vreg, uint64_t new_value,
-                                            VRegKind kind_lo, VRegKind kind_hi) {
+bool StackVisitor::SetVRegPairFromQuickCode(
+    mirror::ArtMethod* m, uint16_t vreg, uint64_t new_value, VRegKind kind_lo, VRegKind kind_hi) {
   const void* code_pointer = m->GetQuickOatCodePointer(sizeof(void*));
   DCHECK(code_pointer != nullptr);
   const VmapTable vmap_table(m->GetVmapTable(code_pointer, sizeof(void*)));
@@ -503,7 +454,7 @@ bool StackVisitor::SetVRegPairFromQuickCode(mirror::ArtMethod* m, uint16_t vreg,
     return SetRegisterPairIfAccessible(reg_lo, reg_hi, new_value, is_float);
   } else {
     const DexFile::CodeItem* code_item = m->GetCodeItem();
-    DCHECK(code_item != nullptr) << PrettyMethod(m);  // Can't be NULL or how would we compile
+    DCHECK(code_item != nullptr) << PrettyMethod(m);  // Can't be null or how would we compile
                                                       // its instructions?
     uint32_t* addr = GetVRegAddrFromQuickCode(
         cur_quick_frame_, code_item, frame_info.CoreSpillMask(),
@@ -511,15 +462,6 @@ bool StackVisitor::SetVRegPairFromQuickCode(mirror::ArtMethod* m, uint16_t vreg,
     *reinterpret_cast<uint64_t*>(addr) = new_value;
     return true;
   }
-}
-
-bool StackVisitor::SetVRegPairFromOptimizedCode(mirror::ArtMethod* m, uint16_t vreg, uint64_t new_value,
-                                                VRegKind kind_lo, VRegKind kind_hi) {
-  uint32_t low_32bits = Low32Bits(new_value);
-  uint32_t high_32bits = High32Bits(new_value);
-  bool success = SetVRegFromOptimizedCode(m, vreg, low_32bits, kind_lo);
-  success &= SetVRegFromOptimizedCode(m, vreg + 1, high_32bits, kind_hi);
-  return success;
 }
 
 bool StackVisitor::SetRegisterPairIfAccessible(uint32_t reg_lo, uint32_t reg_hi,
@@ -583,14 +525,14 @@ void StackVisitor::SetFPR(uint32_t reg, uintptr_t value) {
 
 uintptr_t StackVisitor::GetReturnPc() const {
   uint8_t* sp = reinterpret_cast<uint8_t*>(GetCurrentQuickFrame());
-  DCHECK(sp != NULL);
+  DCHECK(sp != nullptr);
   uint8_t* pc_addr = sp + GetMethod()->GetReturnPcOffset().SizeValue();
   return *reinterpret_cast<uintptr_t*>(pc_addr);
 }
 
 void StackVisitor::SetReturnPc(uintptr_t new_ret_pc) {
   uint8_t* sp = reinterpret_cast<uint8_t*>(GetCurrentQuickFrame());
-  CHECK(sp != NULL);
+  CHECK(sp != nullptr);
   uint8_t* pc_addr = sp + GetMethod()->GetReturnPcOffset().SizeValue();
   *reinterpret_cast<uintptr_t*>(pc_addr) = new_ret_pc;
 }
@@ -598,7 +540,7 @@ void StackVisitor::SetReturnPc(uintptr_t new_ret_pc) {
 size_t StackVisitor::ComputeNumFrames(Thread* thread) {
   struct NumFramesVisitor : public StackVisitor {
     explicit NumFramesVisitor(Thread* thread_in)
-        : StackVisitor(thread_in, NULL), frames(0) {}
+        : StackVisitor(thread_in, nullptr), frames(0) {}
 
     bool VisitFrame() OVERRIDE {
       frames++;
@@ -650,7 +592,7 @@ bool StackVisitor::GetNextMethodAndDexPc(mirror::ArtMethod** next_method, uint32
 void StackVisitor::DescribeStack(Thread* thread) {
   struct DescribeStackVisitor : public StackVisitor {
     explicit DescribeStackVisitor(Thread* thread_in)
-        : StackVisitor(thread_in, NULL) {}
+        : StackVisitor(thread_in, nullptr) {}
 
     bool VisitFrame() OVERRIDE SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
       LOG(INFO) << "Frame Id=" << GetFrameId() << " " << DescribeLocation();
@@ -664,7 +606,7 @@ void StackVisitor::DescribeStack(Thread* thread) {
 std::string StackVisitor::DescribeLocation() const {
   std::string result("Visiting method '");
   mirror::ArtMethod* m = GetMethod();
-  if (m == NULL) {
+  if (m == nullptr) {
     return "upcall";
   }
   result += PrettyMethod(m);
@@ -711,24 +653,24 @@ void StackVisitor::WalkStack(bool include_transitions) {
   bool exit_stubs_installed = Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled();
   uint32_t instrumentation_stack_depth = 0;
 
-  for (const ManagedStack* current_fragment = thread_->GetManagedStack(); current_fragment != NULL;
-       current_fragment = current_fragment->GetLink()) {
+  for (const ManagedStack* current_fragment = thread_->GetManagedStack();
+       current_fragment != nullptr; current_fragment = current_fragment->GetLink()) {
     cur_shadow_frame_ = current_fragment->GetTopShadowFrame();
     cur_quick_frame_ = current_fragment->GetTopQuickFrame();
     cur_quick_frame_pc_ = 0;
 
-    if (cur_quick_frame_ != NULL) {  // Handle quick stack frames.
+    if (cur_quick_frame_ != nullptr) {  // Handle quick stack frames.
       // Can't be both a shadow and a quick fragment.
-      DCHECK(current_fragment->GetTopShadowFrame() == NULL);
+      DCHECK(current_fragment->GetTopShadowFrame() == nullptr);
       mirror::ArtMethod* method = cur_quick_frame_->AsMirrorPtr();
-      while (method != NULL) {
+      while (method != nullptr) {
         SanityCheckFrame();
         bool should_continue = VisitFrame();
         if (UNLIKELY(!should_continue)) {
           return;
         }
 
-        if (context_ != NULL) {
+        if (context_ != nullptr) {
           context_->FillCalleeSaves(*this);
         }
         size_t frame_size = method->GetFrameSizeInBytes();
@@ -746,7 +688,8 @@ void StackVisitor::WalkStack(bool include_transitions) {
             if (GetMethod() == Runtime::Current()->GetCalleeSaveMethod(Runtime::kSaveAll)) {
               // Skip runtime save all callee frames which are used to deliver exceptions.
             } else if (instrumentation_frame.interpreter_entry_) {
-              mirror::ArtMethod* callee = Runtime::Current()->GetCalleeSaveMethod(Runtime::kRefsAndArgs);
+              mirror::ArtMethod* callee =
+                  Runtime::Current()->GetCalleeSaveMethod(Runtime::kRefsAndArgs);
               CHECK_EQ(GetMethod(), callee) << "Expected: " << PrettyMethod(callee) << " Found: "
                                             << PrettyMethod(GetMethod());
             } else if (instrumentation_frame.method_ != GetMethod()) {
@@ -769,7 +712,7 @@ void StackVisitor::WalkStack(bool include_transitions) {
         cur_depth_++;
         method = cur_quick_frame_->AsMirrorPtr();
       }
-    } else if (cur_shadow_frame_ != NULL) {
+    } else if (cur_shadow_frame_ != nullptr) {
       do {
         SanityCheckFrame();
         bool should_continue = VisitFrame();
@@ -778,7 +721,7 @@ void StackVisitor::WalkStack(bool include_transitions) {
         }
         cur_depth_++;
         cur_shadow_frame_ = cur_shadow_frame_->GetLink();
-      } while (cur_shadow_frame_ != NULL);
+      } while (cur_shadow_frame_ != nullptr);
     }
     if (include_transitions) {
       bool should_continue = VisitFrame();

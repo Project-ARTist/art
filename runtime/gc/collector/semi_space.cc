@@ -603,18 +603,29 @@ void SemiSpace::DelayReferenceReferentCallback(mirror::Class* klass, mirror::Ref
   reinterpret_cast<SemiSpace*>(arg)->DelayReferenceReferent(klass, ref);
 }
 
-void SemiSpace::MarkRootCallback(Object** root, void* arg, const RootInfo& /*root_info*/) {
-  auto ref = StackReference<mirror::Object>::FromMirrorPtr(*root);
-  reinterpret_cast<SemiSpace*>(arg)->MarkObject(&ref);
-  if (*root != ref.AsMirrorPtr()) {
-    *root = ref.AsMirrorPtr();
+void SemiSpace::VisitRoots(mirror::Object*** roots, size_t count,
+                           const RootInfo& info ATTRIBUTE_UNUSED) {
+  for (size_t i = 0; i < count; ++i) {
+    auto* root = roots[i];
+    auto ref = StackReference<mirror::Object>::FromMirrorPtr(*root);
+    MarkObject(&ref);
+    if (*root != ref.AsMirrorPtr()) {
+      *root = ref.AsMirrorPtr();
+    }
+  }
+}
+
+void SemiSpace::VisitRoots(mirror::CompressedReference<mirror::Object>** roots, size_t count,
+                           const RootInfo& info ATTRIBUTE_UNUSED) {
+  for (size_t i = 0; i < count; ++i) {
+    MarkObject(roots[i]);
   }
 }
 
 // Marks all objects in the root set.
 void SemiSpace::MarkRoots() {
   TimingLogger::ScopedTiming t(__FUNCTION__, GetTimings());
-  Runtime::Current()->VisitRoots(MarkRootCallback, this);
+  Runtime::Current()->VisitRoots(this);
 }
 
 bool SemiSpace::HeapReferenceMarkedCallback(mirror::HeapReference<mirror::Object>* object,
@@ -739,7 +750,7 @@ inline Object* SemiSpace::GetMarkedForwardAddress(mirror::Object* obj) const
     SHARED_LOCKS_REQUIRED(Locks::heap_bitmap_lock_) {
   // All immune objects are assumed marked.
   if (from_space_->HasAddress(obj)) {
-    // Returns either the forwarding address or nullptr.
+    // Returns either the forwarding address or null.
     return GetForwardingAddressInFromSpace(obj);
   } else if (collect_from_space_only_ || immune_region_.ContainsObject(obj) ||
              to_space_->HasAddress(obj)) {

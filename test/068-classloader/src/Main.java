@@ -21,7 +21,7 @@ public class Main {
     /**
      * Main entry point.
      */
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         FancyLoader loader;
 
         loader = new FancyLoader(ClassLoader.getSystemClassLoader());
@@ -58,6 +58,65 @@ public class Main {
         testAbstract(loader);
         testImplement(loader);
         testIfaceImplement(loader);
+
+        testSeparation();
+
+        testClassForName();
+    }
+
+    static void testSeparation() {
+        FancyLoader loader1 = new FancyLoader(ClassLoader.getSystemClassLoader());
+        FancyLoader loader2 = new FancyLoader(ClassLoader.getSystemClassLoader());
+
+        try {
+            Class target1 = loader1.loadClass("MutationTarget");
+            Class target2 = loader2.loadClass("MutationTarget");
+
+            if (target1 == target2) {
+                throw new RuntimeException("target1 should not be equal to target2");
+            }
+
+            Class mutator1 = loader1.loadClass("Mutator");
+            Class mutator2 = loader2.loadClass("Mutator");
+
+            if (mutator1 == mutator2) {
+                throw new RuntimeException("mutator1 should not be equal to mutator2");
+            }
+
+            runMutator(mutator1, 1);
+
+            int value = getMutationTargetValue(target1);
+            if (value != 1) {
+                throw new RuntimeException("target 1 has unexpected value " + value);
+            }
+            value = getMutationTargetValue(target2);
+            if (value != 0) {
+                throw new RuntimeException("target 2 has unexpected value " + value);
+            }
+
+            runMutator(mutator2, 2);
+
+            value = getMutationTargetValue(target1);
+            if (value != 1) {
+                throw new RuntimeException("target 1 has unexpected value " + value);
+            }
+            value = getMutationTargetValue(target2);
+            if (value != 2) {
+                throw new RuntimeException("target 2 has unexpected value " + value);
+            }
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
+    }
+
+    private static void runMutator(Class c, int v) throws Exception {
+        java.lang.reflect.Method m = c.getDeclaredMethod("mutate", int.class);
+        m.invoke(null, v);
+    }
+
+    private static int getMutationTargetValue(Class c) throws Exception {
+        java.lang.reflect.Field f = c.getDeclaredField("value");
+        return f.getInt(null);
     }
 
     /**
@@ -421,5 +480,14 @@ public class Main {
         IfaceSuper ifaceSuper = (IfaceSuper) obj;
         DoubledImplement2 di2 = ifaceSuper.getDoubledInstance2();
         di2.one();
+    }
+
+    static void testClassForName() throws Exception {
+        System.out.println(Class.forName("Main").toString());
+        try {
+            System.out.println(Class.forName("Main", false, null).toString());
+        } catch (ClassNotFoundException expected) {
+            System.out.println("Got expected ClassNotFoundException");
+        }
     }
 }

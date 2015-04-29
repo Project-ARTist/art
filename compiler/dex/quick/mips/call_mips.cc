@@ -20,7 +20,9 @@
 
 #include "base/logging.h"
 #include "dex/mir_graph.h"
+#include "dex/quick/dex_file_to_method_inliner_map.h"
 #include "dex/quick/mir_to_lir-inl.h"
+#include "driver/compiler_driver.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "gc/accounting/card_table.h"
 #include "mips_lir.h"
@@ -68,7 +70,7 @@ bool MipsMir2Lir::GenSpecialCase(BasicBlock* bb, MIR* mir, const InlineMethod& s
  */
 void MipsMir2Lir::GenLargeSparseSwitch(MIR* mir, DexOffset table_offset, RegLocation rl_src) {
   const uint16_t* table = mir_graph_->GetTable(mir, table_offset);
-  // Add the table to the list - we'll process it later
+  // Add the table to the list - we'll process it later.
   SwitchTable* tab_rec =
       static_cast<SwitchTable*>(arena_->Alloc(sizeof(SwitchTable), kArenaAllocData));
   tab_rec->switch_mir = mir;
@@ -77,51 +79,51 @@ void MipsMir2Lir::GenLargeSparseSwitch(MIR* mir, DexOffset table_offset, RegLoca
   int elements = table[1];
   switch_tables_.push_back(tab_rec);
 
-  // The table is composed of 8-byte key/disp pairs
+  // The table is composed of 8-byte key/disp pairs.
   int byte_size = elements * 8;
 
   int size_hi = byte_size >> 16;
   int size_lo = byte_size & 0xffff;
 
-  RegStorage r_end = AllocTemp();
+  RegStorage r_end = AllocPtrSizeTemp();
   if (size_hi) {
     NewLIR2(kMipsLui, r_end.GetReg(), size_hi);
   }
-  // Must prevent code motion for the curr pc pair
+  // Must prevent code motion for the curr pc pair.
   GenBarrier();  // Scheduling barrier
-  NewLIR0(kMipsCurrPC);  // Really a jal to .+8
-  // Now, fill the branch delay slot
+  NewLIR0(kMipsCurrPC);  // Really a jal to .+8.
+  // Now, fill the branch delay slot.
   if (size_hi) {
     NewLIR3(kMipsOri, r_end.GetReg(), r_end.GetReg(), size_lo);
   } else {
     NewLIR3(kMipsOri, r_end.GetReg(), rZERO, size_lo);
   }
-  GenBarrier();  // Scheduling barrier
+  GenBarrier();  // Scheduling barrier.
 
-  // Construct BaseLabel and set up table base register
+  // Construct BaseLabel and set up table base register.
   LIR* base_label = NewLIR0(kPseudoTargetLabel);
-  // Remember base label so offsets can be computed later
+  // Remember base label so offsets can be computed later.
   tab_rec->anchor = base_label;
-  RegStorage r_base = AllocTemp();
+  RegStorage r_base = AllocPtrSizeTemp();
   NewLIR4(kMipsDelta, r_base.GetReg(), 0, WrapPointer(base_label), WrapPointer(tab_rec));
   OpRegRegReg(kOpAdd, r_end, r_end, r_base);
 
-  // Grab switch test value
+  // Grab switch test value.
   rl_src = LoadValue(rl_src, kCoreReg);
 
-  // Test loop
+  // Test loop.
   RegStorage r_key = AllocTemp();
   LIR* loop_label = NewLIR0(kPseudoTargetLabel);
-  LIR* exit_branch = OpCmpBranch(kCondEq, r_base, r_end, NULL);
+  LIR* exit_branch = OpCmpBranch(kCondEq, r_base, r_end, nullptr);
   Load32Disp(r_base, 0, r_key);
   OpRegImm(kOpAdd, r_base, 8);
   OpCmpBranch(kCondNe, rl_src.reg, r_key, loop_label);
   RegStorage r_disp = AllocTemp();
   Load32Disp(r_base, -4, r_disp);
-  OpRegRegReg(kOpAdd, rs_rRA, rs_rRA, r_disp);
-  OpReg(kOpBx, rs_rRA);
-
-  // Loop exit
+  const RegStorage rs_ra = TargetPtrReg(kLr);
+  OpRegRegReg(kOpAdd, rs_ra, rs_ra, r_disp);
+  OpReg(kOpBx, rs_ra);
+  // Loop exit.
   LIR* exit_label = NewLIR0(kPseudoTargetLabel);
   exit_branch->target = exit_label;
 }
@@ -141,7 +143,7 @@ void MipsMir2Lir::GenLargeSparseSwitch(MIR* mir, DexOffset table_offset, RegLoca
  */
 void MipsMir2Lir::GenLargePackedSwitch(MIR* mir, DexOffset table_offset, RegLocation rl_src) {
   const uint16_t* table = mir_graph_->GetTable(mir, table_offset);
-  // Add the table to the list - we'll process it later
+  // Add the table to the list - we'll process it later.
   SwitchTable* tab_rec =
       static_cast<SwitchTable*>(arena_->Alloc(sizeof(SwitchTable), kArenaAllocData));
   tab_rec->switch_mir = mir;
@@ -150,10 +152,10 @@ void MipsMir2Lir::GenLargePackedSwitch(MIR* mir, DexOffset table_offset, RegLoca
   int size = table[1];
   switch_tables_.push_back(tab_rec);
 
-  // Get the switch value
+  // Get the switch value.
   rl_src = LoadValue(rl_src, kCoreReg);
 
-  // Prepare the bias.  If too big, handle 1st stage here
+  // Prepare the bias.  If too big, handle 1st stage here.
   int low_key = s4FromSwitchData(&table[2]);
   bool large_bias = false;
   RegStorage r_key;
@@ -167,10 +169,10 @@ void MipsMir2Lir::GenLargePackedSwitch(MIR* mir, DexOffset table_offset, RegLoca
     r_key = AllocTemp();
   }
 
-  // Must prevent code motion for the curr pc pair
+  // Must prevent code motion for the curr pc pair.
   GenBarrier();
-  NewLIR0(kMipsCurrPC);  // Really a jal to .+8
-  // Now, fill the branch delay slot with bias strip
+  NewLIR0(kMipsCurrPC);  // Really a jal to .+8.
+  // Now, fill the branch delay slot with bias strip.
   if (low_key == 0) {
     NewLIR0(kMipsNop);
   } else {
@@ -180,228 +182,313 @@ void MipsMir2Lir::GenLargePackedSwitch(MIR* mir, DexOffset table_offset, RegLoca
       OpRegRegImm(kOpSub, r_key, rl_src.reg, low_key);
     }
   }
-  GenBarrier();  // Scheduling barrier
+  GenBarrier();  // Scheduling barrier.
 
-  // Construct BaseLabel and set up table base register
+  // Construct BaseLabel and set up table base register.
   LIR* base_label = NewLIR0(kPseudoTargetLabel);
-  // Remember base label so offsets can be computed later
+  // Remember base label so offsets can be computed later.
   tab_rec->anchor = base_label;
 
-  // Bounds check - if < 0 or >= size continue following switch
-  LIR* branch_over = OpCmpImmBranch(kCondHi, r_key, size-1, NULL);
+  // Bounds check - if < 0 or >= size continue following switch.
+  LIR* branch_over = OpCmpImmBranch(kCondHi, r_key, size-1, nullptr);
 
-  // Materialize the table base pointer
-  RegStorage r_base = AllocTemp();
+  // Materialize the table base pointer.
+  RegStorage r_base = AllocPtrSizeTemp();
   NewLIR4(kMipsDelta, r_base.GetReg(), 0, WrapPointer(base_label), WrapPointer(tab_rec));
 
-  // Load the displacement from the switch table
+  // Load the displacement from the switch table.
   RegStorage r_disp = AllocTemp();
   LoadBaseIndexed(r_base, r_key, r_disp, 2, k32);
 
-  // Add to rAP and go
-  OpRegRegReg(kOpAdd, rs_rRA, rs_rRA, r_disp);
-  OpReg(kOpBx, rs_rRA);
+  // Add to rRA and go.
+  const RegStorage rs_ra = TargetPtrReg(kLr);
+  OpRegRegReg(kOpAdd, rs_ra, rs_ra, r_disp);
+  OpReg(kOpBx, rs_ra);
 
-  /* branch_over target here */
+  // Branch_over target here.
   LIR* target = NewLIR0(kPseudoTargetLabel);
   branch_over->target = target;
 }
 
 void MipsMir2Lir::GenMoveException(RegLocation rl_dest) {
-  int ex_offset = Thread::ExceptionOffset<4>().Int32Value();
+  int ex_offset = cu_->target64 ? Thread::ExceptionOffset<8>().Int32Value() :
+      Thread::ExceptionOffset<4>().Int32Value();
   RegLocation rl_result = EvalLoc(rl_dest, kRefReg, true);
   RegStorage reset_reg = AllocTempRef();
-  LoadRefDisp(rs_rMIPS_SELF, ex_offset, rl_result.reg, kNotVolatile);
+  LoadRefDisp(TargetPtrReg(kSelf), ex_offset, rl_result.reg, kNotVolatile);
   LoadConstant(reset_reg, 0);
-  StoreRefDisp(rs_rMIPS_SELF, ex_offset, reset_reg, kNotVolatile);
+  StoreRefDisp(TargetPtrReg(kSelf), ex_offset, reset_reg, kNotVolatile);
   FreeTemp(reset_reg);
   StoreValue(rl_dest, rl_result);
 }
 
 void MipsMir2Lir::UnconditionallyMarkGCCard(RegStorage tgt_addr_reg) {
-  RegStorage reg_card_base = AllocTemp();
-  RegStorage reg_card_no = AllocTemp();
-  // NOTE: native pointer.
-  LoadWordDisp(rs_rMIPS_SELF, Thread::CardTableOffset<4>().Int32Value(), reg_card_base);
-  OpRegRegImm(kOpLsr, reg_card_no, tgt_addr_reg, gc::accounting::CardTable::kCardShift);
-  StoreBaseIndexed(reg_card_base, reg_card_no, reg_card_base, 0, kUnsignedByte);
+  RegStorage reg_card_base = AllocPtrSizeTemp();
+  RegStorage reg_card_no = AllocPtrSizeTemp();
+  if (cu_->target64) {
+    // NOTE: native pointer.
+    LoadWordDisp(TargetPtrReg(kSelf), Thread::CardTableOffset<8>().Int32Value(), reg_card_base);
+    OpRegRegImm(kOpLsr, reg_card_no, tgt_addr_reg, gc::accounting::CardTable::kCardShift);
+    StoreBaseIndexed(reg_card_base, reg_card_no, As32BitReg(reg_card_base), 0, kUnsignedByte);
+  } else {
+    // NOTE: native pointer.
+    LoadWordDisp(TargetPtrReg(kSelf), Thread::CardTableOffset<4>().Int32Value(), reg_card_base);
+    OpRegRegImm(kOpLsr, reg_card_no, tgt_addr_reg, gc::accounting::CardTable::kCardShift);
+    StoreBaseIndexed(reg_card_base, reg_card_no, reg_card_base, 0, kUnsignedByte);
+  }
   FreeTemp(reg_card_base);
   FreeTemp(reg_card_no);
 }
 
+static dwarf::Reg DwarfCoreReg(int num) {
+  return dwarf::Reg::MipsCore(num);
+}
+
 void MipsMir2Lir::GenEntrySequence(RegLocation* ArgLocs, RegLocation rl_method) {
+  DCHECK_EQ(cfi_.GetCurrentCFAOffset(), 0);
   int spill_count = num_core_spills_ + num_fp_spills_;
   /*
-   * On entry, rMIPS_ARG0, rMIPS_ARG1, rMIPS_ARG2 & rMIPS_ARG3 are live.  Let the register
-   * allocation mechanism know so it doesn't try to use any of them when
-   * expanding the frame or flushing.  This leaves the utility
-   * code with a single temp: r12.  This should be enough.
+   * On entry, A0, A1, A2 & A3 are live. On Mips64, A4, A5, A6 & A7 are also live.
+   * Let the register allocation mechanism know so it doesn't try to use any of them when
+   * expanding the frame or flushing.
    */
-  LockTemp(rs_rMIPS_ARG0);
-  LockTemp(rs_rMIPS_ARG1);
-  LockTemp(rs_rMIPS_ARG2);
-  LockTemp(rs_rMIPS_ARG3);
+  const RegStorage arg0 = TargetReg(kArg0);
+  const RegStorage arg1 = TargetReg(kArg1);
+  const RegStorage arg2 = TargetReg(kArg2);
+  const RegStorage arg3 = TargetReg(kArg3);
+  const RegStorage arg4 = TargetReg(kArg4);
+  const RegStorage arg5 = TargetReg(kArg5);
+  const RegStorage arg6 = TargetReg(kArg6);
+  const RegStorage arg7 = TargetReg(kArg7);
+
+  LockTemp(arg0);
+  LockTemp(arg1);
+  LockTemp(arg2);
+  LockTemp(arg3);
+  if (cu_->target64) {
+    LockTemp(arg4);
+    LockTemp(arg5);
+    LockTemp(arg6);
+    LockTemp(arg7);
+  }
+
+  bool skip_overflow_check;
+  InstructionSet target = (cu_->target64) ? kMips64 : kMips;
+  int ptr_size = cu_->target64 ? 8 : 4;
 
   /*
    * We can safely skip the stack overflow check if we're
    * a leaf *and* our frame size < fudge factor.
    */
-  bool skip_overflow_check = mir_graph_->MethodIsLeaf() && !FrameNeedsStackCheck(frame_size_, kMips);
-  NewLIR0(kPseudoMethodEntry);
-  RegStorage check_reg = AllocTemp();
-  RegStorage new_sp = AllocTemp();
+
+  skip_overflow_check = mir_graph_->MethodIsLeaf() && !FrameNeedsStackCheck(frame_size_, target);
+  RegStorage check_reg = AllocPtrSizeTemp();
+  RegStorage new_sp = AllocPtrSizeTemp();
+  const RegStorage rs_sp = TargetPtrReg(kSp);
   if (!skip_overflow_check) {
-    /* Load stack limit */
-    Load32Disp(rs_rMIPS_SELF, Thread::StackEndOffset<4>().Int32Value(), check_reg);
+    // Load stack limit.
+    if (cu_->target64) {
+      LoadWordDisp(TargetPtrReg(kSelf), Thread::StackEndOffset<8>().Int32Value(), check_reg);
+    } else {
+      Load32Disp(TargetPtrReg(kSelf), Thread::StackEndOffset<4>().Int32Value(), check_reg);
+    }
   }
-  /* Spill core callee saves */
+  // Spill core callee saves.
   SpillCoreRegs();
-  /* NOTE: promotion of FP regs currently unsupported, thus no FP spill */
+  // NOTE: promotion of FP regs currently unsupported, thus no FP spill.
   DCHECK_EQ(num_fp_spills_, 0);
-  const int frame_sub = frame_size_ - spill_count * 4;
+  const int frame_sub = frame_size_ - spill_count * ptr_size;
   if (!skip_overflow_check) {
     class StackOverflowSlowPath : public LIRSlowPath {
      public:
       StackOverflowSlowPath(Mir2Lir* m2l, LIR* branch, size_t sp_displace)
-          : LIRSlowPath(m2l, m2l->GetCurrentDexPc(), branch, nullptr), sp_displace_(sp_displace) {
+          : LIRSlowPath(m2l, branch), sp_displace_(sp_displace) {
       }
       void Compile() OVERRIDE {
         m2l_->ResetRegPool();
         m2l_->ResetDefTracking();
         GenerateTargetLabel(kPseudoThrowTarget);
-        // LR is offset 0 since we push in reverse order.
-        m2l_->Load32Disp(rs_rMIPS_SP, 0, rs_rRA);
-        m2l_->OpRegImm(kOpAdd, rs_rMIPS_SP, sp_displace_);
+        // RA is offset 0 since we push in reverse order.
+        m2l_->LoadWordDisp(m2l_->TargetPtrReg(kSp), 0, m2l_->TargetPtrReg(kLr));
+        m2l_->OpRegImm(kOpAdd, m2l_->TargetPtrReg(kSp), sp_displace_);
+        m2l_->cfi().AdjustCFAOffset(-sp_displace_);
         m2l_->ClobberCallerSave();
         RegStorage r_tgt = m2l_->CallHelperSetup(kQuickThrowStackOverflow);  // Doesn't clobber LR.
         m2l_->CallHelper(r_tgt, kQuickThrowStackOverflow, false /* MarkSafepointPC */,
                          false /* UseLink */);
+        m2l_->cfi().AdjustCFAOffset(sp_displace_);
       }
 
      private:
       const size_t sp_displace_;
     };
-    OpRegRegImm(kOpSub, new_sp, rs_rMIPS_SP, frame_sub);
+    OpRegRegImm(kOpSub, new_sp, rs_sp, frame_sub);
     LIR* branch = OpCmpBranch(kCondUlt, new_sp, check_reg, nullptr);
-    AddSlowPath(new(arena_)StackOverflowSlowPath(this, branch, spill_count * 4));
+    AddSlowPath(new(arena_)StackOverflowSlowPath(this, branch, spill_count * ptr_size));
     // TODO: avoid copy for small frame sizes.
-    OpRegCopy(rs_rMIPS_SP, new_sp);     // Establish stack
+    OpRegCopy(rs_sp, new_sp);  // Establish stack.
+    cfi_.AdjustCFAOffset(frame_sub);
   } else {
-    OpRegImm(kOpSub, rs_rMIPS_SP, frame_sub);
+    OpRegImm(kOpSub, rs_sp, frame_sub);
+    cfi_.AdjustCFAOffset(frame_sub);
   }
 
   FlushIns(ArgLocs, rl_method);
 
-  FreeTemp(rs_rMIPS_ARG0);
-  FreeTemp(rs_rMIPS_ARG1);
-  FreeTemp(rs_rMIPS_ARG2);
-  FreeTemp(rs_rMIPS_ARG3);
+  FreeTemp(arg0);
+  FreeTemp(arg1);
+  FreeTemp(arg2);
+  FreeTemp(arg3);
+  if (cu_->target64) {
+    FreeTemp(arg4);
+    FreeTemp(arg5);
+    FreeTemp(arg6);
+    FreeTemp(arg7);
+  }
 }
 
 void MipsMir2Lir::GenExitSequence() {
+  cfi_.RememberState();
   /*
    * In the exit path, rMIPS_RET0/rMIPS_RET1 are live - make sure they aren't
    * allocated by the register utilities as temps.
    */
-  LockTemp(rs_rMIPS_RET0);
-  LockTemp(rs_rMIPS_RET1);
+  LockTemp(TargetPtrReg(kRet0));
+  LockTemp(TargetPtrReg(kRet1));
 
-  NewLIR0(kPseudoMethodExit);
   UnSpillCoreRegs();
-  OpReg(kOpBx, rs_rRA);
+  OpReg(kOpBx, TargetPtrReg(kLr));
+  // The CFI should be restored for any code that follows the exit block.
+  cfi_.RestoreState();
+  cfi_.DefCFAOffset(frame_size_);
 }
 
 void MipsMir2Lir::GenSpecialExitSequence() {
-  OpReg(kOpBx, rs_rRA);
+  OpReg(kOpBx, TargetPtrReg(kLr));
 }
 
 void MipsMir2Lir::GenSpecialEntryForSuspend() {
-  // Keep 16-byte stack alignment - push A0, i.e. ArtMethod*, 2 filler words and RA.
-  core_spill_mask_ = (1u << rs_rRA.GetRegNum());
+  // Keep 16-byte stack alignment - push A0, i.e. ArtMethod*, 2 filler words and RA for mips32,
+  // but A0 and RA for mips64.
+  core_spill_mask_ = (1u << TargetPtrReg(kLr).GetRegNum());
   num_core_spills_ = 1u;
   fp_spill_mask_ = 0u;
   num_fp_spills_ = 0u;
   frame_size_ = 16u;
   core_vmap_table_.clear();
   fp_vmap_table_.clear();
-  OpRegImm(kOpSub, rs_rMIPS_SP, frame_size_);
-  Store32Disp(rs_rMIPS_SP, frame_size_ - 4, rs_rRA);
-  Store32Disp(rs_rMIPS_SP, 0, rs_rA0);
+  const RegStorage rs_sp = TargetPtrReg(kSp);
+  OpRegImm(kOpSub, rs_sp, frame_size_);
+  cfi_.AdjustCFAOffset(frame_size_);
+  StoreWordDisp(rs_sp, frame_size_ - (cu_->target64 ? 8 : 4), TargetPtrReg(kLr));
+  cfi_.RelOffset(DwarfCoreReg(rRA), frame_size_ - (cu_->target64 ? 8 : 4));
+  StoreWordDisp(rs_sp, 0, TargetPtrReg(kArg0));
+  // Do not generate CFI for scratch register A0.
 }
 
 void MipsMir2Lir::GenSpecialExitForSuspend() {
   // Pop the frame. Don't pop ArtMethod*, it's no longer needed.
-  Load32Disp(rs_rMIPS_SP, frame_size_ - 4, rs_rRA);
-  OpRegImm(kOpAdd, rs_rMIPS_SP, frame_size_);
+  const RegStorage rs_sp = TargetPtrReg(kSp);
+  LoadWordDisp(rs_sp, frame_size_ - (cu_->target64 ? 8 : 4), TargetPtrReg(kLr));
+  cfi_.Restore(DwarfCoreReg(rRA));
+  OpRegImm(kOpAdd, rs_sp, frame_size_);
+  cfi_.AdjustCFAOffset(-frame_size_);
 }
 
 /*
  * Bit of a hack here - in the absence of a real scheduling pass,
  * emit the next instruction in static & direct invoke sequences.
  */
-static int NextSDCallInsn(CompilationUnit* cu, CallInfo* info ATTRIBUTE_UNUSED,
-                          int state, const MethodReference& target_method,
-                          uint32_t,
-                          uintptr_t direct_code, uintptr_t direct_method,
-                          InvokeType type) {
+static int NextSDCallInsn(CompilationUnit* cu, CallInfo* info, int state,
+                          const MethodReference& target_method, uint32_t, uintptr_t direct_code,
+                          uintptr_t direct_method, InvokeType type) {
   Mir2Lir* cg = static_cast<Mir2Lir*>(cu->cg.get());
-  if (direct_code != 0 && direct_method != 0) {
-    switch (state) {
-    case 0:  // Get the current Method* [sets kArg0]
-      if (direct_code != static_cast<uintptr_t>(-1)) {
-        cg->LoadConstant(cg->TargetPtrReg(kInvokeTgt), direct_code);
-      } else {
-        cg->LoadCodeAddress(target_method, type, kInvokeTgt);
-      }
-      if (direct_method != static_cast<uintptr_t>(-1)) {
-        cg->LoadConstant(cg->TargetReg(kArg0, kRef), direct_method);
-      } else {
-        cg->LoadMethodAddress(target_method, type, kArg0);
-      }
-      break;
-    default:
-      return -1;
-    }
-  } else {
+  if (info->string_init_offset != 0) {
     RegStorage arg0_ref = cg->TargetReg(kArg0, kRef);
     switch (state) {
-    case 0:  // Get the current Method* [sets kArg0]
-      // TUNING: we can save a reg copy if Method* has been promoted.
-      cg->LoadCurrMethodDirect(arg0_ref);
+    case 0: {  // Grab target method* from thread pointer
+      cg->LoadRefDisp(cg->TargetPtrReg(kSelf), info->string_init_offset, arg0_ref, kNotVolatile);
       break;
-    case 1:  // Get method->dex_cache_resolved_methods_
-      cg->LoadRefDisp(arg0_ref,
-                      mirror::ArtMethod::DexCacheResolvedMethodsOffset().Int32Value(),
-                      arg0_ref,
-                      kNotVolatile);
-      // Set up direct code if known.
-      if (direct_code != 0) {
-        if (direct_code != static_cast<uintptr_t>(-1)) {
-          cg->LoadConstant(cg->TargetPtrReg(kInvokeTgt), direct_code);
-        } else {
-          CHECK_LT(target_method.dex_method_index, target_method.dex_file->NumMethodIds());
-          cg->LoadCodeAddress(target_method, type, kInvokeTgt);
-        }
-      }
-      break;
-    case 2:  // Grab target method*
-      CHECK_EQ(cu->dex_file, target_method.dex_file);
-      cg->LoadRefDisp(arg0_ref,
-                      mirror::ObjectArray<mirror::Object>::
-                          OffsetOfElement(target_method.dex_method_index).Int32Value(),
-                      arg0_ref,
-                      kNotVolatile);
-      break;
-    case 3:  // Grab the code from the method*
+    }
+    case 1:  // Grab the code from the method*
       if (direct_code == 0) {
         int32_t offset = mirror::ArtMethod::EntryPointFromQuickCompiledCodeOffset(
             InstructionSetPointerSize(cu->instruction_set)).Int32Value();
-        // Get the compiled code address [use *alt_from or kArg0, set kInvokeTgt]
         cg->LoadWordDisp(arg0_ref, offset, cg->TargetPtrReg(kInvokeTgt));
       }
       break;
     default:
       return -1;
+    }
+  } else if (direct_code != 0 && direct_method != 0) {
+    switch (state) {
+      case 0:  // Get the current Method* [sets kArg0]
+        if (direct_code != static_cast<uintptr_t>(-1)) {
+          if (cu->target64) {
+            cg->LoadConstantWide(cg->TargetPtrReg(kInvokeTgt), direct_code);
+          } else {
+            cg->LoadConstant(cg->TargetPtrReg(kInvokeTgt), direct_code);
+          }
+        } else {
+          cg->LoadCodeAddress(target_method, type, kInvokeTgt);
+        }
+        if (direct_method != static_cast<uintptr_t>(-1)) {
+          if (cu->target64) {
+            cg->LoadConstantWide(cg->TargetReg(kArg0, kRef), direct_method);
+          } else {
+            cg->LoadConstant(cg->TargetReg(kArg0, kRef), direct_method);
+          }
+        } else {
+          cg->LoadMethodAddress(target_method, type, kArg0);
+        }
+        break;
+      default:
+        return -1;
+    }
+  } else {
+    RegStorage arg0_ref = cg->TargetReg(kArg0, kRef);
+    switch (state) {
+      case 0:  // Get the current Method* [sets kArg0]
+        // TUNING: we can save a reg copy if Method* has been promoted.
+        cg->LoadCurrMethodDirect(arg0_ref);
+        break;
+      case 1:  // Get method->dex_cache_resolved_methods_
+        cg->LoadRefDisp(arg0_ref,
+                        mirror::ArtMethod::DexCacheResolvedMethodsOffset().Int32Value(),
+                        arg0_ref,
+                        kNotVolatile);
+        // Set up direct code if known.
+        if (direct_code != 0) {
+          if (direct_code != static_cast<uintptr_t>(-1)) {
+            if (cu->target64) {
+              cg->LoadConstantWide(cg->TargetPtrReg(kInvokeTgt), direct_code);
+            } else {
+              cg->LoadConstant(cg->TargetPtrReg(kInvokeTgt), direct_code);
+            }
+          } else {
+            CHECK_LT(target_method.dex_method_index, target_method.dex_file->NumMethodIds());
+            cg->LoadCodeAddress(target_method, type, kInvokeTgt);
+          }
+        }
+        break;
+      case 2:  // Grab target method*
+        CHECK_EQ(cu->dex_file, target_method.dex_file);
+        cg->LoadRefDisp(arg0_ref,
+                        mirror::ObjectArray<mirror::Object>::
+                        OffsetOfElement(target_method.dex_method_index).Int32Value(),
+                        arg0_ref,
+                        kNotVolatile);
+        break;
+      case 3:  // Grab the code from the method*
+        if (direct_code == 0) {
+          int32_t offset = mirror::ArtMethod::EntryPointFromQuickCompiledCodeOffset(
+              InstructionSetPointerSize(cu->instruction_set)).Int32Value();
+          // Get the compiled code address [use *alt_from or kArg0, set kInvokeTgt]
+          cg->LoadWordDisp(arg0_ref, offset, cg->TargetPtrReg(kInvokeTgt));
+        }
+        break;
+      default:
+        return -1;
     }
   }
   return state + 1;

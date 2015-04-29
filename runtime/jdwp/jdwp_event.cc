@@ -21,6 +21,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "art_field-inl.h"
 #include "base/logging.h"
 #include "base/stringprintf.h"
 #include "debugger.h"
@@ -28,7 +29,6 @@
 #include "jdwp/jdwp_expand_buf.h"
 #include "jdwp/jdwp_priv.h"
 #include "jdwp/object_registry.h"
-#include "mirror/art_field-inl.h"
 #include "scoped_thread_state_change.h"
 #include "thread-inl.h"
 
@@ -119,7 +119,7 @@ struct ModBasket {
   mirror::Class*        locationClass;    /* ClassOnly */
   mirror::Class*        exceptionClass;   /* ExceptionOnly */
   bool                  caught;           /* ExceptionOnly */
-  mirror::ArtField*     field;            /* FieldOnly */
+  ArtField*             field;            /* FieldOnly */
   mirror::Object*       thisPtr;          /* InstanceOnly */
   /* nothing for StepOnly -- handled differently */
 };
@@ -133,7 +133,6 @@ static bool NeedsFullDeoptimization(JdwpEventKind eventKind) {
       case EK_METHOD_ENTRY:
       case EK_METHOD_EXIT:
       case EK_METHOD_EXIT_WITH_RETURN_VALUE:
-      case EK_SINGLE_STEP:
       case EK_FIELD_ACCESS:
       case EK_FIELD_MODIFICATION:
         return true;
@@ -278,16 +277,7 @@ void JdwpState::UnregisterEvent(JdwpEvent* pEvent) {
         Dbg::UnconfigureStep(pMod->step.threadId);
       }
     }
-    if (pEvent->eventKind == EK_SINGLE_STEP) {
-      // Special case for single-steps where we want to avoid the slow pattern deoptimize/undeoptimize
-      // loop between each single-step. In a IDE, this would happens each time the user click on the
-      // "single-step" button. Here we delay the full undeoptimization to the next resume
-      // (VM.Resume or ThreadReference.Resume) or the end of the debugging session (VM.Dispose or
-      // runtime shutdown).
-      // Therefore, in a singles-stepping sequence, only the first single-step will trigger a full
-      // deoptimization and only the last single-step will trigger a full undeoptimization.
-      Dbg::DelayFullUndeoptimization();
-    } else if (NeedsFullDeoptimization(pEvent->eventKind)) {
+    if (NeedsFullDeoptimization(pEvent->eventKind)) {
       CHECK_EQ(req.GetKind(), DeoptimizationRequest::kNothing);
       CHECK(req.Method() == nullptr);
       req.SetKind(DeoptimizationRequest::kFullUndeoptimization);
@@ -924,7 +914,7 @@ void JdwpState::PostLocationEvent(const EventLocation* pLoc, mirror::Object* thi
   SendRequestAndPossiblySuspend(pReq, suspend_policy, thread_id);
 }
 
-void JdwpState::PostFieldEvent(const EventLocation* pLoc, mirror::ArtField* field,
+void JdwpState::PostFieldEvent(const EventLocation* pLoc, ArtField* field,
                                mirror::Object* this_object, const JValue* fieldValue,
                                bool is_modification) {
   DCHECK(pLoc != nullptr);
@@ -967,7 +957,7 @@ void JdwpState::PostFieldEvent(const EventLocation* pLoc, mirror::ArtField* fiel
     VLOG(jdwp) << StringPrintf("  this=%#" PRIx64, instance_id);
     VLOG(jdwp) << StringPrintf("  type=%#" PRIx64, field_type_id) << " "
         << Dbg::GetClassName(field_id);
-    VLOG(jdwp) << StringPrintf("  field=%#" PRIx32, field_id) << " "
+    VLOG(jdwp) << StringPrintf("  field=%#" PRIx64, field_id) << " "
         << Dbg::GetFieldName(field_id);
     VLOG(jdwp) << "  suspend_policy=" << suspend_policy;
   }

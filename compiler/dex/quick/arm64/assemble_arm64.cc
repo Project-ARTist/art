@@ -131,6 +131,10 @@ const A64EncodingMap Arm64Mir2Lir::EncodingMap[kA64Last] = {
                  kFmtRegX, 4, 0, kFmtImm21, -1, -1, kFmtUnused, -1, -1,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0 | NEEDS_FIXUP,
                  "adr", "!0x, #!1d", kFixupAdr),
+    ENCODING_MAP(kA64Adrp2xd, NO_VARIANTS(0x90000000),
+                 kFmtRegX, 4, 0, kFmtImm21, -1, -1, kFmtUnused, -1, -1,
+                 kFmtUnused, -1, -1, IS_BINARY_OP | REG_DEF0 | NEEDS_FIXUP,
+                 "adrp", "!0x, #!1d", kFixupLabel),
     ENCODING_MAP(WIDE(kA64And3Rrl), SF_VARIANTS(0x12000000),
                  kFmtRegROrSp, 4, 0, kFmtRegR, 9, 5, kFmtBitBlt, 22, 10,
                  kFmtUnused, -1, -1, IS_TERTIARY_OP | REG_DEF0_USE1,
@@ -659,7 +663,7 @@ const A64EncodingMap Arm64Mir2Lir::EncodingMap[kA64Last] = {
 // new_lir replaces orig_lir in the pcrel_fixup list.
 void Arm64Mir2Lir::ReplaceFixup(LIR* prev_lir, LIR* orig_lir, LIR* new_lir) {
   new_lir->u.a.pcrel_next = orig_lir->u.a.pcrel_next;
-  if (UNLIKELY(prev_lir == NULL)) {
+  if (UNLIKELY(prev_lir == nullptr)) {
     first_fixup_ = new_lir;
   } else {
     prev_lir->u.a.pcrel_next = new_lir;
@@ -670,7 +674,7 @@ void Arm64Mir2Lir::ReplaceFixup(LIR* prev_lir, LIR* orig_lir, LIR* new_lir) {
 // new_lir is inserted before orig_lir in the pcrel_fixup list.
 void Arm64Mir2Lir::InsertFixupBefore(LIR* prev_lir, LIR* orig_lir, LIR* new_lir) {
   new_lir->u.a.pcrel_next = orig_lir;
-  if (UNLIKELY(prev_lir == NULL)) {
+  if (UNLIKELY(prev_lir == nullptr)) {
     first_fixup_ = new_lir;
   } else {
     DCHECK(prev_lir->u.a.pcrel_next == orig_lir);
@@ -682,7 +686,9 @@ void Arm64Mir2Lir::InsertFixupBefore(LIR* prev_lir, LIR* orig_lir, LIR* new_lir)
 #define PADDING_NOP (UINT32_C(0xd503201f))
 
 uint8_t* Arm64Mir2Lir::EncodeLIRs(uint8_t* write_pos, LIR* lir) {
+  uint8_t* const write_buffer = write_pos;
   for (; lir != nullptr; lir = NEXT_LIR(lir)) {
+    lir->offset = (write_pos - write_buffer);
     bool opcode_is_wide = IS_WIDE(lir->opcode);
     A64Opcode opcode = UNWIDE(lir->opcode);
 
@@ -883,8 +889,8 @@ void Arm64Mir2Lir::AssembleLIR() {
     generation ^= 1;
     // Note: nodes requiring possible fixup linked in ascending order.
     lir = first_fixup_;
-    prev_lir = NULL;
-    while (lir != NULL) {
+    prev_lir = nullptr;
+    while (lir != nullptr) {
       // NOTE: Any new non-pc_rel instructions inserted due to retry must be explicitly encoded at
       // the time of insertion.  Note that inserted instructions don't need use/def flags, but do
       // need size and pc-rel status properly updated.
@@ -1003,7 +1009,7 @@ void Arm64Mir2Lir::AssembleLIR() {
                                       0 : offset_adjustment) + target_lir->offset;
             delta = target_offs - lir->offset;
           } else if (lir->operands[2] >= 0) {
-            EmbeddedData* tab = reinterpret_cast<EmbeddedData*>(UnwrapPointer(lir->operands[2]));
+            const EmbeddedData* tab = UnwrapPointer<EmbeddedData>(lir->operands[2]);
             delta = tab->offset + offset_adjustment - lir->offset;
           } else {
             // No fixup: this usage allows to retrieve the current PC.
@@ -1031,7 +1037,7 @@ void Arm64Mir2Lir::AssembleLIR() {
               // Check that the instruction preceding the multiply-accumulate is a load or store.
               if ((prev_insn_flags & IS_LOAD) != 0 || (prev_insn_flags & IS_STORE) != 0) {
                 // insert a NOP between the load/store and the multiply-accumulate.
-                LIR* new_lir = RawLIR(lir->dalvik_offset, kA64Nop0, 0, 0, 0, 0, 0, NULL);
+                LIR* new_lir = RawLIR(lir->dalvik_offset, kA64Nop0, 0, 0, 0, 0, 0, nullptr);
                 new_lir->offset = lir->offset;
                 new_lir->flags.fixup = kFixupNone;
                 new_lir->flags.size = EncodingMap[kA64Nop0].size;
@@ -1102,7 +1108,7 @@ size_t Arm64Mir2Lir::GetInsnSize(LIR* lir) {
 uint32_t Arm64Mir2Lir::LinkFixupInsns(LIR* head_lir, LIR* tail_lir, uint32_t offset) {
   LIR* end_lir = tail_lir->next;
 
-  LIR* last_fixup = NULL;
+  LIR* last_fixup = nullptr;
   for (LIR* lir = head_lir; lir != end_lir; lir = NEXT_LIR(lir)) {
     A64Opcode opcode = UNWIDE(lir->opcode);
     if (!lir->flags.is_nop) {
@@ -1117,8 +1123,8 @@ uint32_t Arm64Mir2Lir::LinkFixupInsns(LIR* head_lir, LIR* tail_lir, uint32_t off
         }
         // Link into the fixup chain.
         lir->flags.use_def_invalid = true;
-        lir->u.a.pcrel_next = NULL;
-        if (first_fixup_ == NULL) {
+        lir->u.a.pcrel_next = nullptr;
+        if (first_fixup_ == nullptr) {
           first_fixup_ = lir;
         } else {
           last_fixup->u.a.pcrel_next = lir;

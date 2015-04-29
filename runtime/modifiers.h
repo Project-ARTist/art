@@ -48,6 +48,10 @@ static constexpr uint32_t kAccPreverified =          0x00080000;  // class (runt
 static constexpr uint32_t kAccFastNative =           0x00080000;  // method (dex only)
 static constexpr uint32_t kAccMiranda =              0x00200000;  // method (dex only)
 
+// Flag is set if the compiler decides it is not worth trying
+// to inline the method. This avoids other callers to try it again and again.
+static constexpr uint32_t kAccDontInline =           0x00400000;  // method (dex only)
+
 // Special runtime-only flags.
 // Note: if only kAccClassIsReference is set, we have a soft reference.
 
@@ -61,6 +65,8 @@ static constexpr uint32_t kAccClassIsWeakReference      = 0x04000000;
 static constexpr uint32_t kAccClassIsFinalizerReference = 0x02000000;
 // class is a phantom reference
 static constexpr uint32_t kAccClassIsPhantomReference   = 0x01000000;
+// class is the string class
+static constexpr uint32_t kAccClassIsStringClass        = 0x00800000;
 
 static constexpr uint32_t kAccReferenceFlagsMask = (kAccClassIsReference
                                                   | kAccClassIsWeakReference

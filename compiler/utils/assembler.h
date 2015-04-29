@@ -29,6 +29,7 @@
 #include "offsets.h"
 #include "x86/constants_x86.h"
 #include "x86_64/constants_x86_64.h"
+#include "dwarf/debug_frame_opcode_writer.h"
 
 namespace art {
 
@@ -155,7 +156,7 @@ class AssemblerFixup {
 // Parent of all queued slow paths, emitted during finalization
 class SlowPath {
  public:
-  SlowPath() : next_(NULL) {}
+  SlowPath() : next_(nullptr) {}
   virtual ~SlowPath() {}
 
   Label* Continuation() { return &continuation_; }
@@ -215,20 +216,20 @@ class AssemblerBuffer {
   }
 
   void EnqueueSlowPath(SlowPath* slowpath) {
-    if (slow_path_ == NULL) {
+    if (slow_path_ == nullptr) {
       slow_path_ = slowpath;
     } else {
       SlowPath* cur = slow_path_;
-      for ( ; cur->next_ != NULL ; cur = cur->next_) {}
+      for ( ; cur->next_ != nullptr ; cur = cur->next_) {}
       cur->next_ = slowpath;
     }
   }
 
   void EmitSlowPaths(Assembler* sp_asm) {
     SlowPath* cur = slow_path_;
-    SlowPath* next = NULL;
-    slow_path_ = NULL;
-    for ( ; cur != NULL ; cur = next) {
+    SlowPath* next = nullptr;
+    slow_path_ = nullptr;
+    for ( ; cur != nullptr ; cur = next) {
       cur->Emit(sp_asm);
       next = cur->next_;
       delete cur;
@@ -354,6 +355,23 @@ class AssemblerBuffer {
   friend class AssemblerFixup;
 };
 
+// The purpose of this class is to ensure that we do not have to explicitly
+// call the AdvancePC method (which is good for convenience and correctness).
+class DebugFrameOpCodeWriterForAssembler FINAL
+    : public dwarf::DebugFrameOpCodeWriter<> {
+ public:
+  // This method is called the by the opcode writers.
+  virtual void ImplicitlyAdvancePC() FINAL;
+
+  explicit DebugFrameOpCodeWriterForAssembler(Assembler* buffer)
+      : dwarf::DebugFrameOpCodeWriter<>(),
+        assembler_(buffer) {
+  }
+
+ private:
+  Assembler* assembler_;
+};
+
 class Assembler {
  public:
   static Assembler* Create(InstructionSet instruction_set);
@@ -471,14 +489,14 @@ class Assembler {
   virtual void GetCurrentThread(FrameOffset dest_offset,
                                 ManagedRegister scratch) = 0;
 
-  // Set up out_reg to hold a Object** into the handle scope, or to be NULL if the
+  // Set up out_reg to hold a Object** into the handle scope, or to be null if the
   // value is null and null_allowed. in_reg holds a possibly stale reference
   // that can be used to avoid loading the handle scope entry to see if the value is
-  // NULL.
+  // null.
   virtual void CreateHandleScopeEntry(ManagedRegister out_reg, FrameOffset handlescope_offset,
                                ManagedRegister in_reg, bool null_allowed) = 0;
 
-  // Set up out_off to hold a Object** into the handle scope, or to be NULL if the
+  // Set up out_off to hold a Object** into the handle scope, or to be null if the
   // value is null and null_allowed.
   virtual void CreateHandleScopeEntry(FrameOffset out_off, FrameOffset handlescope_offset,
                                ManagedRegister scratch, bool null_allowed) = 0;
@@ -504,18 +522,20 @@ class Assembler {
   // and branch to a ExceptionSlowPath if it is.
   virtual void ExceptionPoll(ManagedRegister scratch, size_t stack_adjust) = 0;
 
-  virtual void InitializeFrameDescriptionEntry() {}
-  virtual void FinalizeFrameDescriptionEntry() {}
-  // Give a vector containing FDE data, or null if not used. Note: the assembler must take care
-  // of handling the lifecycle.
-  virtual std::vector<uint8_t>* GetFrameDescriptionEntry() { return nullptr; }
-
   virtual ~Assembler() {}
 
+  /**
+   * @brief Buffer of DWARF's Call Frame Information opcodes.
+   * @details It is used by debuggers and other tools to unwind the call stack.
+   */
+  DebugFrameOpCodeWriterForAssembler& cfi() { return cfi_; }
+
  protected:
-  Assembler() : buffer_() {}
+  Assembler() : buffer_(), cfi_(this) {}
 
   AssemblerBuffer buffer_;
+
+  DebugFrameOpCodeWriterForAssembler cfi_;
 };
 
 }  // namespace art

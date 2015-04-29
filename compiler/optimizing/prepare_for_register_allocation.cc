@@ -60,11 +60,11 @@ void PrepareForRegisterAllocation::VisitClinitCheck(HClinitCheck* check) {
 
 void PrepareForRegisterAllocation::VisitCondition(HCondition* condition) {
   bool needs_materialization = false;
-  if (!condition->GetUses().HasOnlyOneUse()) {
+  if (!condition->GetUses().HasOnlyOneUse() || !condition->GetEnvUses().IsEmpty()) {
     needs_materialization = true;
   } else {
     HInstruction* user = condition->GetUses().GetFirst()->GetUser();
-    if (!user->IsIf()) {
+    if (!user->IsIf() && !user->IsDeoptimize()) {
       needs_materialization = true;
     } else {
       // TODO: if there is no intervening instructions with side-effect between this condition
@@ -76,6 +76,28 @@ void PrepareForRegisterAllocation::VisitCondition(HCondition* condition) {
   }
   if (!needs_materialization) {
     condition->ClearNeedsMaterialization();
+  }
+}
+
+void PrepareForRegisterAllocation::VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) {
+  if (invoke->IsStaticWithExplicitClinitCheck()) {
+    size_t last_input_index = invoke->InputCount() - 1;
+    HInstruction* last_input = invoke->InputAt(last_input_index);
+    DCHECK(last_input->IsLoadClass()) << last_input->DebugName();
+
+    // Remove a load class instruction as last input of a static
+    // invoke, which has been added (along with a clinit check,
+    // removed by PrepareForRegisterAllocation::VisitClinitCheck
+    // previously) by the graph builder during the creation of the
+    // static invoke instruction, but is no longer required at this
+    // stage (i.e., after inlining has been performed).
+    invoke->RemoveLoadClassAsLastInput();
+
+    // If the load class instruction is no longer used, remove it from
+    // the graph.
+    if (!last_input->HasUses()) {
+      last_input->GetBlock()->RemoveInstruction(last_input);
+    }
   }
 }
 

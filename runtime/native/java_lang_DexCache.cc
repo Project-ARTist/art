@@ -18,7 +18,7 @@
 
 #include "dex_file.h"
 #include "jni_internal.h"
-#include "mirror/dex_cache.h"
+#include "mirror/dex_cache-inl.h"
 #include "mirror/object-inl.h"
 #include "scoped_fast_native_object_access.h"
 #include "well_known_classes.h"
@@ -31,14 +31,14 @@ static jobject DexCache_getDexNative(JNIEnv* env, jobject javaDexCache) {
   // Should only be called while holding the lock on the dex cache.
   DCHECK_EQ(dex_cache->GetLockOwnerThreadId(), soa.Self()->GetThreadId());
   const DexFile* dex_file = dex_cache->GetDexFile();
-  if (dex_file == NULL) {
-    return NULL;
+  if (dex_file == nullptr) {
+    return nullptr;
   }
   void* address = const_cast<void*>(reinterpret_cast<const void*>(dex_file->Begin()));
   jobject byte_buffer = env->NewDirectByteBuffer(address, dex_file->Size());
-  if (byte_buffer == NULL) {
+  if (byte_buffer == nullptr) {
     DCHECK(soa.Self()->IsExceptionPending());
-    return NULL;
+    return nullptr;
   }
 
   jvalue args[1];
@@ -48,8 +48,38 @@ static jobject DexCache_getDexNative(JNIEnv* env, jobject javaDexCache) {
                                       args);
 }
 
+static jobject DexCache_getResolvedType(JNIEnv* env, jobject javaDexCache, jint type_index) {
+  ScopedFastNativeObjectAccess soa(env);
+  mirror::DexCache* dex_cache = soa.Decode<mirror::DexCache*>(javaDexCache);
+  return soa.AddLocalReference<jobject>(dex_cache->GetResolvedType(type_index));
+}
+
+static jobject DexCache_getResolvedString(JNIEnv* env, jobject javaDexCache, jint string_index) {
+  ScopedFastNativeObjectAccess soa(env);
+  mirror::DexCache* dex_cache = soa.Decode<mirror::DexCache*>(javaDexCache);
+  return soa.AddLocalReference<jobject>(dex_cache->GetResolvedString(string_index));
+}
+
+static void DexCache_setResolvedType(JNIEnv* env, jobject javaDexCache, jint type_index,
+                                     jobject type) {
+  ScopedFastNativeObjectAccess soa(env);
+  mirror::DexCache* dex_cache = soa.Decode<mirror::DexCache*>(javaDexCache);
+  dex_cache->SetResolvedType(type_index, soa.Decode<mirror::Class*>(type));
+}
+
+static void DexCache_setResolvedString(JNIEnv* env, jobject javaDexCache, jint string_index,
+                                       jobject string) {
+  ScopedFastNativeObjectAccess soa(env);
+  mirror::DexCache* dex_cache = soa.Decode<mirror::DexCache*>(javaDexCache);
+  dex_cache->SetResolvedString(string_index, soa.Decode<mirror::String*>(string));
+}
+
 static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(DexCache, getDexNative, "!()Lcom/android/dex/Dex;"),
+  NATIVE_METHOD(DexCache, getResolvedType, "!(I)Ljava/lang/Class;"),
+  NATIVE_METHOD(DexCache, getResolvedString, "!(I)Ljava/lang/String;"),
+  NATIVE_METHOD(DexCache, setResolvedType, "!(ILjava/lang/Class;)V"),
+  NATIVE_METHOD(DexCache, setResolvedString, "!(ILjava/lang/String;)V"),
 };
 
 void register_java_lang_DexCache(JNIEnv* env) {

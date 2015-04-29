@@ -18,6 +18,7 @@
 
 #include <map>
 #include <string>
+#include <sstream>
 
 #include "base/bit_vector-inl.h"
 #include "base/stringprintf.h"
@@ -80,32 +81,56 @@ void GraphChecker::VisitBasicBlock(HBasicBlock* block) {
   }
 
   // Ensure `block` ends with a branch instruction.
-  HInstruction* last_inst = block->GetLastInstruction();
-  if (last_inst == nullptr || !last_inst->IsControlFlow()) {
+  if (!block->EndsWithControlFlowInstruction()) {
     AddError(StringPrintf("Block %d does not end with a branch instruction.",
                           block->GetBlockId()));
   }
 
   // Visit this block's list of phis.
   for (HInstructionIterator it(block->GetPhis()); !it.Done(); it.Advance()) {
+    HInstruction* current = it.Current();
     // Ensure this block's list of phis contains only phis.
-    if (!it.Current()->IsPhi()) {
+    if (!current->IsPhi()) {
       AddError(StringPrintf("Block %d has a non-phi in its phi list.",
                             current_block_->GetBlockId()));
     }
-    it.Current()->Accept(this);
+    if (current->GetNext() == nullptr && current != block->GetLastPhi()) {
+      AddError(StringPrintf("The recorded last phi of block %d does not match "
+                            "the actual last phi %d.",
+                            current_block_->GetBlockId(),
+                            current->GetId()));
+    }
+    current->Accept(this);
   }
 
   // Visit this block's list of instructions.
-  for (HInstructionIterator it(block->GetInstructions()); !it.Done();
-       it.Advance()) {
+  for (HInstructionIterator it(block->GetInstructions()); !it.Done(); it.Advance()) {
+    HInstruction* current = it.Current();
     // Ensure this block's list of instructions does not contains phis.
-    if (it.Current()->IsPhi()) {
+    if (current->IsPhi()) {
       AddError(StringPrintf("Block %d has a phi in its non-phi list.",
                             current_block_->GetBlockId()));
     }
-    it.Current()->Accept(this);
+    if (current->GetNext() == nullptr && current != block->GetLastInstruction()) {
+      AddError(StringPrintf("The recorded last instruction of block %d does not match "
+                            "the actual last instruction %d.",
+                            current_block_->GetBlockId(),
+                            current->GetId()));
+    }
+    current->Accept(this);
   }
+}
+
+void GraphChecker::VisitBoundsCheck(HBoundsCheck* check) {
+  if (!GetGraph()->HasBoundsChecks()) {
+    AddError(StringPrintf("Instruction %s:%d is a HBoundsCheck, "
+                          "but HasBoundsChecks() returns false",
+                          check->DebugName(),
+                          check->GetId()));
+  }
+
+  // Perform the instruction base checks too.
+  VisitInstruction(check);
 }
 
 void GraphChecker::VisitInstruction(HInstruction* instruction) {
@@ -178,6 +203,30 @@ void GraphChecker::VisitInstruction(HInstruction* instruction) {
   }
 }
 
+void GraphChecker::VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) {
+  VisitInstruction(invoke);
+
+  if (invoke->IsStaticWithExplicitClinitCheck()) {
+    size_t last_input_index = invoke->InputCount() - 1;
+    HInstruction* last_input = invoke->InputAt(last_input_index);
+    if (last_input == nullptr) {
+      AddError(StringPrintf("Static invoke %s:%d marked as having an explicit clinit check "
+                            "has a null pointer as last input.",
+                            invoke->DebugName(),
+                            invoke->GetId()));
+    }
+    if (!last_input->IsClinitCheck() && !last_input->IsLoadClass()) {
+      AddError(StringPrintf("Static invoke %s:%d marked as having an explicit clinit check "
+                            "has a last instruction (%s:%d) which is neither a clinit check "
+                            "nor a load class instruction.",
+                            invoke->DebugName(),
+                            invoke->GetId(),
+                            last_input->DebugName(),
+                            last_input->GetId()));
+    }
+  }
+}
+
 void SSAChecker::VisitBasicBlock(HBasicBlock* block) {
   super_type::VisitBasicBlock(block);
 
@@ -192,6 +241,17 @@ void SSAChecker::VisitBasicBlock(HBasicBlock* block) {
                               block->GetBlockId(),
                               successor->GetBlockId()));
       }
+    }
+  }
+
+  // Check Phi uniqueness (no two Phis with the same type refer to the same register).
+  for (HInstructionIterator it(block->GetPhis()); !it.Done(); it.Advance()) {
+    HPhi* phi = it.Current()->AsPhi();
+    if (phi->GetNextEquivalentPhiWithSameType() != nullptr) {
+      std::stringstream type_str;
+      type_str << phi->GetType();
+      AddError(StringPrintf("Equivalent phi (%d) found for VReg %d with type: %s",
+          phi->GetId(), phi->GetRegNumber(), type_str.str().c_str()));
     }
   }
 
@@ -227,18 +287,20 @@ void SSAChecker::CheckLoop(HBasicBlock* loop_header) {
   } else {
     HLoopInformation* loop_information = loop_header->GetLoopInformation();
     HBasicBlock* first_predecessor = loop_header->GetPredecessors().Get(0);
-    if (loop_information->IsBackEdge(first_predecessor)) {
+    if (loop_information->IsBackEdge(*first_predecessor)) {
       AddError(StringPrintf(
           "First predecessor of loop header %d is a back edge.",
           id));
     }
     HBasicBlock* second_predecessor = loop_header->GetPredecessors().Get(1);
-    if (!loop_information->IsBackEdge(second_predecessor)) {
+    if (!loop_information->IsBackEdge(*second_predecessor)) {
       AddError(StringPrintf(
           "Second predecessor of loop header %d is not a back edge.",
           id));
     }
   }
+
+  const ArenaBitVector& loop_blocks = loop_header->GetLoopInformation()->GetBlocks();
 
   // Ensure there is only one back edge per loop.
   size_t num_back_edges =
@@ -252,17 +314,39 @@ void SSAChecker::CheckLoop(HBasicBlock* loop_header) {
         "Loop defined by header %d has several back edges: %zu.",
         id,
         num_back_edges));
+  } else {
+    DCHECK_EQ(num_back_edges, 1u);
+    int back_edge_id = loop_header->GetLoopInformation()->GetBackEdges().Get(0)->GetBlockId();
+    if (!loop_blocks.IsBitSet(back_edge_id)) {
+      AddError(StringPrintf(
+          "Loop defined by header %d has an invalid back edge %d.",
+          id,
+          back_edge_id));
+    }
   }
 
-  // Ensure all blocks in the loop are dominated by the loop header.
-  const ArenaBitVector& loop_blocks =
-    loop_header->GetLoopInformation()->GetBlocks();
+  // Ensure all blocks in the loop are live and dominated by the loop header.
   for (uint32_t i : loop_blocks.Indexes()) {
     HBasicBlock* loop_block = GetGraph()->GetBlocks().Get(i);
-    if (!loop_header->Dominates(loop_block)) {
+    if (loop_block == nullptr) {
+      AddError(StringPrintf("Loop defined by header %d contains a previously removed block %d.",
+                            id,
+                            i));
+    } else if (!loop_header->Dominates(loop_block)) {
       AddError(StringPrintf("Loop block %d not dominated by loop header %d.",
-                            loop_block->GetBlockId(),
+                            i,
                             id));
+    }
+  }
+
+  // If this is a nested loop, ensure the outer loops contain a superset of the blocks.
+  for (HLoopInformationOutwardIterator it(*loop_header); !it.Done(); it.Advance()) {
+    HLoopInformation* outer_info = it.Current();
+    if (!loop_blocks.IsSubsetOf(&outer_info->GetBlocks())) {
+      AddError(StringPrintf("Blocks of loop defined by header %d are not a subset of blocks of "
+                            "an outer loop defined by header %d.",
+                            id,
+                            outer_info->GetHeader()->GetBlockId()));
     }
   }
 }
@@ -370,24 +454,40 @@ void SSAChecker::VisitPhi(HPhi* phi) {
   }
 }
 
-void SSAChecker::VisitIf(HIf* instruction) {
-  VisitInstruction(instruction);
-  HInstruction* input = instruction->InputAt(0);
+void SSAChecker::HandleBooleanInput(HInstruction* instruction, size_t input_index) {
+  HInstruction* input = instruction->InputAt(input_index);
   if (input->IsIntConstant()) {
-    int value = input->AsIntConstant()->GetValue();
+    int32_t value = input->AsIntConstant()->GetValue();
     if (value != 0 && value != 1) {
       AddError(StringPrintf(
-          "If instruction %d has a non-Boolean constant input "
-          "whose value is: %d.",
+          "%s instruction %d has a non-Boolean constant input %d whose value is: %d.",
+          instruction->DebugName(),
           instruction->GetId(),
+          static_cast<int>(input_index),
           value));
     }
-  } else if (instruction->InputAt(0)->GetType() != Primitive::kPrimBoolean) {
+  } else if (input->GetType() == Primitive::kPrimInt
+             && (input->IsPhi() || input->IsAnd() || input->IsOr() || input->IsXor())) {
+    // TODO: We need a data-flow analysis to determine if the Phi or
+    //       binary operation is actually Boolean. Allow for now.
+  } else if (input->GetType() != Primitive::kPrimBoolean) {
     AddError(StringPrintf(
-        "If instruction %d has a non-Boolean input type: %s.",
+        "%s instruction %d has a non-Boolean input %d whose type is: %s.",
+        instruction->DebugName(),
         instruction->GetId(),
-        Primitive::PrettyDescriptor(instruction->InputAt(0)->GetType())));
+        static_cast<int>(input_index),
+        Primitive::PrettyDescriptor(input->GetType())));
   }
+}
+
+void SSAChecker::VisitIf(HIf* instruction) {
+  VisitInstruction(instruction);
+  HandleBooleanInput(instruction, 0);
+}
+
+void SSAChecker::VisitBooleanNot(HBooleanNot* instruction) {
+  VisitInstruction(instruction);
+  HandleBooleanInput(instruction, 0);
 }
 
 void SSAChecker::VisitCondition(HCondition* op) {
@@ -400,37 +500,23 @@ void SSAChecker::VisitCondition(HCondition* op) {
   }
   HInstruction* lhs = op->InputAt(0);
   HInstruction* rhs = op->InputAt(1);
-  if (lhs->GetType() == Primitive::kPrimNot) {
-    if (!op->IsEqual() && !op->IsNotEqual()) {
+  if (PrimitiveKind(lhs->GetType()) != PrimitiveKind(rhs->GetType())) {
+    AddError(StringPrintf(
+        "Condition %s %d has inputs of different types: %s, and %s.",
+        op->DebugName(), op->GetId(),
+        Primitive::PrettyDescriptor(lhs->GetType()),
+        Primitive::PrettyDescriptor(rhs->GetType())));
+  }
+  if (!op->IsEqual() && !op->IsNotEqual()) {
+    if ((lhs->GetType() == Primitive::kPrimNot)) {
       AddError(StringPrintf(
           "Condition %s %d uses an object as left-hand side input.",
           op->DebugName(), op->GetId()));
-    }
-    if (rhs->IsIntConstant() && rhs->AsIntConstant()->GetValue() != 0) {
-      AddError(StringPrintf(
-          "Condition %s %d compares an object with a non-zero integer: %d.",
-          op->DebugName(), op->GetId(),
-          rhs->AsIntConstant()->GetValue()));
-    }
-  } else if (rhs->GetType() == Primitive::kPrimNot) {
-    if (!op->IsEqual() && !op->IsNotEqual()) {
+    } else if (rhs->GetType() == Primitive::kPrimNot) {
       AddError(StringPrintf(
           "Condition %s %d uses an object as right-hand side input.",
           op->DebugName(), op->GetId()));
     }
-    if (lhs->IsIntConstant() && lhs->AsIntConstant()->GetValue() != 0) {
-      AddError(StringPrintf(
-          "Condition %s %d compares a non-zero integer with an object: %d.",
-          op->DebugName(), op->GetId(),
-          lhs->AsIntConstant()->GetValue()));
-    }
-  } else if (PrimitiveKind(lhs->GetType()) != PrimitiveKind(rhs->GetType())) {
-      AddError(StringPrintf(
-          "Condition %s %d has inputs of different types: "
-          "%s, and %s.",
-          op->DebugName(), op->GetId(),
-          Primitive::PrettyDescriptor(lhs->GetType()),
-          Primitive::PrettyDescriptor(rhs->GetType())));
   }
 }
 
@@ -446,7 +532,7 @@ void SSAChecker::VisitBinaryOperation(HBinaryOperation* op) {
           Primitive::PrettyDescriptor(op->InputAt(1)->GetType())));
     }
   } else {
-    if (PrimitiveKind(op->InputAt(1)->GetType()) != PrimitiveKind(op->InputAt(0)->GetType())) {
+    if (PrimitiveKind(op->InputAt(0)->GetType()) != PrimitiveKind(op->InputAt(1)->GetType())) {
       AddError(StringPrintf(
           "Binary operation %s %d has inputs of different types: "
           "%s, and %s.",
@@ -471,8 +557,19 @@ void SSAChecker::VisitBinaryOperation(HBinaryOperation* op) {
           "from its input type: %s vs %s.",
           op->DebugName(), op->GetId(),
           Primitive::PrettyDescriptor(op->GetType()),
-          Primitive::PrettyDescriptor(op->InputAt(1)->GetType())));
+          Primitive::PrettyDescriptor(op->InputAt(0)->GetType())));
     }
+  }
+}
+
+void SSAChecker::VisitConstant(HConstant* instruction) {
+  HBasicBlock* block = instruction->GetBlock();
+  if (!block->IsEntryBlock()) {
+    AddError(StringPrintf(
+        "%s %d should be in the entry block but is in block %d.",
+        instruction->DebugName(),
+        instruction->GetId(),
+        block->GetBlockId()));
   }
 }
 

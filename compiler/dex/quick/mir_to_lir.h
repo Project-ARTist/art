@@ -29,9 +29,11 @@
 #include "dex/quick/resource_mask.h"
 #include "entrypoints/quick/quick_entrypoints_enum.h"
 #include "invoke_type.h"
+#include "lazy_debug_frame_opcode_writer.h"
 #include "leb128.h"
 #include "safe_map.h"
 #include "utils/array_ref.h"
+#include "utils/dex_cache_arrays_layout.h"
 #include "utils/stack_checks.h"
 
 namespace art {
@@ -131,8 +133,10 @@ namespace art {
 #define MAX_ASSEMBLER_RETRIES 50
 
 class BasicBlock;
+class BitVector;
 struct CallInfo;
 struct CompilationUnit;
+struct CompilerTemp;
 struct InlineMethod;
 class MIR;
 struct LIR;
@@ -140,6 +144,7 @@ struct RegisterInfo;
 class DexFileMethodInliner;
 class MIRGraph;
 class MirMethodLoweringInfo;
+class MirSFieldLoweringInfo;
 
 typedef int (*NextCallInsn)(CompilationUnit*, CallInfo*, int,
                             const MethodReference& target_method,
@@ -383,7 +388,7 @@ class Mir2Lir {
       LIR* DefEnd() { return def_end_; }
       void SetDefEnd(LIR* def_end) { def_end_ = def_end; }
       void ResetDefBody() { def_start_ = def_end_ = nullptr; }
-      // Find member of aliased set matching storage_used; return nullptr if none.
+      // Find member of aliased set matching storage_used; return null if none.
       RegisterInfo* FindMatchingView(uint32_t storage_used) {
         RegisterInfo* res = Master();
         for (; res != nullptr; res = res->GetAliasChain()) {
@@ -490,9 +495,10 @@ class Mir2Lir {
 
     class LIRSlowPath : public ArenaObject<kArenaAllocSlowPaths> {
      public:
-      LIRSlowPath(Mir2Lir* m2l, const DexOffset dexpc, LIR* fromfast,
-                  LIR* cont = nullptr) :
-        m2l_(m2l), cu_(m2l->cu_), current_dex_pc_(dexpc), fromfast_(fromfast), cont_(cont) {
+      LIRSlowPath(Mir2Lir* m2l, LIR* fromfast, LIR* cont = nullptr)
+          : m2l_(m2l), cu_(m2l->cu_),
+            current_dex_pc_(m2l->current_dalvik_offset_), current_mir_(m2l->current_mir_),
+            fromfast_(fromfast), cont_(cont) {
       }
       virtual ~LIRSlowPath() {}
       virtual void Compile() = 0;
@@ -511,6 +517,7 @@ class Mir2Lir {
       Mir2Lir* const m2l_;
       CompilationUnit* const cu_;
       const DexOffset current_dex_pc_;
+      MIR* current_mir_;
       LIR* const fromfast_;
       LIR* const cont_;
     };
@@ -582,21 +589,23 @@ class Mir2Lir {
      * TUNING: If use of these utilities becomes more common on 32-bit builds, it
      * may be worth conditionally-compiling a set of identity functions here.
      */
-    uint32_t WrapPointer(void* pointer) {
+    template <typename T>
+    uint32_t WrapPointer(const T* pointer) {
       uint32_t res = pointer_storage_.size();
       pointer_storage_.push_back(pointer);
       return res;
     }
 
-    void* UnwrapPointer(size_t index) {
-      return pointer_storage_[index];
+    template <typename T>
+    const T* UnwrapPointer(size_t index) {
+      return reinterpret_cast<const T*>(pointer_storage_[index]);
     }
 
     // strdup(), but allocates from the arena.
     char* ArenaStrdup(const char* str) {
       size_t len = strlen(str) + 1;
       char* res = arena_->AllocArray<char>(len, kArenaAllocMisc);
-      if (res != NULL) {
+      if (res != nullptr) {
         strncpy(res, str, len);
       }
       return res;
@@ -625,9 +634,8 @@ class Mir2Lir {
     }
 
     RegisterClass ShortyToRegClass(char shorty_type);
-    RegisterClass LocToRegClass(RegLocation loc);
     int ComputeFrameSize();
-    virtual void Materialize();
+    void Materialize();
     virtual CompiledMethod* GetCompiledMethod();
     void MarkSafepointPC(LIR* inst);
     void MarkSafepointPCAfter(LIR* after);
@@ -642,7 +650,7 @@ class Mir2Lir {
     void DumpPromotionMap();
     void CodegenDump();
     LIR* RawLIR(DexOffset dalvik_offset, int opcode, int op0 = 0, int op1 = 0,
-                int op2 = 0, int op3 = 0, int op4 = 0, LIR* target = NULL);
+                int op2 = 0, int op3 = 0, int op4 = 0, LIR* target = nullptr);
     LIR* NewLIR0(int opcode);
     LIR* NewLIR1(int opcode, int dest);
     LIR* NewLIR2(int opcode, int dest, int src1);
@@ -670,6 +678,7 @@ class Mir2Lir {
     bool VerifyCatchEntries();
     void CreateMappingTables();
     void CreateNativeGcMap();
+    void CreateNativeGcMapWithoutRegisterPromotion();
     int AssignLiteralOffset(CodeOffset offset);
     int AssignSwitchTablesOffset(CodeOffset offset);
     int AssignFillArrayDataOffset(CodeOffset offset);
@@ -767,9 +776,10 @@ class Mir2Lir {
      */
     virtual RegLocation EvalLoc(RegLocation loc, int reg_class, bool update);
 
-    void CountRefs(RefCounts* core_counts, RefCounts* fp_counts, size_t num_regs);
+    virtual void AnalyzeMIR(RefCounts* core_counts, MIR* mir, uint32_t weight);
+    virtual void CountRefs(RefCounts* core_counts, RefCounts* fp_counts, size_t num_regs);
     void DumpCounts(const RefCounts* arr, int size, const char* msg);
-    void DoPromotion();
+    virtual void DoPromotion();
     int VRegOffset(int v_reg);
     int SRegOffset(int s_reg);
     RegLocation GetReturnWide(RegisterClass reg_class);
@@ -826,7 +836,7 @@ class Mir2Lir {
     void GenNewInstance(uint32_t type_idx, RegLocation rl_dest);
     void GenThrow(RegLocation rl_src);
     void GenInstanceof(uint32_t type_idx, RegLocation rl_dest, RegLocation rl_src);
-    void GenCheckCast(uint32_t insn_idx, uint32_t type_idx, RegLocation rl_src);
+    void GenCheckCast(int opt_flags, uint32_t insn_idx, uint32_t type_idx, RegLocation rl_src);
     void GenLong3Addr(OpKind first_op, OpKind second_op, RegLocation rl_dest,
                       RegLocation rl_src1, RegLocation rl_src2);
     virtual void GenShiftOpLong(Instruction::Code opcode, RegLocation rl_dest,
@@ -835,7 +845,8 @@ class Mir2Lir {
                           RegLocation rl_src, int lit);
     virtual void GenArithOpLong(Instruction::Code opcode, RegLocation rl_dest,
                                 RegLocation rl_src1, RegLocation rl_src2, int flags);
-    void GenConversionCall(QuickEntrypointEnum trampoline, RegLocation rl_dest, RegLocation rl_src);
+    void GenConversionCall(QuickEntrypointEnum trampoline, RegLocation rl_dest, RegLocation rl_src,
+                           RegisterClass return_reg_class);
     void GenSuspendTest(int opt_flags);
     void GenSuspendTestAndBranch(int opt_flags, LIR* target);
 
@@ -886,6 +897,10 @@ class Mir2Lir {
                                                             RegLocation arg0, RegLocation arg1,
                                                             RegLocation arg2,
                                                             bool safepoint_pc);
+    void CallRuntimeHelperRegLocationRegLocationRegLocationRegLocation(
+        QuickEntrypointEnum trampoline, RegLocation arg0, RegLocation arg1,
+        RegLocation arg2, RegLocation arg3, bool safepoint_pc);
+
     void GenInvoke(CallInfo* info);
     void GenInvokeNoInline(CallInfo* info);
     virtual NextCallInsn GetNextSDCallInsn() = 0;
@@ -926,7 +941,11 @@ class Mir2Lir {
 
     bool GenInlinedReferenceGetReferent(CallInfo* info);
     virtual bool GenInlinedCharAt(CallInfo* info);
+    bool GenInlinedStringGetCharsNoCheck(CallInfo* info);
     bool GenInlinedStringIsEmptyOrLength(CallInfo* info, bool is_empty);
+    bool GenInlinedStringFactoryNewStringFromBytes(CallInfo* info);
+    bool GenInlinedStringFactoryNewStringFromChars(CallInfo* info);
+    bool GenInlinedStringFactoryNewStringFromString(CallInfo* info);
     virtual bool GenInlinedReverseBits(CallInfo* info, OpSize size);
     bool GenInlinedReverseBytes(CallInfo* info, OpSize size);
     virtual bool GenInlinedAbsInt(CallInfo* info);
@@ -943,13 +962,14 @@ class Mir2Lir {
     virtual bool GenInlinedIndexOf(CallInfo* info, bool zero_based);
     bool GenInlinedStringCompareTo(CallInfo* info);
     virtual bool GenInlinedCurrentThread(CallInfo* info);
-    bool GenInlinedUnsafeGet(CallInfo* info, bool is_long, bool is_volatile);
+    bool GenInlinedUnsafeGet(CallInfo* info, bool is_long, bool is_object, bool is_volatile);
     bool GenInlinedUnsafePut(CallInfo* info, bool is_long, bool is_object,
                              bool is_volatile, bool is_ordered);
 
     // Shared by all targets - implemented in gen_loadstore.cc.
     RegLocation LoadCurrMethod();
     void LoadCurrMethodDirect(RegStorage r_tgt);
+    RegStorage LoadCurrMethodWithHint(RegStorage r_hint);
     virtual LIR* LoadConstant(RegStorage r_dest, int value);
     // Natural word size.
     LIR* LoadWordDisp(RegStorage r_base, int displacement, RegStorage r_dest) {
@@ -1087,6 +1107,18 @@ class Mir2Lir {
     virtual void LoadClassType(const DexFile& dex_file, uint32_t type_idx,
                                SpecialTargetRegister symbolic_reg);
 
+    // TODO: Support PC-relative dex cache array loads on all platforms and
+    // replace CanUseOpPcRelDexCacheArrayLoad() with dex_cache_arrays_layout_.Valid().
+    virtual bool CanUseOpPcRelDexCacheArrayLoad() const;
+
+    /*
+     * @brief Load an element of one of the dex cache arrays.
+     * @param dex_file the dex file associated with the target dex cache.
+     * @param offset the offset of the element in the fixed dex cache arrays' layout.
+     * @param r_dest the register where to load the element.
+     */
+    virtual void OpPcRelDexCacheArrayLoad(const DexFile* dex_file, int offset, RegStorage r_dest);
+
     // Routines that work for the generic case, but may be overriden by target.
     /*
      * @brief Compare memory to immediate, and branch if condition true.
@@ -1096,8 +1128,8 @@ class Mir2Lir {
      * @param base_reg The register holding the base address.
      * @param offset The offset from the base.
      * @param check_value The immediate to compare to.
-     * @param target branch target (or nullptr)
-     * @param compare output for getting LIR for comparison (or nullptr)
+     * @param target branch target (or null)
+     * @param compare output for getting LIR for comparison (or null)
      * @returns The branch instruction that was generated.
      */
     virtual LIR* OpCmpMemImmBranch(ConditionCode cond, RegStorage temp_reg, RegStorage base_reg,
@@ -1379,7 +1411,7 @@ class Mir2Lir {
     virtual LIR* OpIT(ConditionCode cond, const char* guide) = 0;
     virtual void OpEndIT(LIR* it) = 0;
     virtual LIR* OpMem(OpKind op, RegStorage r_base, int disp) = 0;
-    virtual LIR* OpPcRelLoad(RegStorage reg, LIR* target) = 0;
+    virtual void OpPcRelLoad(RegStorage reg, LIR* target) = 0;
     virtual LIR* OpReg(OpKind op, RegStorage r_dest_src) = 0;
     virtual void OpRegCopy(RegStorage r_dest, RegStorage r_src) = 0;
     virtual LIR* OpRegCopyNoInsert(RegStorage r_dest, RegStorage r_src) = 0;
@@ -1435,32 +1467,9 @@ class Mir2Lir {
       return InexpensiveConstantInt(value);
     }
 
-    /**
-     * @brief Whether division by the given divisor can be converted to multiply by its reciprocal.
-     * @param divisor A constant divisor bits of float type.
-     * @return Returns true iff, x/divisor == x*(1.0f/divisor), for every float x.
-     */
-    bool CanDivideByReciprocalMultiplyFloat(int32_t divisor) {
-      // True, if float value significand bits are 0.
-      return ((divisor & 0x7fffff) == 0);
-    }
-
-    /**
-     * @brief Whether division by the given divisor can be converted to multiply by its reciprocal.
-     * @param divisor A constant divisor bits of double type.
-     * @return Returns true iff, x/divisor == x*(1.0/divisor), for every double x.
-     */
-    bool CanDivideByReciprocalMultiplyDouble(int64_t divisor) {
-      // True, if double value significand bits are 0.
-      return ((divisor & ((UINT64_C(1) << 52) - 1)) == 0);
-    }
-
     // May be optimized by targets.
     virtual void GenMonitorEnter(int opt_flags, RegLocation rl_src);
     virtual void GenMonitorExit(int opt_flags, RegLocation rl_src);
-
-    // Temp workaround
-    void Workaround7250540(RegLocation rl_dest, RegStorage zero_reg);
 
     virtual LIR* InvokeTrampoline(OpKind op, RegStorage r_tgt, QuickEntrypointEnum trampoline) = 0;
 
@@ -1487,6 +1496,12 @@ class Mir2Lir {
     virtual int NumReservableVectorRegisters(bool long_or_fp ATTRIBUTE_UNUSED) {
       return 0;
     }
+
+    /**
+     * @brief Buffer of DWARF's Call Frame Information opcodes.
+     * @details It is used by debuggers and other tools to unwind the call stack.
+     */
+    dwarf::LazyDebugFrameOpCodeWriter& cfi() { return cfi_; }
 
   protected:
     Mir2Lir(CompilationUnit* cu, MIRGraph* mir_graph, ArenaAllocator* arena);
@@ -1553,11 +1568,6 @@ class Mir2Lir {
                                     bool can_assume_type_is_in_dex_cache,
                                     uint32_t type_idx, RegLocation rl_dest,
                                     RegLocation rl_src);
-    /*
-     * @brief Generate the eh_frame FDE information if possible.
-     * @returns pointer to vector containg FDE information, or NULL.
-     */
-    virtual std::vector<uint8_t>* ReturnFrameDescriptionEntry();
 
     /**
      * @brief Used to insert marker that can be used to associate MIR with LIR.
@@ -1593,7 +1603,6 @@ class Mir2Lir {
      */
     virtual bool GenSpecialCase(BasicBlock* bb, MIR* mir, const InlineMethod& special);
 
-  protected:
     void ClobberBody(RegisterInfo* p);
     void SetCurrentDexPc(DexOffset dexpc) {
       current_dalvik_offset_ = dexpc;
@@ -1666,6 +1675,21 @@ class Mir2Lir {
      */
     bool GenSpecialIdentity(MIR* mir, const InlineMethod& special);
 
+    /**
+     * @brief Generate code to check if result is null and, if it is, call helper to load it.
+     * @param r_result the result register.
+     * @param trampoline the helper to call in slow path.
+     * @param imm the immediate passed to the helper.
+     */
+    void GenIfNullUseHelperImm(RegStorage r_result, QuickEntrypointEnum trampoline, int imm);
+
+    /**
+     * @brief Generate code to retrieve Class* for another type to be used by SGET/SPUT.
+     * @param field_info information about the field to be accessed.
+     * @param opt_flags the optimization flags of the MIR.
+     */
+    RegStorage GenGetOtherTypeForSgetSput(const MirSFieldLoweringInfo& field_info, int opt_flags);
+
     void AddDivZeroCheckSlowPath(LIR* branch);
 
     // Copy arg0 and arg1 to kArg0 and kArg1 safely, possibly using
@@ -1729,6 +1753,23 @@ class Mir2Lir {
     // See CheckRegLocationImpl.
     void CheckRegLocation(RegLocation rl) const;
 
+    // Find the references at the beginning of a basic block (for generating GC maps).
+    void InitReferenceVRegs(BasicBlock* bb, BitVector* references);
+
+    // Update references from prev_mir to mir in the same BB. If mir is null or before
+    // prev_mir, report failure (return false) and update references to the end of the BB.
+    bool UpdateReferenceVRegsLocal(MIR* mir, MIR* prev_mir, BitVector* references);
+
+    // Update references from prev_mir to mir.
+    void UpdateReferenceVRegs(MIR* mir, MIR* prev_mir, BitVector* references);
+
+    /**
+     * Returns true if the frame spills the given core register.
+     */
+    bool CoreSpillMaskContains(int reg) {
+      return (core_spill_mask_ & (1u << reg)) != 0;
+    }
+
   public:
     // TODO: add accessors for these.
     LIR* literal_list_;                        // Constants.
@@ -1745,8 +1786,7 @@ class Mir2Lir {
     ArenaVector<FillArrayData*> fill_array_data_;
     ArenaVector<RegisterInfo*> tempreg_info_;
     ArenaVector<RegisterInfo*> reginfo_map_;
-    ArenaVector<void*> pointer_storage_;
-    CodeOffset current_code_offset_;    // Working byte offset of machine instructons.
+    ArenaVector<const void*> pointer_storage_;
     CodeOffset data_offset_;            // starting offset of literal pool.
     size_t total_size_;                   // header + code size.
     LIR* block_label_list_;
@@ -1761,6 +1801,7 @@ class Mir2Lir {
      * The low-level LIR creation utilites will pull it from here.  Rework this.
      */
     DexOffset current_dalvik_offset_;
+    MIR* current_mir_;
     size_t estimated_native_code_size_;     // Just an estimate; used to reserve code_buffer_ size.
     std::unique_ptr<RegisterPool> reg_pool_;
     /*
@@ -1799,7 +1840,26 @@ class Mir2Lir {
     // to deduplicate the masks.
     ResourceMaskCache mask_cache_;
 
-  protected:
+    // Record the MIR that generated a given safepoint (null for prologue safepoints).
+    ArenaVector<std::pair<LIR*, MIR*>> safepoints_;
+
+    // The layout of the cu_->dex_file's dex cache arrays for PC-relative addressing.
+    const DexCacheArraysLayout dex_cache_arrays_layout_;
+
+    // For architectures that don't have true PC-relative addressing, we can promote
+    // a PC of an instruction (or another PC-relative address such as a pointer to
+    // the dex cache arrays if supported) to a register. This is indicated to the
+    // register promotion by allocating a backend temp.
+    CompilerTemp* pc_rel_temp_;
+
+    // For architectures that don't have true PC-relative addressing (see pc_rel_temp_
+    // above) and also have a limited range of offsets for loads, it's be useful to
+    // know the minimum offset into the dex cache arrays, so we calculate that as well
+    // if pc_rel_temp_ isn't null.
+    uint32_t dex_cache_arrays_min_offset_;
+
+    dwarf::LazyDebugFrameOpCodeWriter cfi_;
+
     // ABI support
     class ShortyArg {
       public:
@@ -1859,6 +1919,8 @@ class Mir2Lir {
 
   private:
     static bool SizeMatchesTypeForEntrypoint(OpSize size, Primitive::Type type);
+
+    friend class QuickCFITest;
 };  // Class Mir2Lir
 
 }  // namespace art

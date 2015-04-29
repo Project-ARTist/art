@@ -16,15 +16,15 @@
 
 #include "builder.h"
 
+#include "art_field-inl.h"
 #include "base/logging.h"
 #include "class_linker.h"
-#include "dex_file.h"
+#include "dex/verified_method.h"
 #include "dex_file-inl.h"
-#include "dex_instruction.h"
 #include "dex_instruction-inl.h"
+#include "dex/verified_method.h"
 #include "driver/compiler_driver-inl.h"
-#include "mirror/art_field.h"
-#include "mirror/art_field-inl.h"
+#include "driver/compiler_options.h"
 #include "mirror/class_loader.h"
 #include "mirror/dex_cache.h"
 #include "nodes.h"
@@ -215,7 +215,7 @@ void HGraphBuilder::If_21t(const Instruction& instruction, uint32_t dex_pc) {
   DCHECK(fallthrough_target != nullptr);
   PotentiallyAddSuspendCheck(branch_target, dex_pc);
   HInstruction* value = LoadLocal(instruction.VRegA(), Primitive::kPrimInt);
-  T* comparison = new (arena_) T(value, GetIntConstant(0));
+  T* comparison = new (arena_) T(value, graph_->GetIntConstant(0));
   current_block_->AddInstruction(comparison);
   HInstruction* ifinst = new (arena_) HIf(comparison);
   current_block_->AddInstruction(ifinst);
@@ -230,8 +230,7 @@ void HGraphBuilder::MaybeRecordStat(MethodCompilationStat compilation_stat) {
   }
 }
 
-bool HGraphBuilder::SkipCompilation(size_t number_of_dex_instructions,
-                                    size_t number_of_blocks ATTRIBUTE_UNUSED,
+bool HGraphBuilder::SkipCompilation(const DexFile::CodeItem& code_item,
                                     size_t number_of_branches) {
   const CompilerOptions& compiler_options = compiler_driver_->GetCompilerOptions();
   CompilerOptions::CompilerFilter compiler_filter = compiler_options.GetCompilerFilter();
@@ -239,19 +238,20 @@ bool HGraphBuilder::SkipCompilation(size_t number_of_dex_instructions,
     return false;
   }
 
-  if (compiler_options.IsHugeMethod(number_of_dex_instructions)) {
+  if (compiler_options.IsHugeMethod(code_item.insns_size_in_code_units_)) {
     VLOG(compiler) << "Skip compilation of huge method "
                    << PrettyMethod(dex_compilation_unit_->GetDexMethodIndex(), *dex_file_)
-                   << ": " << number_of_dex_instructions << " dex instructions";
+                   << ": " << code_item.insns_size_in_code_units_ << " code units";
     MaybeRecordStat(MethodCompilationStat::kNotCompiledHugeMethod);
     return true;
   }
 
   // If it's large and contains no branches, it's likely to be machine generated initialization.
-  if (compiler_options.IsLargeMethod(number_of_dex_instructions) && (number_of_branches == 0)) {
+  if (compiler_options.IsLargeMethod(code_item.insns_size_in_code_units_)
+      && (number_of_branches == 0)) {
     VLOG(compiler) << "Skip compilation of large method with no branch "
                    << PrettyMethod(dex_compilation_unit_->GetDexMethodIndex(), *dex_file_)
-                   << ": " << number_of_dex_instructions << " dex instructions";
+                   << ": " << code_item.insns_size_in_code_units_ << " code units";
     MaybeRecordStat(MethodCompilationStat::kNotCompiledLargeMethodNoBranches);
     return true;
   }
@@ -278,18 +278,14 @@ bool HGraphBuilder::BuildGraph(const DexFile::CodeItem& code_item) {
 
   // Compute the number of dex instructions, blocks, and branches. We will
   // check these values against limits given to the compiler.
-  size_t number_of_dex_instructions = 0;
-  size_t number_of_blocks = 0;
   size_t number_of_branches = 0;
 
   // To avoid splitting blocks, we compute ahead of time the instructions that
   // start a new block, and create these blocks.
-  ComputeBranchTargets(
-      code_ptr, code_end, &number_of_dex_instructions, &number_of_blocks, &number_of_branches);
+  ComputeBranchTargets(code_ptr, code_end, &number_of_branches);
 
   // Note that the compiler driver is null when unit testing.
-  if ((compiler_driver_ != nullptr)
-      && SkipCompilation(number_of_dex_instructions, number_of_blocks, number_of_branches)) {
+  if ((compiler_driver_ != nullptr) && SkipCompilation(code_item, number_of_branches)) {
     return false;
   }
 
@@ -355,8 +351,6 @@ void HGraphBuilder::MaybeUpdateCurrentBlock(size_t index) {
 
 void HGraphBuilder::ComputeBranchTargets(const uint16_t* code_ptr,
                                          const uint16_t* code_end,
-                                         size_t* number_of_dex_instructions,
-                                         size_t* number_of_blocks,
                                          size_t* number_of_branches) {
   branch_targets_.SetSize(code_end - code_ptr);
 
@@ -369,7 +363,6 @@ void HGraphBuilder::ComputeBranchTargets(const uint16_t* code_ptr,
   // the locations these instructions branch to.
   uint32_t dex_pc = 0;
   while (code_ptr < code_end) {
-    (*number_of_dex_instructions)++;
     const Instruction& instruction = *Instruction::At(code_ptr);
     if (instruction.IsBranch()) {
       (*number_of_branches)++;
@@ -378,14 +371,12 @@ void HGraphBuilder::ComputeBranchTargets(const uint16_t* code_ptr,
       if (FindBlockStartingAt(target) == nullptr) {
         block = new (arena_) HBasicBlock(graph_, target);
         branch_targets_.Put(target, block);
-        (*number_of_blocks)++;
       }
       dex_pc += instruction.SizeInCodeUnits();
       code_ptr += instruction.SizeInCodeUnits();
       if ((code_ptr < code_end) && (FindBlockStartingAt(dex_pc) == nullptr)) {
         block = new (arena_) HBasicBlock(graph_, dex_pc);
         branch_targets_.Put(dex_pc, block);
-        (*number_of_blocks)++;
       }
     } else if (instruction.IsSwitch()) {
       SwitchTable table(instruction, dex_pc, instruction.Opcode() == Instruction::SPARSE_SWITCH);
@@ -403,14 +394,12 @@ void HGraphBuilder::ComputeBranchTargets(const uint16_t* code_ptr,
         if (FindBlockStartingAt(target) == nullptr) {
           block = new (arena_) HBasicBlock(graph_, target);
           branch_targets_.Put(target, block);
-          (*number_of_blocks)++;
         }
 
         // The next case gets its own block.
         if (i < num_entries) {
           block = new (arena_) HBasicBlock(graph_, target);
           branch_targets_.Put(table.GetDexPcForIndex(i), block);
-          (*number_of_blocks)++;
         }
       }
 
@@ -420,7 +409,6 @@ void HGraphBuilder::ComputeBranchTargets(const uint16_t* code_ptr,
       if ((code_ptr < code_end) && (FindBlockStartingAt(dex_pc) == nullptr)) {
         block = new (arena_) HBasicBlock(graph_, dex_pc);
         branch_targets_.Put(dex_pc, block);
-        (*number_of_blocks)++;
       }
     } else {
       code_ptr += instruction.SizeInCodeUnits();
@@ -515,7 +503,7 @@ void HGraphBuilder::Binop_12x(const Instruction& instruction,
 template<typename T>
 void HGraphBuilder::Binop_22s(const Instruction& instruction, bool reverse) {
   HInstruction* first = LoadLocal(instruction.VRegB(), Primitive::kPrimInt);
-  HInstruction* second = GetIntConstant(instruction.VRegC_22s());
+  HInstruction* second = graph_->GetIntConstant(instruction.VRegC_22s());
   if (reverse) {
     std::swap(first, second);
   }
@@ -526,7 +514,7 @@ void HGraphBuilder::Binop_22s(const Instruction& instruction, bool reverse) {
 template<typename T>
 void HGraphBuilder::Binop_22b(const Instruction& instruction, bool reverse) {
   HInstruction* first = LoadLocal(instruction.VRegB(), Primitive::kPrimInt);
-  HInstruction* second = GetIntConstant(instruction.VRegC_22b());
+  HInstruction* second = graph_->GetIntConstant(instruction.VRegC_22b());
   if (reverse) {
     std::swap(first, second);
   }
@@ -534,8 +522,24 @@ void HGraphBuilder::Binop_22b(const Instruction& instruction, bool reverse) {
   UpdateLocal(instruction.VRegA(), current_block_->GetLastInstruction());
 }
 
+static bool RequiresConstructorBarrier(const DexCompilationUnit* cu, const CompilerDriver& driver) {
+  // dex compilation unit is null only when unit testing.
+  if (cu == nullptr) {
+    return false;
+  }
+
+  Thread* self = Thread::Current();
+  return cu->IsConstructor()
+      && driver.RequiresConstructorBarrier(self, cu->GetDexFile(), cu->GetClassDefIndex());
+}
+
 void HGraphBuilder::BuildReturn(const Instruction& instruction, Primitive::Type type) {
   if (type == Primitive::kPrimVoid) {
+    // Note that we might insert redundant barriers when inlining `super` calls.
+    // TODO: add a data flow analysis to get rid of duplicate barriers.
+    if (RequiresConstructorBarrier(dex_compilation_unit_, *compiler_driver_)) {
+      current_block_->AddInstruction(new (arena_) HMemoryBarrier(kStoreStore));
+    }
     current_block_->AddInstruction(new (arena_) HReturnVoid());
   } else {
     HInstruction* value = LoadLocal(instruction.VRegA(), type);
@@ -585,7 +589,7 @@ bool HGraphBuilder::BuildInvoke(const Instruction& instruction,
   const char* descriptor = dex_file_->StringDataByIdx(proto_id.shorty_idx_);
   Primitive::Type return_type = Primitive::GetType(descriptor[0]);
   bool is_instance_call = invoke_type != kStatic;
-  const size_t number_of_arguments = strlen(descriptor) - (is_instance_call ? 0 : 1);
+  size_t number_of_arguments = strlen(descriptor) - (is_instance_call ? 0 : 1);
 
   MethodReference target_method(dex_file_, method_idx);
   uintptr_t direct_code;
@@ -603,7 +607,25 @@ bool HGraphBuilder::BuildInvoke(const Instruction& instruction,
   }
   DCHECK(optimized_invoke_type != kSuper);
 
+  // By default, consider that the called method implicitly requires
+  // an initialization check of its declaring method.
+  HInvokeStaticOrDirect::ClinitCheckRequirement clinit_check_requirement =
+      HInvokeStaticOrDirect::ClinitCheckRequirement::kImplicit;
+  // Potential class initialization check, in the case of a static method call.
+  HClinitCheck* clinit_check = nullptr;
+  // Replace calls to String.<init> with StringFactory.
+  int32_t string_init_offset = 0;
+  bool is_string_init = compiler_driver_->IsStringInit(method_idx, dex_file_, &string_init_offset);
+  if (is_string_init) {
+    return_type = Primitive::kPrimNot;
+    is_instance_call = false;
+    number_of_arguments--;
+    invoke_type = kStatic;
+    optimized_invoke_type = kStatic;
+  }
+
   HInvoke* invoke = nullptr;
+
   if (optimized_invoke_type == kVirtual) {
     invoke = new (arena_) HInvokeVirtual(
         arena_, number_of_arguments, return_type, dex_pc, method_idx, table_index);
@@ -616,11 +638,78 @@ bool HGraphBuilder::BuildInvoke(const Instruction& instruction,
     DCHECK((optimized_invoke_type == invoke_type) || (optimized_invoke_type != kDirect)
            || compiler_driver_->GetCompilerOptions().GetCompilePic());
     bool is_recursive =
-        (target_method.dex_method_index == outer_compilation_unit_->GetDexMethodIndex());
-    DCHECK(!is_recursive || (target_method.dex_file == outer_compilation_unit_->GetDexFile()));
+        (target_method.dex_method_index == dex_compilation_unit_->GetDexMethodIndex());
+    DCHECK(!is_recursive || (target_method.dex_file == dex_compilation_unit_->GetDexFile()));
+
+    if (optimized_invoke_type == kStatic) {
+      ScopedObjectAccess soa(Thread::Current());
+      StackHandleScope<4> hs(soa.Self());
+      Handle<mirror::DexCache> dex_cache(hs.NewHandle(
+          dex_compilation_unit_->GetClassLinker()->FindDexCache(
+              *dex_compilation_unit_->GetDexFile())));
+      Handle<mirror::ClassLoader> class_loader(hs.NewHandle(
+          soa.Decode<mirror::ClassLoader*>(dex_compilation_unit_->GetClassLoader())));
+      mirror::ArtMethod* resolved_method = compiler_driver_->ResolveMethod(
+          soa, dex_cache, class_loader, dex_compilation_unit_, method_idx,
+          optimized_invoke_type);
+
+      if (resolved_method == nullptr) {
+        MaybeRecordStat(MethodCompilationStat::kNotCompiledUnresolvedMethod);
+        return false;
+      }
+
+      const DexFile& outer_dex_file = *outer_compilation_unit_->GetDexFile();
+      Handle<mirror::DexCache> outer_dex_cache(hs.NewHandle(
+          outer_compilation_unit_->GetClassLinker()->FindDexCache(outer_dex_file)));
+      Handle<mirror::Class> referrer_class(hs.NewHandle(GetOutermostCompilingClass()));
+
+      // The index at which the method's class is stored in the DexCache's type array.
+      uint32_t storage_index = DexFile::kDexNoIndex;
+      bool is_referrer_class = (resolved_method->GetDeclaringClass() == referrer_class.Get());
+      if (is_referrer_class) {
+        storage_index = referrer_class->GetDexTypeIndex();
+      } else if (outer_dex_cache.Get() == dex_cache.Get()) {
+        // Get `storage_index` from IsClassOfStaticMethodAvailableToReferrer.
+        compiler_driver_->IsClassOfStaticMethodAvailableToReferrer(outer_dex_cache.Get(),
+                                                                   referrer_class.Get(),
+                                                                   resolved_method,
+                                                                   method_idx,
+                                                                   &storage_index);
+      }
+
+      if (referrer_class.Get()->IsSubClass(resolved_method->GetDeclaringClass())) {
+        // If the referrer class is the declaring class or a subclass
+        // of the declaring class, no class initialization is needed
+        // before the static method call.
+        clinit_check_requirement = HInvokeStaticOrDirect::ClinitCheckRequirement::kNone;
+      } else if (storage_index != DexFile::kDexNoIndex) {
+        // If the method's class type index is available, check
+        // whether we should add an explicit class initialization
+        // check for its declaring class before the static method call.
+
+        // TODO: find out why this check is needed.
+        bool is_in_dex_cache = compiler_driver_->CanAssumeTypeIsPresentInDexCache(
+            *outer_compilation_unit_->GetDexFile(), storage_index);
+        bool is_initialized =
+            resolved_method->GetDeclaringClass()->IsInitialized() && is_in_dex_cache;
+
+        if (is_initialized) {
+          clinit_check_requirement = HInvokeStaticOrDirect::ClinitCheckRequirement::kNone;
+        } else {
+          clinit_check_requirement = HInvokeStaticOrDirect::ClinitCheckRequirement::kExplicit;
+          HLoadClass* load_class =
+              new (arena_) HLoadClass(storage_index, is_referrer_class, dex_pc);
+          current_block_->AddInstruction(load_class);
+          clinit_check = new (arena_) HClinitCheck(load_class, dex_pc);
+          current_block_->AddInstruction(clinit_check);
+        }
+      }
+    }
+
     invoke = new (arena_) HInvokeStaticOrDirect(
         arena_, number_of_arguments, return_type, dex_pc, target_method.dex_method_index,
-        is_recursive, optimized_invoke_type);
+        is_recursive, string_init_offset, invoke_type, optimized_invoke_type,
+        clinit_check_requirement);
   }
 
   size_t start_index = 0;
@@ -636,6 +725,9 @@ bool HGraphBuilder::BuildInvoke(const Instruction& instruction,
 
   uint32_t descriptor_index = 1;
   uint32_t argument_index = start_index;
+  if (is_string_init) {
+    start_index = 1;
+  }
   for (size_t i = start_index; i < number_of_vreg_arguments; i++, argument_index++) {
     Primitive::Type type = Primitive::GetType(descriptor[descriptor_index++]);
     bool is_wide = (type == Primitive::kPrimLong) || (type == Primitive::kPrimDouble);
@@ -652,10 +744,38 @@ bool HGraphBuilder::BuildInvoke(const Instruction& instruction,
       i++;
     }
   }
-
   DCHECK_EQ(argument_index, number_of_arguments);
+
+  if (clinit_check_requirement == HInvokeStaticOrDirect::ClinitCheckRequirement::kExplicit) {
+    // Add the class initialization check as last input of `invoke`.
+    DCHECK(clinit_check != nullptr);
+    invoke->SetArgumentAt(argument_index, clinit_check);
+  }
+
   current_block_->AddInstruction(invoke);
   latest_result_ = invoke;
+
+  // Add move-result for StringFactory method.
+  if (is_string_init) {
+    uint32_t orig_this_reg = is_range ? register_index : args[0];
+    const VerifiedMethod* verified_method =
+        compiler_driver_->GetVerifiedMethod(dex_file_, dex_compilation_unit_->GetDexMethodIndex());
+    if (verified_method == nullptr) {
+      LOG(WARNING) << "No verified method for method calling String.<init>: "
+                   << PrettyMethod(dex_compilation_unit_->GetDexMethodIndex(), *dex_file_);
+      return false;
+    }
+    const SafeMap<uint32_t, std::set<uint32_t>>& string_init_map =
+        verified_method->GetStringInitPcRegMap();
+    auto map_it = string_init_map.find(dex_pc);
+    if (map_it != string_init_map.end()) {
+      std::set<uint32_t> reg_set = map_it->second;
+      for (auto set_it = reg_set.begin(); set_it != reg_set.end(); ++set_it) {
+        UpdateLocal(*set_it, invoke);
+      }
+    }
+    UpdateLocal(orig_this_reg, invoke);
+  }
   return true;
 }
 
@@ -667,11 +787,10 @@ bool HGraphBuilder::BuildInstanceFieldAccess(const Instruction& instruction,
   uint16_t field_index = instruction.VRegC_22c();
 
   ScopedObjectAccess soa(Thread::Current());
-  StackHandleScope<1> hs(soa.Self());
-  Handle<mirror::ArtField> resolved_field(hs.NewHandle(
-      compiler_driver_->ComputeInstanceFieldInfo(field_index, dex_compilation_unit_, is_put, soa)));
+  ArtField* resolved_field =
+      compiler_driver_->ComputeInstanceFieldInfo(field_index, dex_compilation_unit_, is_put, soa);
 
-  if (resolved_field.Get() == nullptr) {
+  if (resolved_field == nullptr) {
     MaybeRecordStat(MethodCompilationStat::kNotCompiledUnresolvedField);
     return false;
   }
@@ -704,6 +823,33 @@ bool HGraphBuilder::BuildInstanceFieldAccess(const Instruction& instruction,
   return true;
 }
 
+mirror::Class* HGraphBuilder::GetOutermostCompilingClass() const {
+  ScopedObjectAccess soa(Thread::Current());
+  StackHandleScope<2> hs(soa.Self());
+  const DexFile& outer_dex_file = *outer_compilation_unit_->GetDexFile();
+  Handle<mirror::ClassLoader> class_loader(hs.NewHandle(
+      soa.Decode<mirror::ClassLoader*>(dex_compilation_unit_->GetClassLoader())));
+  Handle<mirror::DexCache> outer_dex_cache(hs.NewHandle(
+      outer_compilation_unit_->GetClassLinker()->FindDexCache(outer_dex_file)));
+
+  return compiler_driver_->ResolveCompilingMethodsClass(
+      soa, outer_dex_cache, class_loader, outer_compilation_unit_);
+}
+
+bool HGraphBuilder::IsOutermostCompilingClass(uint16_t type_index) const {
+  ScopedObjectAccess soa(Thread::Current());
+  StackHandleScope<4> hs(soa.Self());
+  Handle<mirror::DexCache> dex_cache(hs.NewHandle(
+      dex_compilation_unit_->GetClassLinker()->FindDexCache(*dex_compilation_unit_->GetDexFile())));
+  Handle<mirror::ClassLoader> class_loader(hs.NewHandle(
+      soa.Decode<mirror::ClassLoader*>(dex_compilation_unit_->GetClassLoader())));
+  Handle<mirror::Class> cls(hs.NewHandle(compiler_driver_->ResolveClass(
+      soa, dex_cache, class_loader, type_index, dex_compilation_unit_)));
+  Handle<mirror::Class> compiling_class(hs.NewHandle(GetOutermostCompilingClass()));
+
+  return compiling_class.Get() == cls.Get();
+}
+
 bool HGraphBuilder::BuildStaticFieldAccess(const Instruction& instruction,
                                            uint32_t dex_pc,
                                            bool is_put) {
@@ -716,31 +862,44 @@ bool HGraphBuilder::BuildStaticFieldAccess(const Instruction& instruction,
       dex_compilation_unit_->GetClassLinker()->FindDexCache(*dex_compilation_unit_->GetDexFile())));
   Handle<mirror::ClassLoader> class_loader(hs.NewHandle(
       soa.Decode<mirror::ClassLoader*>(dex_compilation_unit_->GetClassLoader())));
-  Handle<mirror::ArtField> resolved_field(hs.NewHandle(compiler_driver_->ResolveField(
-      soa, dex_cache, class_loader, dex_compilation_unit_, field_index, true)));
+  ArtField* resolved_field = compiler_driver_->ResolveField(
+      soa, dex_cache, class_loader, dex_compilation_unit_, field_index, true);
 
-  if (resolved_field.Get() == nullptr) {
+  if (resolved_field == nullptr) {
     MaybeRecordStat(MethodCompilationStat::kNotCompiledUnresolvedField);
     return false;
   }
 
-  Handle<mirror::Class> referrer_class(hs.NewHandle(compiler_driver_->ResolveCompilingMethodsClass(
-      soa, dex_cache, class_loader, outer_compilation_unit_)));
+  const DexFile& outer_dex_file = *outer_compilation_unit_->GetDexFile();
+  Handle<mirror::DexCache> outer_dex_cache(hs.NewHandle(
+      outer_compilation_unit_->GetClassLinker()->FindDexCache(outer_dex_file)));
+  Handle<mirror::Class> referrer_class(hs.NewHandle(GetOutermostCompilingClass()));
 
   // The index at which the field's class is stored in the DexCache's type array.
   uint32_t storage_index;
-  std::pair<bool, bool> pair = compiler_driver_->IsFastStaticField(
-      dex_cache.Get(), referrer_class.Get(), resolved_field.Get(), field_index, &storage_index);
-  bool can_easily_access = is_put ? pair.second : pair.first;
-  if (!can_easily_access) {
+  bool is_referrer_class = (referrer_class.Get() == resolved_field->GetDeclaringClass());
+  if (is_referrer_class) {
+    storage_index = referrer_class->GetDexTypeIndex();
+  } else if (outer_dex_cache.Get() != dex_cache.Get()) {
+    // The compiler driver cannot currently understand multiple dex caches involved. Just bailout.
     return false;
+  } else {
+    std::pair<bool, bool> pair = compiler_driver_->IsFastStaticField(
+        outer_dex_cache.Get(),
+        referrer_class.Get(),
+        resolved_field,
+        field_index,
+        &storage_index);
+    bool can_easily_access = is_put ? pair.second : pair.first;
+    if (!can_easily_access) {
+      return false;
+    }
   }
 
   // TODO: find out why this check is needed.
   bool is_in_dex_cache = compiler_driver_->CanAssumeTypeIsPresentInDexCache(
       *outer_compilation_unit_->GetDexFile(), storage_index);
   bool is_initialized = resolved_field->GetDeclaringClass()->IsInitialized() && is_in_dex_cache;
-  bool is_referrer_class = (referrer_class.Get() == resolved_field->GetDeclaringClass());
 
   HLoadClass* constant = new (arena_) HLoadClass(storage_index, is_referrer_class, dex_pc);
   current_block_->AddInstruction(constant);
@@ -783,9 +942,9 @@ void HGraphBuilder::BuildCheckedDivRem(uint16_t out_vreg,
   HInstruction* second = nullptr;
   if (second_is_constant) {
     if (type == Primitive::kPrimInt) {
-      second = GetIntConstant(second_vreg_or_constant);
+      second = graph_->GetIntConstant(second_vreg_or_constant);
     } else {
-      second = GetLongConstant(second_vreg_or_constant);
+      second = graph_->GetLongConstant(second_vreg_or_constant);
     }
   } else {
     second = LoadLocal(second_vreg_or_constant, type);
@@ -840,7 +999,7 @@ void HGraphBuilder::BuildArrayAccess(const Instruction& instruction,
     current_block_->AddInstruction(new (arena_) HArrayGet(object, index, anticipated_type));
     UpdateLocal(source_or_dest_reg, current_block_->GetLastInstruction());
   }
-  graph_->SetHasArrayAccesses(true);
+  graph_->SetHasBoundsChecks(true);
 }
 
 void HGraphBuilder::BuildFilledNewArray(uint32_t dex_pc,
@@ -849,7 +1008,7 @@ void HGraphBuilder::BuildFilledNewArray(uint32_t dex_pc,
                                         bool is_range,
                                         uint32_t* args,
                                         uint32_t register_index) {
-  HInstruction* length = GetIntConstant(number_of_vreg_arguments);
+  HInstruction* length = graph_->GetIntConstant(number_of_vreg_arguments);
   QuickEntrypointEnum entrypoint = NeedsAccessCheck(type_index)
       ? kQuickAllocArrayWithAccessCheck
       : kQuickAllocArray;
@@ -869,7 +1028,7 @@ void HGraphBuilder::BuildFilledNewArray(uint32_t dex_pc,
   temps.Add(object);
   for (size_t i = 0; i < number_of_vreg_arguments; ++i) {
     HInstruction* value = LoadLocal(is_range ? register_index + i : args[i], type);
-    HInstruction* index = GetIntConstant(i);
+    HInstruction* index = graph_->GetIntConstant(i);
     current_block_->AddInstruction(
         new (arena_) HArraySet(object, index, value, type, dex_pc));
   }
@@ -883,8 +1042,8 @@ void HGraphBuilder::BuildFillArrayData(HInstruction* object,
                                        Primitive::Type anticipated_type,
                                        uint32_t dex_pc) {
   for (uint32_t i = 0; i < element_count; ++i) {
-    HInstruction* index = GetIntConstant(i);
-    HInstruction* value = GetIntConstant(data[i]);
+    HInstruction* index = graph_->GetIntConstant(i);
+    HInstruction* value = graph_->GetIntConstant(data[i]);
     current_block_->AddInstruction(new (arena_) HArraySet(
       object, index, value, anticipated_type, dex_pc));
   }
@@ -908,7 +1067,7 @@ void HGraphBuilder::BuildFillArrayData(const Instruction& instruction, uint32_t 
 
   // Implementation of this DEX instruction seems to be that the bounds check is
   // done before doing any stores.
-  HInstruction* last_index = GetIntConstant(payload->element_count - 1);
+  HInstruction* last_index = graph_->GetIntConstant(payload->element_count - 1);
   current_block_->AddInstruction(new (arena_) HBoundsCheck(last_index, length, dex_pc));
 
   switch (payload->element_width) {
@@ -942,6 +1101,7 @@ void HGraphBuilder::BuildFillArrayData(const Instruction& instruction, uint32_t 
     default:
       LOG(FATAL) << "Unknown element width for " << payload->element_width;
   }
+  graph_->SetHasBoundsChecks(true);
 }
 
 void HGraphBuilder::BuildFillWideArrayData(HInstruction* object,
@@ -949,8 +1109,8 @@ void HGraphBuilder::BuildFillWideArrayData(HInstruction* object,
                                            uint32_t element_count,
                                            uint32_t dex_pc) {
   for (uint32_t i = 0; i < element_count; ++i) {
-    HInstruction* index = GetIntConstant(i);
-    HInstruction* value = GetLongConstant(data[i]);
+    HInstruction* index = graph_->GetIntConstant(i);
+    HInstruction* value = graph_->GetLongConstant(data[i]);
     current_block_->AddInstruction(new (arena_) HArraySet(
       object, index, value, Primitive::kPrimLong, dex_pc));
   }
@@ -966,7 +1126,7 @@ bool HGraphBuilder::BuildTypeCheck(const Instruction& instruction,
   // `CanAccessTypeWithoutChecks` will tell whether the method being
   // built is trying to access its own class, so that the generated
   // code can optimize for this case. However, the optimization does not
-  // work for inlining, so we use `IsCompilingClass` instead.
+  // work for inlining, so we use `IsOutermostCompilingClass` instead.
   bool dont_use_is_referrers_class;
   bool can_access = compiler_driver_->CanAccessTypeWithoutChecks(
       dex_compilation_unit_->GetDexMethodIndex(), *dex_file_, type_index,
@@ -976,7 +1136,8 @@ bool HGraphBuilder::BuildTypeCheck(const Instruction& instruction,
     return false;
   }
   HInstruction* object = LoadLocal(reference, Primitive::kPrimNot);
-  HLoadClass* cls = new (arena_) HLoadClass(type_index, IsCompilingClass(type_index), dex_pc);
+  HLoadClass* cls = new (arena_) HLoadClass(
+      type_index, IsOutermostCompilingClass(type_index), dex_pc);
   current_block_->AddInstruction(cls);
   // The class needs a temporary before being used by the type check.
   Temporaries temps(graph_);
@@ -1024,8 +1185,6 @@ void HGraphBuilder::BuildSparseSwitch(const Instruction& instruction, uint32_t d
   HInstruction* value = LoadLocal(instruction.VRegA(), Primitive::kPrimInt);
 
   uint16_t num_entries = table.GetNumEntries();
-  // There should be at least one entry here.
-  DCHECK_GT(num_entries, 0U);
 
   for (size_t i = 0; i < num_entries; i++) {
     BuildSwitchCaseHelper(instruction, i, i == static_cast<size_t>(num_entries) - 1, table, value,
@@ -1042,7 +1201,7 @@ void HGraphBuilder::BuildSwitchCaseHelper(const Instruction& instruction, size_t
   PotentiallyAddSuspendCheck(case_target, dex_pc);
 
   // The current case's value.
-  HInstruction* this_case_value = GetIntConstant(case_value_int);
+  HInstruction* this_case_value = graph_->GetIntConstant(case_value_int);
 
   // Compare value and this_case_value.
   HEqual* comparison = new (arena_) HEqual(value, this_case_value);
@@ -1100,28 +1259,28 @@ bool HGraphBuilder::AnalyzeDexInstruction(const Instruction& instruction, uint32
   switch (instruction.Opcode()) {
     case Instruction::CONST_4: {
       int32_t register_index = instruction.VRegA();
-      HIntConstant* constant = GetIntConstant(instruction.VRegB_11n());
+      HIntConstant* constant = graph_->GetIntConstant(instruction.VRegB_11n());
       UpdateLocal(register_index, constant);
       break;
     }
 
     case Instruction::CONST_16: {
       int32_t register_index = instruction.VRegA();
-      HIntConstant* constant = GetIntConstant(instruction.VRegB_21s());
+      HIntConstant* constant = graph_->GetIntConstant(instruction.VRegB_21s());
       UpdateLocal(register_index, constant);
       break;
     }
 
     case Instruction::CONST: {
       int32_t register_index = instruction.VRegA();
-      HIntConstant* constant = GetIntConstant(instruction.VRegB_31i());
+      HIntConstant* constant = graph_->GetIntConstant(instruction.VRegB_31i());
       UpdateLocal(register_index, constant);
       break;
     }
 
     case Instruction::CONST_HIGH16: {
       int32_t register_index = instruction.VRegA();
-      HIntConstant* constant = GetIntConstant(instruction.VRegB_21h() << 16);
+      HIntConstant* constant = graph_->GetIntConstant(instruction.VRegB_21h() << 16);
       UpdateLocal(register_index, constant);
       break;
     }
@@ -1132,7 +1291,7 @@ bool HGraphBuilder::AnalyzeDexInstruction(const Instruction& instruction, uint32
       int64_t value = instruction.VRegB_21s();
       value <<= 48;
       value >>= 48;
-      HLongConstant* constant = GetLongConstant(value);
+      HLongConstant* constant = graph_->GetLongConstant(value);
       UpdateLocal(register_index, constant);
       break;
     }
@@ -1143,14 +1302,14 @@ bool HGraphBuilder::AnalyzeDexInstruction(const Instruction& instruction, uint32
       int64_t value = instruction.VRegB_31i();
       value <<= 32;
       value >>= 32;
-      HLongConstant* constant = GetLongConstant(value);
+      HLongConstant* constant = graph_->GetLongConstant(value);
       UpdateLocal(register_index, constant);
       break;
     }
 
     case Instruction::CONST_WIDE: {
       int32_t register_index = instruction.VRegA();
-      HLongConstant* constant = GetLongConstant(instruction.VRegB_51l());
+      HLongConstant* constant = graph_->GetLongConstant(instruction.VRegB_51l());
       UpdateLocal(register_index, constant);
       break;
     }
@@ -1158,7 +1317,7 @@ bool HGraphBuilder::AnalyzeDexInstruction(const Instruction& instruction, uint32
     case Instruction::CONST_WIDE_HIGH16: {
       int32_t register_index = instruction.VRegA();
       int64_t value = static_cast<int64_t>(instruction.VRegB_21h()) << 48;
-      HLongConstant* constant = GetLongConstant(value);
+      HLongConstant* constant = graph_->GetLongConstant(value);
       UpdateLocal(register_index, constant);
       break;
     }
@@ -1793,12 +1952,19 @@ bool HGraphBuilder::AnalyzeDexInstruction(const Instruction& instruction, uint32
 
     case Instruction::NEW_INSTANCE: {
       uint16_t type_index = instruction.VRegB_21c();
-      QuickEntrypointEnum entrypoint = NeedsAccessCheck(type_index)
-          ? kQuickAllocObjectWithAccessCheck
-          : kQuickAllocObject;
+      if (compiler_driver_->IsStringTypeIndex(type_index, dex_file_)) {
+        // Turn new-instance of string into a const 0.
+        int32_t register_index = instruction.VRegA();
+        HNullConstant* constant = graph_->GetNullConstant();
+        UpdateLocal(register_index, constant);
+      } else {
+        QuickEntrypointEnum entrypoint = NeedsAccessCheck(type_index)
+            ? kQuickAllocObjectWithAccessCheck
+            : kQuickAllocObject;
 
-      current_block_->AddInstruction(new (arena_) HNewInstance(dex_pc, type_index, entrypoint));
-      UpdateLocal(instruction.VRegA(), current_block_->GetLastInstruction());
+        current_block_->AddInstruction(new (arena_) HNewInstance(dex_pc, type_index, entrypoint));
+        UpdateLocal(instruction.VRegA(), current_block_->GetLastInstruction());
+      }
       break;
     }
 
@@ -1973,7 +2139,7 @@ bool HGraphBuilder::AnalyzeDexInstruction(const Instruction& instruction, uint32
       // `CanAccessTypeWithoutChecks` will tell whether the method being
       // built is trying to access its own class, so that the generated
       // code can optimize for this case. However, the optimization does not
-      // work for inlining, so we use `IsCompilingClass` instead.
+      // work for inlining, so we use `IsOutermostCompilingClass` instead.
       bool can_access = compiler_driver_->CanAccessTypeWithoutChecks(
           dex_compilation_unit_->GetDexMethodIndex(), *dex_file_, type_index,
           &type_known_final, &type_known_abstract, &dont_use_is_referrers_class);
@@ -1982,7 +2148,7 @@ bool HGraphBuilder::AnalyzeDexInstruction(const Instruction& instruction, uint32
         return false;
       }
       current_block_->AddInstruction(
-          new (arena_) HLoadClass(type_index, IsCompilingClass(type_index), dex_pc));
+          new (arena_) HLoadClass(type_index, IsOutermostCompilingClass(type_index), dex_pc));
       UpdateLocal(instruction.VRegA_21c(), current_block_->GetLastInstruction());
       break;
     }
@@ -2059,42 +2225,6 @@ bool HGraphBuilder::AnalyzeDexInstruction(const Instruction& instruction, uint32
   }
   return true;
 }  // NOLINT(readability/fn_size)
-
-HIntConstant* HGraphBuilder::GetIntConstant0() {
-  if (constant0_ != nullptr) {
-    return constant0_;
-  }
-  constant0_ = new(arena_) HIntConstant(0);
-  entry_block_->AddInstruction(constant0_);
-  return constant0_;
-}
-
-HIntConstant* HGraphBuilder::GetIntConstant1() {
-  if (constant1_ != nullptr) {
-    return constant1_;
-  }
-  constant1_ = new(arena_) HIntConstant(1);
-  entry_block_->AddInstruction(constant1_);
-  return constant1_;
-}
-
-HIntConstant* HGraphBuilder::GetIntConstant(int32_t constant) {
-  switch (constant) {
-    case 0: return GetIntConstant0();
-    case 1: return GetIntConstant1();
-    default: {
-      HIntConstant* instruction = new (arena_) HIntConstant(constant);
-      entry_block_->AddInstruction(instruction);
-      return instruction;
-    }
-  }
-}
-
-HLongConstant* HGraphBuilder::GetLongConstant(int64_t constant) {
-  HLongConstant* instruction = new (arena_) HLongConstant(constant);
-  entry_block_->AddInstruction(instruction);
-  return instruction;
-}
 
 HLocal* HGraphBuilder::GetLocalAt(int register_index) const {
   return locals_.Get(register_index);

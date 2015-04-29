@@ -125,6 +125,14 @@ class MANAGED ArtMethod FINAL : public Object {
     return (GetAccessFlags() & kAccNative) != 0;
   }
 
+  bool ShouldNotInline() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    return (GetAccessFlags() & kAccDontInline) != 0;
+  }
+
+  void SetShouldNotInline() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SetAccessFlags(GetAccessFlags() | kAccDontInline);
+  }
+
   bool IsFastNative() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     uint32_t mask = kAccFastNative | kAccNative;
     return (GetAccessFlags() & mask) == mask;
@@ -175,6 +183,10 @@ class MANAGED ArtMethod FINAL : public Object {
     SetField32<false>(OFFSET_OF_OBJECT_MEMBER(ArtMethod, method_index_), new_method_index);
   }
 
+  static MemberOffset DexMethodIndexOffset() {
+    return OFFSET_OF_OBJECT_MEMBER(ArtMethod, dex_method_index_);
+  }
+
   static MemberOffset MethodIndexOffset() {
     return OFFSET_OF_OBJECT_MEMBER(ArtMethod, method_index_);
   }
@@ -206,6 +218,8 @@ class MANAGED ArtMethod FINAL : public Object {
     return OFFSET_OF_OBJECT_MEMBER(ArtMethod, dex_cache_resolved_types_);
   }
 
+  ALWAYS_INLINE ObjectArray<ArtMethod>* GetDexCacheResolvedMethods()
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   ALWAYS_INLINE ArtMethod* GetDexCacheResolvedMethod(uint16_t method_idx)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   ALWAYS_INLINE void SetDexCacheResolvedMethod(uint16_t method_idx, ArtMethod* new_method)
@@ -327,10 +341,10 @@ class MANAGED ArtMethod FINAL : public Object {
     return reinterpret_cast<const void*>(code);
   }
 
-  // Actual entry point pointer to compiled oat code or nullptr.
+  // Actual entry point pointer to compiled oat code or null.
   const void* GetQuickOatEntryPoint(size_t pointer_size)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  // Actual pointer to compiled oat code or nullptr.
+  // Actual pointer to compiled oat code or null.
   const void* GetQuickOatCodePointer(size_t pointer_size)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     return EntryPointToCodePointer(GetQuickOatEntryPoint(pointer_size));
@@ -348,7 +362,6 @@ class MANAGED ArtMethod FINAL : public Object {
   const uint8_t* GetVmapTable(const void* code_pointer, size_t pointer_size)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  StackMap GetStackMap(uint32_t native_pc_offset) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   CodeInfo GetOptimizedCodeInfo() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Callers should wrap the uint8_t* in a GcMap instance for convenient access.
@@ -427,10 +440,6 @@ class MANAGED ArtMethod FINAL : public Object {
         EntryPointFromJniOffset(pointer_size), entrypoint, pointer_size);
   }
 
-  static MemberOffset GetMethodIndexOffset() {
-    return OFFSET_OF_OBJECT_MEMBER(ArtMethod, method_index_);
-  }
-
   // Is this a CalleSaveMethod or ResolutionMethod and therefore doesn't adhere to normal
   // conventions for a method of managed code. Returns false for Proxy methods.
   bool IsRuntimeMethod() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
@@ -481,7 +490,7 @@ class MANAGED ArtMethod FINAL : public Object {
 
   static void ResetClass();
 
-  static void VisitRoots(RootCallback* callback, void* arg)
+  static void VisitRoots(RootVisitor* visitor)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   const DexFile* GetDexFile() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
@@ -531,6 +540,10 @@ class MANAGED ArtMethod FINAL : public Object {
   mirror::DexCache* GetDexCache() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   ALWAYS_INLINE ArtMethod* GetInterfaceMethodIfProxy() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  // May cause thread suspension due to class resolution.
+  bool EqualParameters(Handle<mirror::ObjectArray<mirror::Class>> params)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   static size_t SizeWithoutPointerFields(size_t pointer_size) {
     size_t total = sizeof(ArtMethod) - sizeof(PtrSizedFields);
@@ -596,9 +609,6 @@ class MANAGED ArtMethod FINAL : public Object {
 
  private:
   ALWAYS_INLINE void CheckObjectSizeEqualsMirrorSize() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
-  ALWAYS_INLINE ObjectArray<ArtMethod>* GetDexCacheResolvedMethods()
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   ALWAYS_INLINE ObjectArray<Class>* GetDexCacheResolvedTypes()
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);

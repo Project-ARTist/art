@@ -19,11 +19,14 @@
 #include "codegen_x86.h"
 
 #include "base/logging.h"
+#include "dex/quick/dex_file_to_method_inliner_map.h"
 #include "dex/quick/mir_to_lir-inl.h"
 #include "driver/compiler_driver.h"
+#include "driver/compiler_options.h"
 #include "gc/accounting/card_table.h"
 #include "mirror/art_method.h"
 #include "mirror/object_array-inl.h"
+#include "utils/dex_cache_arrays_layout-inl.h"
 #include "x86_lir.h"
 
 namespace art {
@@ -78,7 +81,7 @@ void X86Mir2Lir::GenLargePackedSwitch(MIR* mir, DexOffset table_offset, RegLocat
 
   // Bounds check - if < 0 or >= size continue following switch
   OpRegImm(kOpCmp, keyReg, size - 1);
-  LIR* branch_over = OpCondBranch(kCondHi, NULL);
+  LIR* branch_over = OpCondBranch(kCondHi, nullptr);
 
   RegStorage addr_for_jump;
   if (cu_->target64) {
@@ -95,29 +98,23 @@ void X86Mir2Lir::GenLargePackedSwitch(MIR* mir, DexOffset table_offset, RegLocat
 
     // Add the offset from the table to the table base.
     OpRegReg(kOpAdd, addr_for_jump, table_base);
+    tab_rec->anchor = nullptr;  // Unused for x86-64.
   } else {
-    // Materialize a pointer to the switch table.
-    RegStorage start_of_method_reg;
-    if (base_of_code_ != nullptr) {
-      // We can use the saved value.
-      RegLocation rl_method = mir_graph_->GetRegLocation(base_of_code_->s_reg_low);
-      rl_method = LoadValue(rl_method, kCoreReg);
-      start_of_method_reg = rl_method.reg;
-      store_method_addr_used_ = true;
-    } else {
-      start_of_method_reg = AllocTempRef();
-      NewLIR1(kX86StartOfMethod, start_of_method_reg.GetReg());
-    }
+    // Get the PC to a register and get the anchor.
+    LIR* anchor;
+    RegStorage r_pc = GetPcAndAnchor(&anchor);
+
     // Load the displacement from the switch table.
     addr_for_jump = AllocTemp();
-    NewLIR5(kX86PcRelLoadRA, addr_for_jump.GetReg(), start_of_method_reg.GetReg(), keyReg.GetReg(),
+    NewLIR5(kX86PcRelLoadRA, addr_for_jump.GetReg(), r_pc.GetReg(), keyReg.GetReg(),
             2, WrapPointer(tab_rec));
-    // Add displacement to start of method.
-    OpRegReg(kOpAdd, addr_for_jump, start_of_method_reg);
+    // Add displacement and r_pc to get the address.
+    OpRegReg(kOpAdd, addr_for_jump, r_pc);
+    tab_rec->anchor = anchor;
   }
 
   // ..and go!
-  tab_rec->anchor = NewLIR1(kX86JmpR, addr_for_jump.GetReg());
+  NewLIR1(kX86JmpR, addr_for_jump.GetReg());
 
   /* branch_over target here */
   LIR* target = NewLIR0(kPseudoTargetLabel);
@@ -146,6 +143,10 @@ void X86Mir2Lir::UnconditionallyMarkGCCard(RegStorage tgt_addr_reg) {
   StoreBaseIndexed(reg_card_base, reg_card_no, reg_card_base, 0, kUnsignedByte);
   FreeTemp(reg_card_base);
   FreeTemp(reg_card_no);
+}
+
+static dwarf::Reg DwarfCoreReg(bool is_x86_64, int num) {
+  return is_x86_64 ? dwarf::Reg::X86_64Core(num) : dwarf::Reg::X86Core(num);
 }
 
 void X86Mir2Lir::GenEntrySequence(RegLocation* ArgLocs, RegLocation rl_method) {
@@ -182,10 +183,10 @@ void X86Mir2Lir::GenEntrySequence(RegLocation* ArgLocs, RegLocation rl_method) {
   }
 
   /* Build frame, return address already on stack */
-  stack_decrement_ = OpRegImm(kOpSub, rs_rSP, frame_size_ -
-                              GetInstructionSetPointerSize(cu_->instruction_set));
+  cfi_.SetCurrentCFAOffset(GetInstructionSetPointerSize(cu_->instruction_set));
+  OpRegImm(kOpSub, rs_rSP, frame_size_ - GetInstructionSetPointerSize(cu_->instruction_set));
+  cfi_.DefCFAOffset(frame_size_);
 
-  NewLIR0(kPseudoMethodEntry);
   /* Spill core callee saves */
   SpillCoreRegs();
   SpillFPRegs();
@@ -193,7 +194,7 @@ void X86Mir2Lir::GenEntrySequence(RegLocation* ArgLocs, RegLocation rl_method) {
     class StackOverflowSlowPath : public LIRSlowPath {
      public:
       StackOverflowSlowPath(Mir2Lir* m2l, LIR* branch, size_t sp_displace)
-          : LIRSlowPath(m2l, m2l->GetCurrentDexPc(), branch, nullptr), sp_displace_(sp_displace) {
+          : LIRSlowPath(m2l, branch), sp_displace_(sp_displace) {
       }
       void Compile() OVERRIDE {
         m2l_->ResetRegPool();
@@ -201,10 +202,12 @@ void X86Mir2Lir::GenEntrySequence(RegLocation* ArgLocs, RegLocation rl_method) {
         GenerateTargetLabel(kPseudoThrowTarget);
         const RegStorage local_rs_rSP = cu_->target64 ? rs_rX86_SP_64 : rs_rX86_SP_32;
         m2l_->OpRegImm(kOpAdd, local_rs_rSP, sp_displace_);
+        m2l_->cfi().AdjustCFAOffset(-sp_displace_);
         m2l_->ClobberCallerSave();
         // Assumes codegen and target are in thumb2 mode.
         m2l_->CallHelper(RegStorage::InvalidReg(), kQuickThrowStackOverflow,
                          false /* MarkSafepointPC */, false /* UseLink */);
+        m2l_->cfi().AdjustCFAOffset(sp_displace_);
       }
 
      private:
@@ -235,14 +238,12 @@ void X86Mir2Lir::GenEntrySequence(RegLocation* ArgLocs, RegLocation rl_method) {
 
   FlushIns(ArgLocs, rl_method);
 
-  if (base_of_code_ != nullptr) {
-    RegStorage method_start = TargetPtrReg(kArg0);
-    // We have been asked to save the address of the method start for later use.
-    setup_method_address_[0] = NewLIR1(kX86StartOfMethod, method_start.GetReg());
-    int displacement = SRegOffset(base_of_code_->s_reg_low);
-    // Native pointer - must be natural word size.
-    setup_method_address_[1] = StoreBaseDisp(rs_rSP, displacement, method_start,
-                                             cu_->target64 ? k64 : k32, kNotVolatile);
+  // We can promote the PC of an anchor for PC-relative addressing to a register
+  // if it's used at least twice. Without investigating where we should lazily
+  // load the reference, we conveniently load it after flushing inputs.
+  if (pc_rel_base_reg_.Valid()) {
+    DCHECK(!cu_->target64);
+    setup_pc_rel_base_reg_ = OpLoadPc(pc_rel_base_reg_);
   }
 
   FreeTemp(arg0);
@@ -251,6 +252,7 @@ void X86Mir2Lir::GenEntrySequence(RegLocation* ArgLocs, RegLocation rl_method) {
 }
 
 void X86Mir2Lir::GenExitSequence() {
+  cfi_.RememberState();
   /*
    * In the exit path, rX86_RET0/rX86_RET1 are live - make sure they aren't
    * allocated by the register utilities as temps.
@@ -258,14 +260,18 @@ void X86Mir2Lir::GenExitSequence() {
   LockTemp(rs_rX86_RET0);
   LockTemp(rs_rX86_RET1);
 
-  NewLIR0(kPseudoMethodExit);
   UnSpillCoreRegs();
   UnSpillFPRegs();
   /* Remove frame except for return address */
   const RegStorage rs_rSP = cu_->target64 ? rs_rX86_SP_64 : rs_rX86_SP_32;
-  stack_increment_ = OpRegImm(kOpAdd, rs_rSP,
-                              frame_size_ - GetInstructionSetPointerSize(cu_->instruction_set));
+  int adjust = frame_size_ - GetInstructionSetPointerSize(cu_->instruction_set);
+  OpRegImm(kOpAdd, rs_rSP, adjust);
+  cfi_.AdjustCFAOffset(-adjust);
+  // There is only the return PC on the stack now.
   NewLIR0(kX86Ret);
+  // The CFI should be restored for any code that follows the exit block.
+  cfi_.RestoreState();
+  cfi_.DefCFAOffset(frame_size_);
 }
 
 void X86Mir2Lir::GenSpecialExitSequence() {
@@ -276,6 +282,8 @@ void X86Mir2Lir::GenSpecialEntryForSuspend() {
   // Keep 16-byte stack alignment, there's already the return address, so
   //   - for 32-bit push EAX, i.e. ArtMethod*, ESI, EDI,
   //   - for 64-bit push RAX, i.e. ArtMethod*.
+  const int kRegSize = cu_->target64 ? 8 : 4;
+  cfi_.SetCurrentCFAOffset(kRegSize);  // Return address.
   if (!cu_->target64) {
     DCHECK(!IsTemp(rs_rSI));
     DCHECK(!IsTemp(rs_rDI));
@@ -293,17 +301,29 @@ void X86Mir2Lir::GenSpecialEntryForSuspend() {
   fp_vmap_table_.clear();
   if (!cu_->target64) {
     NewLIR1(kX86Push32R, rs_rDI.GetReg());
+    cfi_.AdjustCFAOffset(kRegSize);
+    cfi_.RelOffset(DwarfCoreReg(cu_->target64, rs_rDI.GetRegNum()), 0);
     NewLIR1(kX86Push32R, rs_rSI.GetReg());
+    cfi_.AdjustCFAOffset(kRegSize);
+    cfi_.RelOffset(DwarfCoreReg(cu_->target64, rs_rSI.GetRegNum()), 0);
   }
   NewLIR1(kX86Push32R, TargetReg(kArg0, kRef).GetReg());  // ArtMethod*
+  cfi_.AdjustCFAOffset(kRegSize);
+  // Do not generate CFI for scratch register.
 }
 
 void X86Mir2Lir::GenSpecialExitForSuspend() {
+  const int kRegSize = cu_->target64 ? 8 : 4;
   // Pop the frame. (ArtMethod* no longer needed but restore it anyway.)
   NewLIR1(kX86Pop32R, TargetReg(kArg0, kRef).GetReg());  // ArtMethod*
+  cfi_.AdjustCFAOffset(-kRegSize);
   if (!cu_->target64) {
     NewLIR1(kX86Pop32R, rs_rSI.GetReg());
+    cfi_.AdjustCFAOffset(-kRegSize);
+    cfi_.Restore(DwarfCoreReg(cu_->target64, rs_rSI.GetRegNum()));
     NewLIR1(kX86Pop32R, rs_rDI.GetReg());
+    cfi_.AdjustCFAOffset(-kRegSize);
+    cfi_.Restore(DwarfCoreReg(cu_->target64, rs_rDI.GetRegNum()));
   }
 }
 
@@ -321,14 +341,23 @@ void X86Mir2Lir::GenImplicitNullCheck(RegStorage reg, int opt_flags) {
  * Bit of a hack here - in the absence of a real scheduling pass,
  * emit the next instruction in static & direct invoke sequences.
  */
-static int X86NextSDCallInsn(CompilationUnit* cu, CallInfo* info,
-                             int state, const MethodReference& target_method,
-                             uint32_t,
-                             uintptr_t direct_code, uintptr_t direct_method,
-                             InvokeType type) {
-  UNUSED(info, direct_code);
-  Mir2Lir* cg = static_cast<Mir2Lir*>(cu->cg.get());
-  if (direct_method != 0) {
+int X86Mir2Lir::X86NextSDCallInsn(CompilationUnit* cu, CallInfo* info,
+                                  int state, const MethodReference& target_method,
+                                  uint32_t,
+                                  uintptr_t direct_code ATTRIBUTE_UNUSED, uintptr_t direct_method,
+                                  InvokeType type) {
+  X86Mir2Lir* cg = static_cast<X86Mir2Lir*>(cu->cg.get());
+  if (info->string_init_offset != 0) {
+    RegStorage arg0_ref = cg->TargetReg(kArg0, kRef);
+    switch (state) {
+    case 0: {  // Grab target method* from thread pointer
+      cg->NewLIR2(kX86Mov32RT, arg0_ref.GetReg(), info->string_init_offset);
+      break;
+    }
+    default:
+      return -1;
+    }
+  } else if (direct_method != 0) {
     switch (state) {
     case 0:  // Get the current Method* [sets kArg0]
       if (direct_method != static_cast<uintptr_t>(-1)) {
@@ -344,6 +373,17 @@ static int X86NextSDCallInsn(CompilationUnit* cu, CallInfo* info,
       break;
     default:
       return -1;
+    }
+  } else if (cg->CanUseOpPcRelDexCacheArrayLoad()) {
+    switch (state) {
+      case 0: {
+        CHECK_EQ(cu->dex_file, target_method.dex_file);
+        size_t offset = cg->dex_cache_arrays_layout_.MethodOffset(target_method.dex_method_index);
+        cg->OpPcRelDexCacheArrayLoad(cu->dex_file, offset, cg->TargetReg(kArg0, kRef));
+        break;
+      }
+      default:
+        return -1;
     }
   } else {
     RegStorage arg0_ref = cg->TargetReg(kArg0, kRef);

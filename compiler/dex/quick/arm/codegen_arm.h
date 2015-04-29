@@ -82,6 +82,9 @@ class ArmMir2Lir FINAL : public Mir2Lir {
     /// @copydoc Mir2Lir::UnconditionallyMarkGCCard(RegStorage)
     void UnconditionallyMarkGCCard(RegStorage tgt_addr_reg) OVERRIDE;
 
+    bool CanUseOpPcRelDexCacheArrayLoad() const OVERRIDE;
+    void OpPcRelDexCacheArrayLoad(const DexFile* dex_file, int offset, RegStorage r_dest) OVERRIDE;
+
     // Required for target - register utilities.
     RegStorage TargetReg(SpecialTargetRegister reg) OVERRIDE;
     RegStorage TargetReg(SpecialTargetRegister reg, WideKind wide_kind) OVERRIDE {
@@ -200,7 +203,7 @@ class ArmMir2Lir FINAL : public Mir2Lir {
     void UpdateIT(LIR* it, const char* new_guide);
     void OpEndIT(LIR* it);
     LIR* OpMem(OpKind op, RegStorage r_base, int disp);
-    LIR* OpPcRelLoad(RegStorage reg, LIR* target);
+    void OpPcRelLoad(RegStorage reg, LIR* target);
     LIR* OpReg(OpKind op, RegStorage r_dest_src);
     void OpRegCopy(RegStorage r_dest, RegStorage r_src);
     LIR* OpRegCopyNoInsert(RegStorage r_dest, RegStorage r_src);
@@ -257,6 +260,9 @@ class ArmMir2Lir FINAL : public Mir2Lir {
      */
     LIR* GenCallInsn(const MirMethodLoweringInfo& method_info) OVERRIDE;
 
+    void CountRefs(RefCounts* core_counts, RefCounts* fp_counts, size_t num_regs) OVERRIDE;
+    void DoPromotion() OVERRIDE;
+
     /*
      * @brief Handle ARM specific literals.
      */
@@ -300,6 +306,13 @@ class ArmMir2Lir FINAL : public Mir2Lir {
 
     ArenaVector<LIR*> call_method_insns_;
 
+    // Instructions needing patching with PC relative code addresses.
+    ArenaVector<LIR*> dex_cache_access_insns_;
+
+    // Register with a reference to the dex cache arrays at dex_cache_arrays_min_offset_,
+    // if promoted.
+    RegStorage dex_cache_arrays_base_reg_;
+
     /**
      * @brief Given float register pair, returns Solo64 float register.
      * @param reg #RegStorage containing a float register pair (e.g. @c s2 and @c s3).
@@ -329,6 +342,14 @@ class ArmMir2Lir FINAL : public Mir2Lir {
     }
 
     int GenDalvikArgsBulkCopy(CallInfo* info, int first, int count) OVERRIDE;
+
+    static int ArmNextSDCallInsn(CompilationUnit* cu, CallInfo* info ATTRIBUTE_UNUSED,
+                                 int state, const MethodReference& target_method,
+                                 uint32_t unused_idx ATTRIBUTE_UNUSED,
+                                 uintptr_t direct_code, uintptr_t direct_method,
+                                 InvokeType type);
+
+    void OpPcRelDexCacheArrayAddr(const DexFile* dex_file, int offset, RegStorage r_dest);
 };
 
 }  // namespace art

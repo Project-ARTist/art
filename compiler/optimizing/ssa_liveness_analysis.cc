@@ -69,10 +69,10 @@ void SsaLivenessAnalysis::LinearizeGraph() {
   //      current reverse post order in the graph, but it would require making
   //      order queries to a GrowableArray, which is not the best data structure
   //      for it.
-  GrowableArray<uint32_t> forward_predecessors(graph_.GetArena(), graph_.GetBlocks().Size());
-  forward_predecessors.SetSize(graph_.GetBlocks().Size());
-  for (size_t i = 0, e = graph_.GetBlocks().Size(); i < e; ++i) {
-    HBasicBlock* block = graph_.GetBlocks().Get(i);
+  GrowableArray<uint32_t> forward_predecessors(graph_->GetArena(), graph_->GetBlocks().Size());
+  forward_predecessors.SetSize(graph_->GetBlocks().Size());
+  for (HReversePostOrderIterator it(*graph_); !it.Done(); it.Advance()) {
+    HBasicBlock* block = it.Current();
     size_t number_of_forward_predecessors = block->GetPredecessors().Size();
     if (block->IsLoopHeader()) {
       // We rely on having simplified the CFG.
@@ -86,11 +86,11 @@ void SsaLivenessAnalysis::LinearizeGraph() {
   //      iterate over the successors. When all non-back edge predecessors of a
   //      successor block are visited, the successor block is added in the worklist
   //      following an order that satisfies the requirements to build our linear graph.
-  GrowableArray<HBasicBlock*> worklist(graph_.GetArena(), 1);
-  worklist.Add(graph_.GetEntryBlock());
+  GrowableArray<HBasicBlock*> worklist(graph_->GetArena(), 1);
+  worklist.Add(graph_->GetEntryBlock());
   do {
     HBasicBlock* current = worklist.Pop();
-    linear_order_.Add(current);
+    graph_->linear_order_.Add(current);
     for (size_t i = 0, e = current->GetSuccessors().Size(); i < e; ++i) {
       HBasicBlock* successor = current->GetSuccessors().Get(i);
       int block_id = successor->GetBlockId();
@@ -115,7 +115,7 @@ void SsaLivenessAnalysis::NumberInstructions() {
   // to differentiate between the start and end of an instruction. Adding 2 to
   // the lifetime position for each instruction ensures the start of an
   // instruction is different than the end of the previous instruction.
-  for (HLinearOrderIterator it(*this); !it.Done(); it.Advance()) {
+  for (HLinearOrderIterator it(*graph_); !it.Done(); it.Advance()) {
     HBasicBlock* block = it.Current();
     block->SetLifetimeStart(lifetime_position);
 
@@ -127,7 +127,7 @@ void SsaLivenessAnalysis::NumberInstructions() {
         instructions_from_ssa_index_.Add(current);
         current->SetSsaIndex(ssa_index++);
         current->SetLiveInterval(
-            LiveInterval::MakeInterval(graph_.GetArena(), current->GetType(), current));
+            LiveInterval::MakeInterval(graph_->GetArena(), current->GetType(), current));
       }
       current->SetLifetimePosition(lifetime_position);
     }
@@ -145,7 +145,7 @@ void SsaLivenessAnalysis::NumberInstructions() {
         instructions_from_ssa_index_.Add(current);
         current->SetSsaIndex(ssa_index++);
         current->SetLiveInterval(
-            LiveInterval::MakeInterval(graph_.GetArena(), current->GetType(), current));
+            LiveInterval::MakeInterval(graph_->GetArena(), current->GetType(), current));
       }
       instructions_from_lifetime_position_.Add(current);
       current->SetLifetimePosition(lifetime_position);
@@ -158,11 +158,11 @@ void SsaLivenessAnalysis::NumberInstructions() {
 }
 
 void SsaLivenessAnalysis::ComputeLiveness() {
-  for (HLinearOrderIterator it(*this); !it.Done(); it.Advance()) {
+  for (HLinearOrderIterator it(*graph_); !it.Done(); it.Advance()) {
     HBasicBlock* block = it.Current();
     block_infos_.Put(
         block->GetBlockId(),
-        new (graph_.GetArena()) BlockInfo(graph_.GetArena(), *block, number_of_ssa_values_));
+        new (graph_->GetArena()) BlockInfo(graph_->GetArena(), *block, number_of_ssa_values_));
   }
 
   // Compute the live ranges, as well as the initial live_in, live_out, and kill sets.
@@ -179,7 +179,7 @@ void SsaLivenessAnalysis::ComputeLiveness() {
 void SsaLivenessAnalysis::ComputeLiveRanges() {
   // Do a post order visit, adding inputs of instructions live in the block where
   // that instruction is defined, and killing instructions that are being visited.
-  for (HLinearPostOrderIterator it(*this); !it.Done(); it.Advance()) {
+  for (HLinearPostOrderIterator it(*graph_); !it.Done(); it.Advance()) {
     HBasicBlock* block = it.Current();
 
     BitVector* kill = GetKillSet(*block);
@@ -218,6 +218,26 @@ void SsaLivenessAnalysis::ComputeLiveRanges() {
         current->GetLiveInterval()->SetFrom(current->GetLifetimePosition());
       }
 
+      // Process the environment first, because we know their uses come after
+      // or at the same liveness position of inputs.
+      if (current->HasEnvironment()) {
+        // Handle environment uses. See statements (b) and (c) of the
+        // SsaLivenessAnalysis.
+        HEnvironment* environment = current->GetEnvironment();
+        for (size_t i = 0, e = environment->Size(); i < e; ++i) {
+          HInstruction* instruction = environment->GetInstructionAt(i);
+          bool should_be_live = ShouldBeLiveForEnvironment(instruction);
+          if (should_be_live) {
+            DCHECK(instruction->HasSsaIndex());
+            live_in->SetBit(instruction->GetSsaIndex());
+          }
+          if (instruction != nullptr) {
+            instruction->GetLiveInterval()->AddUse(
+                current, i, /* is_environment */ true, should_be_live);
+          }
+        }
+      }
+
       // All inputs of an instruction must be live.
       for (size_t i = 0, e = current->InputCount(); i < e; ++i) {
         HInstruction* input = current->InputAt(i);
@@ -225,21 +245,7 @@ void SsaLivenessAnalysis::ComputeLiveRanges() {
         // to be materialized.
         if (input->HasSsaIndex()) {
           live_in->SetBit(input->GetSsaIndex());
-          input->GetLiveInterval()->AddUse(current, i, false);
-        }
-      }
-
-      if (current->HasEnvironment()) {
-        // Handle environment uses. See statements (b) and (c) of the
-        // SsaLivenessAnalysis.
-        HEnvironment* environment = current->GetEnvironment();
-        for (size_t i = 0, e = environment->Size(); i < e; ++i) {
-          HInstruction* instruction = environment->GetInstructionAt(i);
-          if (ShouldBeLiveForEnvironment(instruction)) {
-            DCHECK(instruction->HasSsaIndex());
-            live_in->SetBit(instruction->GetSsaIndex());
-            instruction->GetLiveInterval()->AddUse(current, i, true);
-          }
+          input->GetLiveInterval()->AddUse(current, i, /* is_environment */ false);
         }
       }
     }
@@ -275,7 +281,7 @@ void SsaLivenessAnalysis::ComputeLiveInAndLiveOutSets() {
   do {
     changed = false;
 
-    for (HPostOrderIterator it(graph_); !it.Done(); it.Advance()) {
+    for (HPostOrderIterator it(*graph_); !it.Done(); it.Advance()) {
       const HBasicBlock& block = *it.Current();
 
       // The live_in set depends on the kill set (which does not
@@ -318,6 +324,8 @@ static int RegisterOrLowRegister(Location location) {
 
 int LiveInterval::FindFirstRegisterHint(size_t* free_until) const {
   DCHECK(!IsHighInterval());
+  if (IsTemp()) return kNoRegister;
+
   if (GetParent() == this && defined_by_ != nullptr) {
     // This is the first interval for the instruction. Try to find
     // a register based on its definition.
@@ -333,7 +341,7 @@ int LiveInterval::FindFirstRegisterHint(size_t* free_until) const {
   size_t end = GetEnd();
   while (use != nullptr && use->GetPosition() <= end) {
     size_t use_position = use->GetPosition();
-    if (use_position >= start && !use->GetIsEnvironment()) {
+    if (use_position >= start && !use->IsSynthesized()) {
       HInstruction* user = use->GetUser();
       size_t input_index = use->GetInputIndex();
       if (user->IsPhi()) {
@@ -394,11 +402,11 @@ int LiveInterval::FindHintAtDefinition() const {
     for (size_t i = 0, e = defined_by_->InputCount(); i < e; ++i) {
       HInstruction* input = defined_by_->InputAt(i);
       size_t end = predecessors.Get(i)->GetLifetimeEnd();
-      const LiveInterval& input_interval = input->GetLiveInterval()->GetIntervalAt(end - 1);
-      if (input_interval.GetEnd() == end) {
+      LiveInterval* input_interval = input->GetLiveInterval()->GetSiblingAt(end - 1);
+      if (input_interval->GetEnd() == end) {
         // If the input dies at the end of the predecessor, we know its register can
         // be reused.
-        Location input_location = input_interval.ToLocation();
+        Location input_location = input_interval->ToLocation();
         if (input_location.IsRegisterKind()) {
           DCHECK(SameRegisterKind(input_location));
           return RegisterOrLowRegister(input_location);
@@ -410,12 +418,12 @@ int LiveInterval::FindHintAtDefinition() const {
     Location out = locations->Out();
     if (out.IsUnallocated() && out.GetPolicy() == Location::kSameAsFirstInput) {
       // Try to use the same register as the first input.
-      const LiveInterval& input_interval =
-          GetDefinedBy()->InputAt(0)->GetLiveInterval()->GetIntervalAt(GetStart() - 1);
-      if (input_interval.GetEnd() == GetStart()) {
+      LiveInterval* input_interval =
+          GetDefinedBy()->InputAt(0)->GetLiveInterval()->GetSiblingAt(GetStart() - 1);
+      if (input_interval->GetEnd() == GetStart()) {
         // If the input dies at the start of this instruction, we know its register can
         // be reused.
-        Location location = input_interval.ToLocation();
+        Location location = input_interval->ToLocation();
         if (location.IsRegisterKind()) {
           DCHECK(SameRegisterKind(location));
           return RegisterOrLowRegister(location);
@@ -479,16 +487,17 @@ Location LiveInterval::ToLocation() const {
 }
 
 Location LiveInterval::GetLocationAt(size_t position) {
-  return GetIntervalAt(position).ToLocation();
+  LiveInterval* sibling = GetSiblingAt(position);
+  DCHECK(sibling != nullptr);
+  return sibling->ToLocation();
 }
 
-const LiveInterval& LiveInterval::GetIntervalAt(size_t position) {
+LiveInterval* LiveInterval::GetSiblingAt(size_t position) {
   LiveInterval* current = this;
-  while (!current->Covers(position)) {
+  while (current != nullptr && !current->IsDefinedAt(position)) {
     current = current->GetNextSibling();
-    DCHECK(current != nullptr);
   }
-  return *current;
+  return current;
 }
 
 }  // namespace art

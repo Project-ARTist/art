@@ -71,8 +71,6 @@ static constexpr bool kMarkCompactSupport = false && kMovingCollector;
 static constexpr bool kMoveFieldArrays = !kMarkCompactSupport;
 // True if we allow moving classes.
 static constexpr bool kMovingClasses = !kMarkCompactSupport;
-// True if we allow moving fields.
-static constexpr bool kMovingFields = false;
 // True if we allow moving methods.
 static constexpr bool kMovingMethods = false;
 
@@ -107,6 +105,13 @@ static constexpr bool kUseReadBarrier = kUseBakerReadBarrier || kUseBrooksReadBa
 static constexpr bool kPoisonHeapReferences = true;
 #else
 static constexpr bool kPoisonHeapReferences = false;
+#endif
+
+// If true, enable the tlab allocator by default.
+#ifdef ART_USE_TLAB
+static constexpr bool kUseTlab = true;
+#else
+static constexpr bool kUseTlab = false;
 #endif
 
 // Kinds of tracing clocks.

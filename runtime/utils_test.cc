@@ -16,6 +16,7 @@
 
 #include "utils.h"
 
+#include "class_linker-inl.h"
 #include "common_runtime_test.h"
 #include "mirror/array.h"
 #include "mirror/array-inl.h"
@@ -105,7 +106,7 @@ TEST_F(UtilsTest, PrettyReturnType) {
 
 TEST_F(UtilsTest, PrettyTypeOf) {
   ScopedObjectAccess soa(Thread::Current());
-  EXPECT_EQ("null", PrettyTypeOf(NULL));
+  EXPECT_EQ("null", PrettyTypeOf(nullptr));
 
   StackHandleScope<2> hs(soa.Self());
   Handle<mirror::String> s(hs.NewHandle(mirror::String::AllocFromModifiedUtf8(soa.Self(), "")));
@@ -115,7 +116,7 @@ TEST_F(UtilsTest, PrettyTypeOf) {
   EXPECT_EQ("short[]", PrettyTypeOf(a.Get()));
 
   mirror::Class* c = class_linker_->FindSystemClass(soa.Self(), "[Ljava/lang/String;");
-  ASSERT_TRUE(c != NULL);
+  ASSERT_TRUE(c != nullptr);
   mirror::Object* o = mirror::ObjectArray<mirror::String>::Alloc(soa.Self(), c, 0);
   EXPECT_EQ("java.lang.String[]", PrettyTypeOf(o));
   EXPECT_EQ("java.lang.Class<java.lang.String[]>", PrettyTypeOf(o->GetClass()));
@@ -123,36 +124,33 @@ TEST_F(UtilsTest, PrettyTypeOf) {
 
 TEST_F(UtilsTest, PrettyClass) {
   ScopedObjectAccess soa(Thread::Current());
-  EXPECT_EQ("null", PrettyClass(NULL));
+  EXPECT_EQ("null", PrettyClass(nullptr));
   mirror::Class* c = class_linker_->FindSystemClass(soa.Self(), "[Ljava/lang/String;");
-  ASSERT_TRUE(c != NULL);
+  ASSERT_TRUE(c != nullptr);
   mirror::Object* o = mirror::ObjectArray<mirror::String>::Alloc(soa.Self(), c, 0);
   EXPECT_EQ("java.lang.Class<java.lang.String[]>", PrettyClass(o->GetClass()));
 }
 
 TEST_F(UtilsTest, PrettyClassAndClassLoader) {
   ScopedObjectAccess soa(Thread::Current());
-  EXPECT_EQ("null", PrettyClassAndClassLoader(NULL));
+  EXPECT_EQ("null", PrettyClassAndClassLoader(nullptr));
   mirror::Class* c = class_linker_->FindSystemClass(soa.Self(), "[Ljava/lang/String;");
-  ASSERT_TRUE(c != NULL);
+  ASSERT_TRUE(c != nullptr);
   mirror::Object* o = mirror::ObjectArray<mirror::String>::Alloc(soa.Self(), c, 0);
   EXPECT_EQ("java.lang.Class<java.lang.String[],null>", PrettyClassAndClassLoader(o->GetClass()));
 }
 
 TEST_F(UtilsTest, PrettyField) {
   ScopedObjectAccess soa(Thread::Current());
-  EXPECT_EQ("null", PrettyField(NULL));
+  EXPECT_EQ("null", PrettyField(nullptr));
 
   mirror::Class* java_lang_String = class_linker_->FindSystemClass(soa.Self(),
                                                                    "Ljava/lang/String;");
 
-  mirror::ArtField* f;
+  ArtField* f;
   f = java_lang_String->FindDeclaredInstanceField("count", "I");
   EXPECT_EQ("int java.lang.String.count", PrettyField(f));
   EXPECT_EQ("java.lang.String.count", PrettyField(f, false));
-  f = java_lang_String->FindDeclaredInstanceField("value", "[C");
-  EXPECT_EQ("char[] java.lang.String.value", PrettyField(f));
-  EXPECT_EQ("java.lang.String.value", PrettyField(f, false));
 }
 
 TEST_F(UtilsTest, PrettySize) {
@@ -215,21 +213,21 @@ TEST_F(UtilsTest, MangleForJni) {
 TEST_F(UtilsTest, JniShortName_JniLongName) {
   ScopedObjectAccess soa(Thread::Current());
   mirror::Class* c = class_linker_->FindSystemClass(soa.Self(), "Ljava/lang/String;");
-  ASSERT_TRUE(c != NULL);
+  ASSERT_TRUE(c != nullptr);
   mirror::ArtMethod* m;
 
   m = c->FindVirtualMethod("charAt", "(I)C");
-  ASSERT_TRUE(m != NULL);
+  ASSERT_TRUE(m != nullptr);
   EXPECT_EQ("Java_java_lang_String_charAt", JniShortName(m));
   EXPECT_EQ("Java_java_lang_String_charAt__I", JniLongName(m));
 
   m = c->FindVirtualMethod("indexOf", "(Ljava/lang/String;I)I");
-  ASSERT_TRUE(m != NULL);
+  ASSERT_TRUE(m != nullptr);
   EXPECT_EQ("Java_java_lang_String_indexOf", JniShortName(m));
   EXPECT_EQ("Java_java_lang_String_indexOf__Ljava_lang_String_2I", JniLongName(m));
 
   m = c->FindDirectMethod("copyValueOf", "([CII)Ljava/lang/String;");
-  ASSERT_TRUE(m != NULL);
+  ASSERT_TRUE(m != nullptr);
   EXPECT_EQ("Java_java_lang_String_copyValueOf", JniShortName(m));
   EXPECT_EQ("Java_java_lang_String_copyValueOf___3CII", JniLongName(m));
 }
@@ -366,6 +364,15 @@ TEST_F(UtilsTest, GetDalvikCacheFilenameOrDie) {
                GetDalvikCacheFilenameOrDie("/system/framework/boot.oat", "/foo").c_str());
 }
 
+TEST_F(UtilsTest, GetDalvikCache) {
+  EXPECT_STREQ("", GetDalvikCache("should-not-exist123", false).c_str());
+
+  EXPECT_STREQ((android_data_ + "/dalvik-cache/.").c_str(), GetDalvikCache(".", false).c_str());
+  EXPECT_STREQ((android_data_ + "/dalvik-cache/should-not-be-there").c_str(),
+               GetDalvikCache("should-not-be-there", true).c_str());
+}
+
+
 TEST_F(UtilsTest, GetSystemImageFilename) {
   EXPECT_STREQ("/system/framework/arm/boot.art",
                GetSystemImageFilename("/system/framework/boot.art", kArm).c_str());
@@ -374,7 +381,8 @@ TEST_F(UtilsTest, GetSystemImageFilename) {
 TEST_F(UtilsTest, ExecSuccess) {
   std::vector<std::string> command;
   if (kIsTargetBuild) {
-    command.push_back("/system/bin/id");
+    std::string android_root(GetAndroidRoot());
+    command.push_back(android_root + "/bin/id");
   } else {
     command.push_back("/usr/bin/id");
   }
@@ -430,6 +438,81 @@ TEST_F(UtilsTest, MinimumBitsToStore) {
   EXPECT_EQ(3u, MinimumBitsToStore(0b101));
   EXPECT_EQ(8u, MinimumBitsToStore(0xFF));
   EXPECT_EQ(32u, MinimumBitsToStore(~static_cast<uint32_t>(0)));
+}
+
+static constexpr int64_t INT_MIN_minus1 = static_cast<int64_t>(INT_MIN) - 1;
+static constexpr int64_t INT_MAX_plus1 = static_cast<int64_t>(INT_MAX) + 1;
+static constexpr int64_t UINT_MAX_plus1 = static_cast<int64_t>(UINT_MAX) + 1;
+
+TEST_F(UtilsTest, IsInt) {
+  EXPECT_FALSE(IsInt(1, -2));
+  EXPECT_TRUE(IsInt(1, -1));
+  EXPECT_TRUE(IsInt(1, 0));
+  EXPECT_FALSE(IsInt(1, 1));
+
+  EXPECT_FALSE(IsInt(4, -9));
+  EXPECT_TRUE(IsInt(4, -8));
+  EXPECT_TRUE(IsInt(4, 7));
+  EXPECT_FALSE(IsInt(4, 8));
+
+  EXPECT_FALSE(IsInt(32, INT_MIN_minus1));
+  EXPECT_TRUE(IsInt(32, INT_MIN));
+  EXPECT_TRUE(IsInt(32, INT_MAX));
+  EXPECT_FALSE(IsInt(32, INT_MAX_plus1));
+}
+
+TEST_F(UtilsTest, IsInt_Static) {
+  EXPECT_FALSE(IsInt<1>(-2));
+  EXPECT_TRUE(IsInt<1>(-1));
+  EXPECT_TRUE(IsInt<1>(0));
+  EXPECT_FALSE(IsInt<1>(1));
+
+  EXPECT_FALSE(IsInt<4>(-9));
+  EXPECT_TRUE(IsInt<4>(-8));
+  EXPECT_TRUE(IsInt<4>(7));
+  EXPECT_FALSE(IsInt<4>(8));
+
+  EXPECT_FALSE(IsInt<32>(INT_MIN_minus1));
+  EXPECT_TRUE(IsInt<32>(INT_MIN));
+  EXPECT_TRUE(IsInt<32>(INT_MAX));
+  EXPECT_FALSE(IsInt<32>(INT_MAX_plus1));
+}
+
+TEST_F(UtilsTest, IsUint) {
+  EXPECT_FALSE(IsUint<1>(-1));
+  EXPECT_TRUE(IsUint<1>(0));
+  EXPECT_TRUE(IsUint<1>(1));
+  EXPECT_FALSE(IsUint<1>(2));
+
+  EXPECT_FALSE(IsUint<4>(-1));
+  EXPECT_TRUE(IsUint<4>(0));
+  EXPECT_TRUE(IsUint<4>(15));
+  EXPECT_FALSE(IsUint<4>(16));
+
+  EXPECT_FALSE(IsUint<32>(-1));
+  EXPECT_TRUE(IsUint<32>(0));
+  EXPECT_TRUE(IsUint<32>(UINT_MAX));
+  EXPECT_FALSE(IsUint<32>(UINT_MAX_plus1));
+}
+
+TEST_F(UtilsTest, IsAbsoluteUint) {
+  EXPECT_FALSE(IsAbsoluteUint<1>(-2));
+  EXPECT_TRUE(IsAbsoluteUint<1>(-1));
+  EXPECT_TRUE(IsAbsoluteUint<32>(0));
+  EXPECT_TRUE(IsAbsoluteUint<1>(1));
+  EXPECT_FALSE(IsAbsoluteUint<1>(2));
+
+  EXPECT_FALSE(IsAbsoluteUint<4>(-16));
+  EXPECT_TRUE(IsAbsoluteUint<4>(-15));
+  EXPECT_TRUE(IsAbsoluteUint<32>(0));
+  EXPECT_TRUE(IsAbsoluteUint<4>(15));
+  EXPECT_FALSE(IsAbsoluteUint<4>(16));
+
+  EXPECT_FALSE(IsAbsoluteUint<32>(-UINT_MAX_plus1));
+  EXPECT_TRUE(IsAbsoluteUint<32>(-UINT_MAX));
+  EXPECT_TRUE(IsAbsoluteUint<32>(0));
+  EXPECT_TRUE(IsAbsoluteUint<32>(UINT_MAX));
+  EXPECT_FALSE(IsAbsoluteUint<32>(UINT_MAX_plus1));
 }
 
 }  // namespace art

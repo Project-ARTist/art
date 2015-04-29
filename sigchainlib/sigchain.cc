@@ -51,7 +51,7 @@ class SignalAction {
   // Unclaim the signal and restore the old action.
   void Unclaim(int signal) {
     claimed_ = false;
-    sigaction(signal, &action_, NULL);        // Restore old action.
+    sigaction(signal, &action_, nullptr);        // Restore old action.
   }
 
   // Get the action associated with this signal.
@@ -133,18 +133,18 @@ extern "C" void InvokeUserSignalHandler(int sig, siginfo_t* info, void* context)
 
   const struct sigaction& action = user_sigactions[sig].GetAction();
   if (user_sigactions[sig].OldStyle()) {
-    if (action.sa_handler != NULL) {
+    if (action.sa_handler != nullptr) {
       action.sa_handler(sig);
     } else {
-       signal(sig, SIG_DFL);
-       raise(sig);
+      signal(sig, SIG_DFL);
+      raise(sig);
     }
   } else {
-    if (action.sa_sigaction != NULL) {
+    if (action.sa_sigaction != nullptr) {
       action.sa_sigaction(sig, info, context);
     } else {
-       signal(sig, SIG_DFL);
-       raise(sig);
+      signal(sig, SIG_DFL);
+      raise(sig);
     }
   }
 }
@@ -169,12 +169,13 @@ extern "C" int sigaction(int signal, const struct sigaction* new_action, struct 
   // action but don't pass it on to the kernel.
   // Note that we check that the signal number is in range here.  An out of range signal
   // number should behave exactly as the libc sigaction.
-  if (signal > 0 && signal < _NSIG && user_sigactions[signal].IsClaimed()) {
+  if (signal > 0 && signal < _NSIG && user_sigactions[signal].IsClaimed() &&
+      (new_action == nullptr || new_action->sa_handler != SIG_DFL)) {
     struct sigaction saved_action = user_sigactions[signal].GetAction();
-    if (new_action != NULL) {
+    if (new_action != nullptr) {
       user_sigactions[signal].SetAction(*new_action, false);
     }
-    if (old_action != NULL) {
+    if (old_action != nullptr) {
       *old_action = saved_action;
     }
     return 0;
@@ -210,7 +211,7 @@ extern "C" sighandler_t signal(int signal, sighandler_t handler) {
   // action but don't pass it on to the kernel.
   // Note that we check that the signal number is in range here.  An out of range signal
   // number should behave exactly as the libc sigaction.
-  if (signal > 0 && signal < _NSIG && user_sigactions[signal].IsClaimed()) {
+  if (signal > 0 && signal < _NSIG && user_sigactions[signal].IsClaimed() && handler != SIG_DFL) {
     oldhandler = reinterpret_cast<sighandler_t>(user_sigactions[signal].GetAction().sa_handler);
     user_sigactions[signal].SetAction(sa, true);
     return oldhandler;
@@ -241,7 +242,7 @@ extern "C" sighandler_t signal(int signal, sighandler_t handler) {
 extern "C" int sigprocmask(int how, const sigset_t* bionic_new_set, sigset_t* bionic_old_set) {
   const sigset_t* new_set_ptr = bionic_new_set;
   sigset_t tmpset;
-  if (bionic_new_set != NULL) {
+  if (bionic_new_set != nullptr) {
     tmpset = *bionic_new_set;
 
     if (how == SIG_BLOCK) {
@@ -249,7 +250,7 @@ extern "C" int sigprocmask(int how, const sigset_t* bionic_new_set, sigset_t* bi
       // we can't allow the user to block that signal.
       for (int i = 0 ; i < _NSIG; ++i) {
         if (user_sigactions[i].IsClaimed() && sigismember(&tmpset, i)) {
-            sigdelset(&tmpset, i);
+          sigdelset(&tmpset, i);
         }
       }
     }
@@ -286,8 +287,8 @@ extern "C" void InitializeSignalChain() {
   if (linked_sigaction_sym == nullptr) {
     linked_sigaction_sym = dlsym(RTLD_DEFAULT, "sigaction");
     if (linked_sigaction_sym == nullptr ||
-      linked_sigaction_sym == reinterpret_cast<void*>(sigaction)) {
-        linked_sigaction_sym = nullptr;
+        linked_sigaction_sym == reinterpret_cast<void*>(sigaction)) {
+      linked_sigaction_sym = nullptr;
     }
   }
 
@@ -296,7 +297,7 @@ extern "C" void InitializeSignalChain() {
     linked_sigprocmask_sym = dlsym(RTLD_DEFAULT, "sigprocmask");
     if (linked_sigprocmask_sym == nullptr ||
         linked_sigprocmask_sym == reinterpret_cast<void*>(sigprocmask)) {
-         linked_sigprocmask_sym = nullptr;
+      linked_sigprocmask_sym = nullptr;
     }
   }
   initialized = true;

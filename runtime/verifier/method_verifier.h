@@ -31,6 +31,7 @@ namespace art {
 
 class Instruction;
 struct ReferenceMap2Visitor;
+class Thread;
 
 namespace verifier {
 
@@ -190,12 +191,15 @@ class MethodVerifier {
 
   // Returns the accessed field corresponding to the quick instruction's field
   // offset at 'dex_pc' in method 'm'.
-  static mirror::ArtField* FindAccessedFieldAtDexPc(mirror::ArtMethod* m, uint32_t dex_pc)
+  static ArtField* FindAccessedFieldAtDexPc(mirror::ArtMethod* m, uint32_t dex_pc)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Returns the invoked method corresponding to the quick instruction's vtable
   // index at 'dex_pc' in method 'm'.
   static mirror::ArtMethod* FindInvokedMethodAtDexPc(mirror::ArtMethod* m, uint32_t dex_pc)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  static SafeMap<uint32_t, std::set<uint32_t>> FindStringInitMap(mirror::ArtMethod* m)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   static void Init() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
@@ -225,9 +229,9 @@ class MethodVerifier {
   // Describe VRegs at the given dex pc.
   std::vector<int32_t> DescribeVRegs(uint32_t dex_pc);
 
-  static void VisitStaticRoots(RootCallback* callback, void* arg)
+  static void VisitStaticRoots(RootVisitor* visitor)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void VisitRoots(RootCallback* callback, void* arg, const RootInfo& roots)
+  void VisitRoots(RootVisitor* visitor, const RootInfo& roots)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Accessors used by the compiler via CompilerCallback
@@ -243,13 +247,13 @@ class MethodVerifier {
   bool HasFailures() const;
   const RegType& ResolveCheckedClass(uint32_t class_idx)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  // Returns the method of a quick invoke or nullptr if it cannot be found.
+  // Returns the method of a quick invoke or null if it cannot be found.
   mirror::ArtMethod* GetQuickInvokedMethod(const Instruction* inst, RegisterLine* reg_line,
                                            bool is_range, bool allow_failure)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  // Returns the access field of a quick field access (iget/iput-quick) or nullptr
+  // Returns the access field of a quick field access (iget/iput-quick) or null
   // if it cannot be found.
-  mirror::ArtField* GetQuickFieldAccess(const Instruction* inst, RegisterLine* reg_line)
+  ArtField* GetQuickFieldAccess(const Instruction* inst, RegisterLine* reg_line)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Is the method being verified a constructor?
@@ -260,6 +264,10 @@ class MethodVerifier {
   // Is the method verified static?
   bool IsStatic() const {
     return (method_access_flags_ & kAccStatic) != 0;
+  }
+
+  SafeMap<uint32_t, std::set<uint32_t>>& GetStringInitPcRegMap() {
+    return string_init_pc_reg_map_;
   }
 
  private:
@@ -300,10 +308,13 @@ class MethodVerifier {
 
   void FindLocksAtDexPc() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  mirror::ArtField* FindAccessedFieldAtDexPc(uint32_t dex_pc)
+  ArtField* FindAccessedFieldAtDexPc(uint32_t dex_pc)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   mirror::ArtMethod* FindInvokedMethodAtDexPc(uint32_t dex_pc)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  SafeMap<uint32_t, std::set<uint32_t>>& FindStringInitMap()
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   /*
@@ -524,11 +535,11 @@ class MethodVerifier {
                   bool is_primitive) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Lookup instance field and fail for resolution violations
-  mirror::ArtField* GetInstanceField(const RegType& obj_type, int field_idx)
+  ArtField* GetInstanceField(const RegType& obj_type, int field_idx)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Lookup static field and fail for resolution violations
-  mirror::ArtField* GetStaticField(int field_idx) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  ArtField* GetStaticField(int field_idx) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Perform verification of an iget/sget/iput/sput instruction.
   enum class FieldAccessType {  // private
@@ -584,7 +595,7 @@ class MethodVerifier {
    * Widening conversions on integers and references are allowed, but
    * narrowing conversions are not.
    *
-   * Returns the resolved method on success, nullptr on failure (with *failure
+   * Returns the resolved method on success, null on failure (with *failure
    * set appropriately).
    */
   mirror::ArtMethod* VerifyInvocationArgs(const Instruction* inst,
@@ -685,7 +696,7 @@ class MethodVerifier {
   // The dex PC of a FindLocksAtDexPc request, -1 otherwise.
   uint32_t interesting_dex_pc_;
   // The container into which FindLocksAtDexPc should write the registers containing held locks,
-  // nullptr if we're not doing FindLocksAtDexPc.
+  // null if we're not doing FindLocksAtDexPc.
   std::vector<uint32_t>* monitor_enter_dex_pcs_;
 
   // The types of any error that occurs.
@@ -737,6 +748,16 @@ class MethodVerifier {
   // thread dumping checkpoints since we may get thread suspension at an inopportune time due to
   // FindLocksAtDexPC, resulting in deadlocks.
   const bool allow_thread_suspension_;
+
+  // Link, for the method verifier root linked list.
+  MethodVerifier* link_;
+
+  friend class art::Thread;
+
+  // Map of dex pcs of invocations of java.lang.String.<init> to the set of other registers that
+  // contain the uninitialized this pointer to that invoke. Will contain no entry if there are
+  // no other registers.
+  SafeMap<uint32_t, std::set<uint32_t>> string_init_pc_reg_map_;
 
   DISALLOW_COPY_AND_ASSIGN(MethodVerifier);
 };

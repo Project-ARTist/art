@@ -37,20 +37,27 @@ class ElfFile;
 class MemMap;
 class OatMethodOffsets;
 class OatHeader;
+class OatDexFile;
 
-class OatFile {
+class OatFile FINAL {
  public:
+  typedef art::OatDexFile OatDexFile;
+
   // Opens an oat file contained within the given elf file. This is always opened as
   // non-executable at the moment.
   static OatFile* OpenWithElfFile(ElfFile* elf_file, const std::string& location,
+                                  const char* abs_dex_location,
                                   std::string* error_msg);
-  // Open an oat file. Returns NULL on failure.  Requested base can
+  // Open an oat file. Returns null on failure.  Requested base can
   // optionally be used to request where the file should be loaded.
+  // See the ResolveRelativeEncodedDexLocation for a description of how the
+  // abs_dex_location argument is used.
   static OatFile* Open(const std::string& filename,
                        const std::string& location,
                        uint8_t* requested_base,
                        uint8_t* oat_file_begin,
                        bool executable,
+                       const char* abs_dex_location,
                        std::string* error_msg);
 
   // Open an oat file from an already opened File.
@@ -58,9 +65,13 @@ class OatFile {
   // where relocations may be required. Currently used from
   // ImageWriter which wants to open a writable version from an existing
   // file descriptor for patching.
-  static OatFile* OpenWritable(File* file, const std::string& location, std::string* error_msg);
+  static OatFile* OpenWritable(File* file, const std::string& location,
+                               const char* abs_dex_location,
+                               std::string* error_msg);
   // Opens an oat file from an already opened File. Maps it PROT_READ, MAP_PRIVATE.
-  static OatFile* OpenReadable(File* file, const std::string& location, std::string* error_msg);
+  static OatFile* OpenReadable(File* file, const std::string& location,
+                               const char* abs_dex_location,
+                               std::string* error_msg);
 
   ~OatFile();
 
@@ -82,9 +93,7 @@ class OatFile {
 
   const OatHeader& GetOatHeader() const;
 
-  class OatDexFile;
-
-  class OatMethod {
+  class OatMethod FINAL {
    public:
     void LinkMethod(mirror::ArtMethod* method) const SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
@@ -125,7 +134,10 @@ class OatFile {
     OatMethod(const uint8_t* base, const uint32_t code_offset)
         : begin_(base), code_offset_(code_offset) {
     }
+    OatMethod(const OatMethod&) = default;
     ~OatMethod() {}
+
+    OatMethod& operator=(const OatMethod&) = default;
 
     // A representation of an invalid OatMethod, used when an OatMethod or OatClass can't be found.
     // See ClassLinker::FindOatMethodFor.
@@ -137,7 +149,7 @@ class OatFile {
     template<class T>
     T GetOatPointer(uint32_t offset) const {
       if (offset == 0) {
-        return NULL;
+        return nullptr;
       }
       return reinterpret_cast<T>(begin_ + offset);
     }
@@ -148,7 +160,7 @@ class OatFile {
     friend class OatClass;
   };
 
-  class OatClass {
+  class OatClass FINAL {
    public:
     mirror::Class::Status GetStatus() const {
       return status_;
@@ -165,7 +177,7 @@ class OatFile {
     const OatMethod GetOatMethod(uint32_t method_index) const;
 
     // Return a pointer to the OatMethodOffsets for the requested
-    // method_index, or nullptr if none is present. Note that most
+    // method_index, or null if none is present. Note that most
     // callers should use GetOatMethod.
     const OatMethodOffsets* GetOatMethodOffsets(uint32_t method_index) const;
 
@@ -199,63 +211,8 @@ class OatFile {
 
     const OatMethodOffsets* const methods_pointer_;
 
-    friend class OatDexFile;
+    friend class art::OatDexFile;
   };
-
-  class OatDexFile {
-   public:
-    // Opens the DexFile referred to by this OatDexFile from within the containing OatFile.
-    std::unique_ptr<const DexFile> OpenDexFile(std::string* error_msg) const;
-
-    const OatFile* GetOatFile() const {
-      return oat_file_;
-    }
-
-    // Returns the size of the DexFile refered to by this OatDexFile.
-    size_t FileSize() const;
-
-    // Returns original path of DexFile that was the source of this OatDexFile.
-    const std::string& GetDexFileLocation() const {
-      return dex_file_location_;
-    }
-
-    // Returns the canonical location of DexFile that was the source of this OatDexFile.
-    const std::string& GetCanonicalDexFileLocation() const {
-      return canonical_dex_file_location_;
-    }
-
-    // Returns checksum of original DexFile that was the source of this OatDexFile;
-    uint32_t GetDexFileLocationChecksum() const {
-      return dex_file_location_checksum_;
-    }
-
-    // Returns the OatClass for the class specified by the given DexFile class_def_index.
-    OatClass GetOatClass(uint16_t class_def_index) const;
-
-    // Returns the offset to the OatClass information. Most callers should use GetOatClass.
-    uint32_t GetOatClassOffset(uint16_t class_def_index) const;
-
-    ~OatDexFile();
-
-   private:
-    OatDexFile(const OatFile* oat_file,
-               const std::string& dex_file_location,
-               const std::string& canonical_dex_file_location,
-               uint32_t dex_file_checksum,
-               const uint8_t* dex_file_pointer,
-               const uint32_t* oat_class_offsets_pointer);
-
-    const OatFile* const oat_file_;
-    const std::string dex_file_location_;
-    const std::string canonical_dex_file_location_;
-    const uint32_t dex_file_location_checksum_;
-    const uint8_t* const dex_file_pointer_;
-    const uint32_t* const oat_class_offsets_pointer_;
-
-    friend class OatFile;
-    DISALLOW_COPY_AND_ASSIGN(OatDexFile);
-  };
-
   const OatDexFile* GetOatDexFile(const char* dex_location,
                                   const uint32_t* const dex_location_checksum,
                                   bool exception_if_not_found = true) const
@@ -279,8 +236,38 @@ class OatFile {
   const uint8_t* BssBegin() const;
   const uint8_t* BssEnd() const;
 
+  // Returns the absolute dex location for the encoded relative dex location.
+  //
+  // If not null, abs_dex_location is used to resolve the absolute dex
+  // location of relative dex locations encoded in the oat file.
+  // For example, given absolute location "/data/app/foo/base.apk", encoded
+  // dex locations "base.apk", "base.apk:classes2.dex", etc. would be resolved
+  // to "/data/app/foo/base.apk", "/data/app/foo/base.apk:classes2.dex", etc.
+  // Relative encoded dex locations that don't match the given abs_dex_location
+  // are left unchanged.
+  static std::string ResolveRelativeEncodedDexLocation(
+      const char* abs_dex_location, const std::string& rel_dex_location);
+
+  // Create a dependency list (dex locations and checksums) for the given dex files.
+  static std::string EncodeDexFileDependencies(const std::vector<const DexFile*>& dex_files);
+
+  // Check the given dependency list against their dex files - thus the name "Static," this does
+  // not check the class-loader environment, only whether there have been file updates.
+  static bool CheckStaticDexFileDependencies(const char* dex_dependencies, std::string* msg);
+
+  // Get the dex locations of a dependency list. Note: this is *not* cleaned for synthetic
+  // locations of multidex files.
+  static bool GetDexLocationsFromDependencies(const char* dex_dependencies,
+                                              std::vector<std::string>* locations);
+
  private:
   static void CheckLocation(const std::string& location);
+
+  static OatFile* OpenDlopen(const std::string& elf_filename,
+                             const std::string& location,
+                             uint8_t* requested_base,
+                             const char* abs_dex_location,
+                             std::string* error_msg);
 
   static OatFile* OpenElfFile(File* file,
                               const std::string& location,
@@ -288,14 +275,19 @@ class OatFile {
                               uint8_t* oat_file_begin,  // Override base if not null
                               bool writable,
                               bool executable,
+                              const char* abs_dex_location,
                               std::string* error_msg);
 
   explicit OatFile(const std::string& filename, bool executable);
+  bool Dlopen(const std::string& elf_filename, uint8_t* requested_base,
+              const char* abs_dex_location, std::string* error_msg);
   bool ElfFileOpen(File* file, uint8_t* requested_base,
                    uint8_t* oat_file_begin,  // Override where the file is loaded to if not null
                    bool writable, bool executable,
+                   const char* abs_dex_location,
                    std::string* error_msg);
-  bool Setup(std::string* error_msg);
+
+  bool Setup(const char* abs_dex_location, std::string* error_msg);
 
   // The oat file name.
   //
@@ -308,10 +300,10 @@ class OatFile {
   // Pointer to end of oat region for bounds checking.
   const uint8_t* end_;
 
-  // Pointer to the .bss section, if present, otherwise nullptr.
+  // Pointer to the .bss section, if present, otherwise null.
   const uint8_t* bss_begin_;
 
-  // Pointer to the end of the .bss section, if present, otherwise nullptr.
+  // Pointer to the end of the .bss section, if present, otherwise null.
   const uint8_t* bss_end_;
 
   // Was this oat_file loaded executable?
@@ -339,7 +331,7 @@ class OatFile {
   // Map each location and canonical location (if different) retrieved from the
   // oat file to its OatDexFile. This map doesn't change after it's constructed in Setup()
   // and therefore doesn't need any locking and provides the cheapest dex file lookup
-  // for GetOatDexFile() for a very frequent use case. Never contains a nullptr value.
+  // for GetOatDexFile() for a very frequent use case. Never contains a null value.
   Table oat_dex_files_;
 
   // Lock guarding all members needed for secondary lookup in GetOatDexFile().
@@ -359,9 +351,67 @@ class OatFile {
   mutable std::list<std::string> string_cache_ GUARDED_BY(secondary_lookup_lock_);
 
   friend class OatClass;
-  friend class OatDexFile;
+  friend class art::OatDexFile;
   friend class OatDumper;  // For GetBase and GetLimit
   DISALLOW_COPY_AND_ASSIGN(OatFile);
+};
+
+// OatDexFile should be an inner class of OatFile. Unfortunately, C++ doesn't
+// support forward declarations of inner classes, and we want to
+// forward-declare OatDexFile so that we can store an opaque pointer to an
+// OatDexFile in DexFile.
+class OatDexFile FINAL {
+ public:
+  // Opens the DexFile referred to by this OatDexFile from within the containing OatFile.
+  std::unique_ptr<const DexFile> OpenDexFile(std::string* error_msg) const;
+
+  const OatFile* GetOatFile() const {
+    return oat_file_;
+  }
+
+  // Returns the size of the DexFile refered to by this OatDexFile.
+  size_t FileSize() const;
+
+  // Returns original path of DexFile that was the source of this OatDexFile.
+  const std::string& GetDexFileLocation() const {
+    return dex_file_location_;
+  }
+
+  // Returns the canonical location of DexFile that was the source of this OatDexFile.
+  const std::string& GetCanonicalDexFileLocation() const {
+    return canonical_dex_file_location_;
+  }
+
+  // Returns checksum of original DexFile that was the source of this OatDexFile;
+  uint32_t GetDexFileLocationChecksum() const {
+    return dex_file_location_checksum_;
+  }
+
+  // Returns the OatClass for the class specified by the given DexFile class_def_index.
+  OatFile::OatClass GetOatClass(uint16_t class_def_index) const;
+
+  // Returns the offset to the OatClass information. Most callers should use GetOatClass.
+  uint32_t GetOatClassOffset(uint16_t class_def_index) const;
+
+  ~OatDexFile();
+
+ private:
+  OatDexFile(const OatFile* oat_file,
+             const std::string& dex_file_location,
+             const std::string& canonical_dex_file_location,
+             uint32_t dex_file_checksum,
+             const uint8_t* dex_file_pointer,
+             const uint32_t* oat_class_offsets_pointer);
+
+  const OatFile* const oat_file_;
+  const std::string dex_file_location_;
+  const std::string canonical_dex_file_location_;
+  const uint32_t dex_file_location_checksum_;
+  const uint8_t* const dex_file_pointer_;
+  const uint32_t* const oat_class_offsets_pointer_;
+
+  friend class OatFile;
+  DISALLOW_COPY_AND_ASSIGN(OatDexFile);
 };
 
 }  // namespace art

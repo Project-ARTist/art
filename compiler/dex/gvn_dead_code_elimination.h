@@ -111,6 +111,8 @@ class GvnDeadCodeElimination : public DeletableArenaObject<kArenaAllocMisc> {
     void RemoveChange(uint16_t change);
     bool IsTopChange(uint16_t change) const;
     bool IsSRegUsed(uint16_t first_change, uint16_t last_change, int s_reg) const;
+    bool IsVRegUsed(uint16_t first_change, uint16_t last_change, int v_reg,
+                    MIRGraph* mir_graph) const;
     void RenameSRegUses(uint16_t first_change, uint16_t last_change,
                         int old_s_reg, int new_s_reg, bool wide);
     void RenameVRegUses(uint16_t first_change, uint16_t last_change,
@@ -128,7 +130,7 @@ class GvnDeadCodeElimination : public DeletableArenaObject<kArenaAllocMisc> {
   void KillMIR(MIRData* data);
   static void KillMIR(MIR* mir);
   static void ChangeBinOp2AddrToPlainBinOp(MIR* mir);
-  MIR* CreatePhi(int s_reg, bool fp);
+  MIR* CreatePhi(int s_reg);
   MIR* RenameSRegDefOrCreatePhi(uint16_t def_change, uint16_t last_change, MIR* mir_to_kill);
 
   // Update state variables going backwards through a MIR.

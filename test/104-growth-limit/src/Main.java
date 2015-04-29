@@ -21,34 +21,36 @@ import java.util.List;
 public class Main {
 
     public static void main(String[] args) throws Exception {
-
         int alloc1 = 1;
+        // Setup reflection stuff before allocating to prevent OOME caused by allocations from
+        // Class.forName or getDeclaredMethod.
+        // Reflective equivalent of: dalvik.system.VMRuntime.getRuntime().clearGrowthLimit();
+        final Class<?> vm_runtime = Class.forName("dalvik.system.VMRuntime");
+        final Method get_runtime = vm_runtime.getDeclaredMethod("getRuntime");
+        final Object runtime = get_runtime.invoke(null);
+        final Method clear_growth_limit = vm_runtime.getDeclaredMethod("clearGrowthLimit");
+        List<byte[]> l = new ArrayList<byte[]>();
         try {
-            List<byte[]> l = new ArrayList<byte[]>();
             while (true) {
                 // Allocate a MB at a time
                 l.add(new byte[1048576]);
                 alloc1++;
             }
         } catch (OutOfMemoryError e) {
+            l = null;
         }
         // Expand the heap to the maximum size.
-        // Reflective equivalent of: dalvik.system.VMRuntime.getRuntime().clearGrowthLimit();
-        Class<?> vm_runtime = Class.forName("dalvik.system.VMRuntime");
-        Method get_runtime = vm_runtime.getDeclaredMethod("getRuntime");
-        Object runtime = get_runtime.invoke(null);
-        Method clear_growth_limit = vm_runtime.getDeclaredMethod("clearGrowthLimit");
         clear_growth_limit.invoke(runtime);
-
         int alloc2 = 1;
+        l = new ArrayList<byte[]>();
         try {
-            List<byte[]> l = new ArrayList<byte[]>();
             while (true) {
                 // Allocate a MB at a time
                 l.add(new byte[1048576]);
                 alloc2++;
             }
         } catch (OutOfMemoryError e2) {
+            l = null;
             if (alloc1 > alloc2) {
                 System.out.println("ERROR: Allocated less memory after growth" +
                     "limit cleared (" + alloc1 + " MBs > " + alloc2 + " MBs");

@@ -62,7 +62,7 @@ extern "C" bool jit_compile_method(void* handle, mirror::ArtMethod* method, Thre
 
 JitCompiler::JitCompiler() : total_time_(0) {
   auto* pass_manager_options = new PassManagerOptions;
-  pass_manager_options->SetDisablePassList("GVN,DCE");
+  pass_manager_options->SetDisablePassList("GVN,DCE,GVNCleanup");
   compiler_options_.reset(new CompilerOptions(
       CompilerOptions::kDefaultCompilerFilter,
       CompilerOptions::kDefaultHugeMethodThreshold,
@@ -71,9 +71,9 @@ JitCompiler::JitCompiler() : total_time_(0) {
       CompilerOptions::kDefaultTinyMethodThreshold,
       CompilerOptions::kDefaultNumDexMethodsThreshold,
       false,
-      false,
       CompilerOptions::kDefaultTopKProfileThreshold,
       false,  // TODO: Think about debuggability of JIT-compiled code.
+      false,
       false,
       false,
       false,
@@ -89,11 +89,12 @@ JitCompiler::JitCompiler() : total_time_(0) {
   verification_results_.reset(new VerificationResults(compiler_options_.get()));
   method_inliner_map_.reset(new DexFileToMethodInlinerMap);
   callbacks_.reset(new QuickCompilerCallbacks(verification_results_.get(),
-                                              method_inliner_map_.get()));
+                                              method_inliner_map_.get(),
+                                              CompilerCallbacks::CallbackMode::kCompileApp));
   compiler_driver_.reset(new CompilerDriver(
       compiler_options_.get(), verification_results_.get(), method_inliner_map_.get(),
       Compiler::kQuick, instruction_set, instruction_set_features_.get(), false,
-      nullptr, new std::set<std::string>, 1, false, true,
+      nullptr, nullptr, nullptr, 1, false, true,
       std::string(), cumulative_logger_.get(), -1, std::string()));
   // Disable dedupe so we can remove compiled methods.
   compiler_driver_->SetDedupeEnabled(false);
@@ -217,20 +218,21 @@ bool JitCompiler::AddToCodeCache(mirror::ArtMethod* method, const CompiledMethod
   auto* const mapping_table = compiled_method->GetMappingTable();
   auto* const vmap_table = compiled_method->GetVmapTable();
   auto* const gc_map = compiled_method->GetGcMap();
+  CHECK(gc_map != nullptr) << PrettyMethod(method);
   // Write out pre-header stuff.
   uint8_t* const mapping_table_ptr = code_cache->AddDataArray(
       self, mapping_table->data(), mapping_table->data() + mapping_table->size());
-  if (mapping_table == nullptr) {
+  if (mapping_table_ptr == nullptr) {
     return false;  // Out of data cache.
   }
   uint8_t* const vmap_table_ptr = code_cache->AddDataArray(
       self, vmap_table->data(), vmap_table->data() + vmap_table->size());
-  if (vmap_table == nullptr) {
+  if (vmap_table_ptr == nullptr) {
     return false;  // Out of data cache.
   }
   uint8_t* const gc_map_ptr = code_cache->AddDataArray(
       self, gc_map->data(), gc_map->data() + gc_map->size());
-  if (gc_map == nullptr) {
+  if (gc_map_ptr == nullptr) {
     return false;  // Out of data cache.
   }
   // Don't touch this until you protect / unprotect the code.

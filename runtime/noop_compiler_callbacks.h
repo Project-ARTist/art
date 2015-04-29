@@ -23,7 +23,7 @@ namespace art {
 
 class NoopCompilerCallbacks FINAL : public CompilerCallbacks {
  public:
-  NoopCompilerCallbacks() {}
+  NoopCompilerCallbacks() : CompilerCallbacks(CompilerCallbacks::CallbackMode::kCompileApp) {}
   ~NoopCompilerCallbacks() {}
 
   bool MethodVerified(verifier::MethodVerifier* verifier ATTRIBUTE_UNUSED) OVERRIDE {

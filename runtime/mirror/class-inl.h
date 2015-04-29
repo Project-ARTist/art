@@ -21,7 +21,6 @@
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
-#include "class_linker-inl.h"
 #include "class_loader.h"
 #include "common_throws.h"
 #include "dex_cache.h"
@@ -39,13 +38,9 @@ namespace mirror {
 
 template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
 inline uint32_t Class::GetObjectSize() {
-  if (kIsDebugBuild) {
-    // Use a local variable as (D)CHECK can't handle the space between
-    // the two template params.
-    bool is_variable_size = IsVariableSize<kVerifyFlags, kReadBarrierOption>();
-    CHECK(!is_variable_size) << " class=" << PrettyTypeOf(this);
-  }
-  return GetField32(OFFSET_OF_OBJECT_MEMBER(Class, object_size_));
+  // Note: Extra parentheses to avoid the comma being interpreted as macro parameter separator.
+  DCHECK((!IsVariableSize<kVerifyFlags, kReadBarrierOption>())) << " class=" << PrettyTypeOf(this);
+  return GetField32(ObjectSizeOffset());
 }
 
 inline Class* Class::GetSuperClass() {
@@ -71,7 +66,7 @@ inline ObjectArray<ArtMethod>* Class::GetDirectMethods() {
 
 inline void Class::SetDirectMethods(ObjectArray<ArtMethod>* new_direct_methods)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  DCHECK(NULL == GetFieldObject<ObjectArray<ArtMethod>>(
+  DCHECK(nullptr == GetFieldObject<ObjectArray<ArtMethod>>(
       OFFSET_OF_OBJECT_MEMBER(Class, direct_methods_)));
   DCHECK_NE(0, new_direct_methods->GetLength());
   SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(Class, direct_methods_), new_direct_methods);
@@ -90,7 +85,7 @@ inline void Class::SetDirectMethod(uint32_t i, ArtMethod* f)  // TODO: uint16_t
 
 // Returns the number of static, private, and constructor methods.
 inline uint32_t Class::NumDirectMethods() {
-  return (GetDirectMethods() != NULL) ? GetDirectMethods()->GetLength() : 0;
+  return (GetDirectMethods() != nullptr) ? GetDirectMethods()->GetLength() : 0;
 }
 
 template<VerifyObjectFlags kVerifyFlags>
@@ -107,7 +102,7 @@ inline void Class::SetVirtualMethods(ObjectArray<ArtMethod>* new_virtual_methods
 }
 
 inline uint32_t Class::NumVirtualMethods() {
-  return (GetVirtualMethods() != NULL) ? GetVirtualMethods()->GetLength() : 0;
+  return (GetVirtualMethods() != nullptr) ? GetVirtualMethods()->GetLength() : 0;
 }
 
 template<VerifyObjectFlags kVerifyFlags>
@@ -191,7 +186,7 @@ inline void Class::SetEmbeddedVTableEntry(uint32_t i, ArtMethod* method) {
 }
 
 inline bool Class::Implements(Class* klass) {
-  DCHECK(klass != NULL);
+  DCHECK(klass != nullptr);
   DCHECK(klass->IsInterface()) << PrettyClass(this);
   // All interfaces implemented directly and by our superclass, and
   // recursively all super-interfaces of those interfaces, are listed
@@ -238,8 +233,8 @@ inline bool Class::IsAssignableFromArray(Class* src) {
     // If "this" is not also an array, it must be Object.
     // src's super should be java_lang_Object, since it is an array.
     Class* java_lang_Object = src->GetSuperClass();
-    DCHECK(java_lang_Object != NULL) << PrettyClass(src);
-    DCHECK(java_lang_Object->GetSuperClass() == NULL) << PrettyClass(src);
+    DCHECK(java_lang_Object != nullptr) << PrettyClass(src);
+    DCHECK(java_lang_Object->GetSuperClass() == nullptr) << PrettyClass(src);
     return this == java_lang_Object;
   }
   return IsArrayAssignableFromArray(src);
@@ -340,13 +335,13 @@ inline bool Class::IsSubClass(Class* klass) {
       return true;
     }
     current = current->GetSuperClass();
-  } while (current != NULL);
+  } while (current != nullptr);
   return false;
 }
 
 inline ArtMethod* Class::FindVirtualMethodForInterface(ArtMethod* method) {
   Class* declaring_class = method->GetDeclaringClass();
-  DCHECK(declaring_class != NULL) << PrettyClass(this);
+  DCHECK(declaring_class != nullptr) << PrettyClass(this);
   DCHECK(declaring_class->IsInterface()) << PrettyMethod(method);
   // TODO cache to improve lookup speed
   int32_t iftable_count = GetIfTableCount();
@@ -356,7 +351,7 @@ inline ArtMethod* Class::FindVirtualMethodForInterface(ArtMethod* method) {
       return iftable->GetMethodArray(i)->Get(method->GetMethodIndex());
     }
   }
-  return NULL;
+  return nullptr;
 }
 
 inline ArtMethod* Class::FindVirtualMethodForVirtual(ArtMethod* method) {
@@ -387,7 +382,7 @@ inline IfTable* Class::GetIfTable() {
 
 inline int32_t Class::GetIfTableCount() {
   IfTable* iftable = GetIfTable();
-  if (iftable == NULL) {
+  if (iftable == nullptr) {
     return 0;
   }
   return iftable->Count();
@@ -397,9 +392,9 @@ inline void Class::SetIfTable(IfTable* new_iftable) {
   SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(Class, iftable_), new_iftable);
 }
 
-inline ObjectArray<ArtField>* Class::GetIFields() {
+inline ArtField* Class::GetIFields() {
   DCHECK(IsLoaded() || IsErroneous());
-  return GetFieldObject<ObjectArray<ArtField>>(OFFSET_OF_OBJECT_MEMBER(Class, ifields_));
+  return GetFieldPtr<ArtField*>(OFFSET_OF_OBJECT_MEMBER(Class, ifields_));
 }
 
 inline MemberOffset Class::GetFirstReferenceInstanceFieldOffset() {
@@ -432,55 +427,46 @@ inline MemberOffset Class::GetFirstReferenceStaticFieldOffsetDuringLinking() {
   return MemberOffset(base);
 }
 
-inline void Class::SetIFields(ObjectArray<ArtField>* new_ifields)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  DCHECK(NULL == GetFieldObject<ObjectArray<ArtField>>(OFFSET_OF_OBJECT_MEMBER(Class, ifields_)));
-  SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(Class, ifields_), new_ifields);
+inline void Class::SetIFields(ArtField* new_ifields) {
+  DCHECK(GetIFieldsUnchecked() == nullptr);
+  return SetFieldPtr<false>(OFFSET_OF_OBJECT_MEMBER(Class, ifields_), new_ifields);
 }
 
-inline ObjectArray<ArtField>* Class::GetSFields() {
+inline void Class::SetIFieldsUnchecked(ArtField* new_ifields) {
+  SetFieldPtr<false, true, kVerifyNone>(OFFSET_OF_OBJECT_MEMBER(Class, ifields_), new_ifields);
+}
+
+inline ArtField* Class::GetSFieldsUnchecked() {
+  return GetFieldPtr<ArtField*>(OFFSET_OF_OBJECT_MEMBER(Class, sfields_));
+}
+
+inline ArtField* Class::GetIFieldsUnchecked() {
+  return GetFieldPtr<ArtField*>(OFFSET_OF_OBJECT_MEMBER(Class, ifields_));
+}
+
+inline ArtField* Class::GetSFields() {
   DCHECK(IsLoaded() || IsErroneous()) << GetStatus();
-  return GetFieldObject<ObjectArray<ArtField>>(OFFSET_OF_OBJECT_MEMBER(Class, sfields_));
+  return GetSFieldsUnchecked();
 }
 
-inline void Class::SetSFields(ObjectArray<ArtField>* new_sfields)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+inline void Class::SetSFields(ArtField* new_sfields) {
   DCHECK((IsRetired() && new_sfields == nullptr) ||
-         (NULL == GetFieldObject<ObjectArray<ArtField>>(OFFSET_OF_OBJECT_MEMBER(Class, sfields_))));
-  SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(Class, sfields_), new_sfields);
+         GetFieldPtr<ArtField*>(OFFSET_OF_OBJECT_MEMBER(Class, sfields_)) == nullptr);
+  SetFieldPtr<false>(OFFSET_OF_OBJECT_MEMBER(Class, sfields_), new_sfields);
 }
 
-inline uint32_t Class::NumStaticFields() {
-  return (GetSFields() != NULL) ? GetSFields()->GetLength() : 0;
+inline void Class::SetSFieldsUnchecked(ArtField* new_sfields) {
+  SetFieldPtr<false, true, kVerifyNone>(OFFSET_OF_OBJECT_MEMBER(Class, sfields_), new_sfields);
 }
 
-
-inline ArtField* Class::GetStaticField(uint32_t i)  // TODO: uint16_t
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  return GetSFields()->GetWithoutChecks(i);
+inline ArtField* Class::GetStaticField(uint32_t i) {
+  DCHECK_LT(i, NumStaticFields());
+  return &GetSFields()[i];
 }
 
-inline void Class::SetStaticField(uint32_t i, ArtField* f)  // TODO: uint16_t
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  ObjectArray<ArtField>* sfields= GetFieldObject<ObjectArray<ArtField>>(
-      OFFSET_OF_OBJECT_MEMBER(Class, sfields_));
-  sfields->Set<false>(i, f);
-}
-
-inline uint32_t Class::NumInstanceFields() {
-  return (GetIFields() != NULL) ? GetIFields()->GetLength() : 0;
-}
-
-inline ArtField* Class::GetInstanceField(uint32_t i) {  // TODO: uint16_t
-  DCHECK_NE(NumInstanceFields(), 0U);
-  return GetIFields()->GetWithoutChecks(i);
-}
-
-inline void Class::SetInstanceField(uint32_t i, ArtField* f)  // TODO: uint16_t
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  ObjectArray<ArtField>* ifields= GetFieldObject<ObjectArray<ArtField>>(
-      OFFSET_OF_OBJECT_MEMBER(Class, ifields_));
-  ifields->Set<false>(i, f);
+inline ArtField* Class::GetInstanceField(uint32_t i) {
+  DCHECK_LT(i, NumInstanceFields());
+  return &GetIFields()[i];
 }
 
 template<VerifyObjectFlags kVerifyFlags>
@@ -498,7 +484,7 @@ inline void Class::SetClinitThreadId(pid_t new_clinit_thread_id) {
 }
 
 inline void Class::SetVerifyErrorClass(Class* klass) {
-  CHECK(klass != NULL) << PrettyClass(this);
+  CHECK(klass != nullptr) << PrettyClass(this);
   if (Runtime::Current()->IsActiveTransaction()) {
     SetFieldObject<true>(OFFSET_OF_OBJECT_MEMBER(Class, verify_error_class_), klass);
   } else {
@@ -513,17 +499,15 @@ inline uint32_t Class::GetAccessFlags() {
   DCHECK(IsIdxLoaded<kVerifyFlags>() || IsRetired<kVerifyFlags>() ||
          IsErroneous<static_cast<VerifyObjectFlags>(kVerifyFlags & ~kVerifyThis)>() ||
          this == String::GetJavaLangString() ||
-         this == ArtField::GetJavaLangReflectArtField() ||
          this == ArtMethod::GetJavaLangReflectArtMethod())
       << "IsIdxLoaded=" << IsIdxLoaded<kVerifyFlags>()
       << " IsRetired=" << IsRetired<kVerifyFlags>()
       << " IsErroneous=" <<
           IsErroneous<static_cast<VerifyObjectFlags>(kVerifyFlags & ~kVerifyThis)>()
       << " IsString=" << (this == String::GetJavaLangString())
-      << " IsArtField=" << (this == ArtField::GetJavaLangReflectArtField())
       << " IsArtMethod=" << (this == ArtMethod::GetJavaLangReflectArtMethod())
       << " descriptor=" << PrettyDescriptor(this);
-  return GetField32<kVerifyFlags>(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));
+  return GetField32<kVerifyFlags>(AccessFlagsOffset());
 }
 
 inline String* Class::GetName() {
@@ -563,6 +547,10 @@ inline void Class::CheckObjectAlloc() {
   DCHECK(!IsClassClass())
       << PrettyClass(this)
       << "A class object shouldn't be allocated through this "
+      << "as it requires a pre-fence visitor that sets the class size.";
+  DCHECK(!IsStringClass())
+      << PrettyClass(this)
+      << "A string shouldn't be allocated through this "
       << "as it requires a pre-fence visitor that sets the class size.";
   DCHECK(IsInstantiable()) << PrettyClass(this);
   // TODO: decide whether we want this check. It currently fails during bootstrap.
@@ -691,11 +679,6 @@ inline void Class::VisitEmbeddedImtAndVTable(const Visitor& visitor) {
 }
 
 template<ReadBarrierOption kReadBarrierOption>
-inline bool Class::IsArtFieldClass() const {
-  return this == ArtField::GetJavaLangReflectArtField<kReadBarrierOption>();
-}
-
-template<ReadBarrierOption kReadBarrierOption>
 inline bool Class::IsArtMethodClass() const {
   return this == ArtMethod::GetJavaLangReflectArtMethod<kReadBarrierOption>();
 }
@@ -722,7 +705,7 @@ inline bool Class::DescriptorEquals(const char* match) {
   } else if (IsPrimitive()) {
     return strcmp(Primitive::Descriptor(GetPrimitiveType()), match) == 0;
   } else if (IsProxyClass()) {
-    return Runtime::Current()->GetClassLinker()->GetDescriptorForProxy(this) == match;
+    return ProxyDescriptorEquals(match);
   } else {
     const DexFile& dex_file = GetDexFile();
     const DexFile::TypeId& type_id = dex_file.GetTypeId(GetClassDef()->class_idx_);
@@ -741,35 +724,35 @@ inline void Class::AssertInitializedOrInitializingInThread(Thread* self) {
 inline ObjectArray<Class>* Class::GetInterfaces() {
   CHECK(IsProxyClass());
   // First static field.
-  DCHECK(GetSFields()->Get(0)->IsArtField());
-  DCHECK_STREQ(GetSFields()->Get(0)->GetName(), "interfaces");
-  MemberOffset field_offset = GetSFields()->Get(0)->GetOffset();
+  auto* field = GetStaticField(0);
+  DCHECK_STREQ(field->GetName(), "interfaces");
+  MemberOffset field_offset = field->GetOffset();
   return GetFieldObject<ObjectArray<Class>>(field_offset);
 }
 
 inline ObjectArray<ObjectArray<Class>>* Class::GetThrows() {
   CHECK(IsProxyClass());
   // Second static field.
-  DCHECK(GetSFields()->Get(1)->IsArtField());
-  DCHECK_STREQ(GetSFields()->Get(1)->GetName(), "throws");
-  MemberOffset field_offset = GetSFields()->Get(1)->GetOffset();
+  auto* field = GetStaticField(1);
+  DCHECK_STREQ(field->GetName(), "throws");
+  MemberOffset field_offset = field->GetOffset();
   return GetFieldObject<ObjectArray<ObjectArray<Class>>>(field_offset);
 }
 
 inline MemberOffset Class::GetDisableIntrinsicFlagOffset() {
   CHECK(IsReferenceClass());
   // First static field
-  DCHECK(GetSFields()->Get(0)->IsArtField());
-  DCHECK_STREQ(GetSFields()->Get(0)->GetName(), "disableIntrinsic");
-  return GetSFields()->Get(0)->GetOffset();
+  auto* field = GetStaticField(0);
+  DCHECK_STREQ(field->GetName(), "disableIntrinsic");
+  return field->GetOffset();
 }
 
 inline MemberOffset Class::GetSlowPathFlagOffset() {
   CHECK(IsReferenceClass());
   // Second static field
-  DCHECK(GetSFields()->Get(1)->IsArtField());
-  DCHECK_STREQ(GetSFields()->Get(1)->GetName(), "slowPathEnabled");
-  return GetSFields()->Get(1)->GetOffset();
+  auto* field = GetStaticField(1);
+  DCHECK_STREQ(field->GetName(), "slowPathEnabled");
+  return field->GetOffset();
 }
 
 inline bool Class::GetSlowPathEnabled() {
@@ -825,6 +808,30 @@ inline void Class::SetDexCacheStrings(ObjectArray<String>* new_dex_cache_strings
 
 inline ObjectArray<String>* Class::GetDexCacheStrings() {
   return GetFieldObject<ObjectArray<String>>(DexCacheStringsOffset());
+}
+
+template<class Visitor>
+void mirror::Class::VisitFieldRoots(Visitor& visitor) {
+  ArtField* const sfields = GetSFieldsUnchecked();
+  // Since we visit class roots while we may be writing these fields, check against null.
+  // TODO: Is this safe for concurrent compaction?
+  if (sfields != nullptr) {
+    for (size_t i = 0, count = NumStaticFields(); i < count; ++i) {
+      if (kIsDebugBuild && IsResolved()) {
+        CHECK_EQ(sfields[i].GetDeclaringClass(), this) << GetStatus();
+      }
+      visitor.VisitRoot(sfields[i].DeclaringClassRoot().AddressWithoutBarrier());
+    }
+  }
+  ArtField* const ifields = GetIFieldsUnchecked();
+  if (ifields != nullptr) {
+    for (size_t i = 0, count = NumInstanceFields(); i < count; ++i) {
+      if (kIsDebugBuild && IsResolved()) {
+        CHECK_EQ(ifields[i].GetDeclaringClass(), this) << GetStatus();
+      }
+      visitor.VisitRoot(ifields[i].DeclaringClassRoot().AddressWithoutBarrier());
+    }
+  }
 }
 
 }  // namespace mirror

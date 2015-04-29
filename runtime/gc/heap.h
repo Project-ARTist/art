@@ -145,6 +145,8 @@ class Heap {
   static constexpr double kDefaultHeapGrowthMultiplier = 2.0;
   // Primitive arrays larger than this size are put in the large object space.
   static constexpr size_t kDefaultLargeObjectThreshold = 3 * kPageSize;
+  // Whether or not parallel GC is enabled. If not, then we never create the thread pool.
+  static constexpr bool kDefaultEnableParallelGC = false;
 
   // Whether or not we use the free list large object space. Only use it if USE_ART_LOW_4G_ALLOCATOR
   // since this means that we have to use the slow msync loop in MemMap::MapAnonymous.
@@ -309,7 +311,7 @@ class Heap {
 
   // Make the current growth limit the new maximum capacity, unmaps pages at the end of spaces
   // which will never be used. Used to implement dalvik.system.VMRuntime.clampGrowthLimit.
-  void ClampGrowthLimit();
+  void ClampGrowthLimit() LOCKS_EXCLUDED(Locks::heap_bitmap_lock_);
 
   // Target ideal heap utilization ratio, implements
   // dalvik.system.VMRuntime.getTargetHeapUtilization.
@@ -394,7 +396,7 @@ class Heap {
   void RecordFreeRevoke();
 
   // Must be called if a field of an Object in the heap changes, and before any GC safe-point.
-  // The call is not needed if NULL is stored in the field.
+  // The call is not needed if null is stored in the field.
   ALWAYS_INLINE void WriteBarrierField(const mirror::Object* dst, MemberOffset /*offset*/,
                                        const mirror::Object* /*new_value*/) {
     card_table_->MarkCard(dst);
@@ -672,6 +674,14 @@ class Heap {
     min_interval_homogeneous_space_compaction_by_oom_ = interval;
   }
 
+  // Helpers for android.os.Debug.getRuntimeStat().
+  uint64_t GetGcCount() const;
+  uint64_t GetGcTime() const;
+  uint64_t GetBlockingGcCount() const;
+  uint64_t GetBlockingGcTime() const;
+  void DumpGcCountRateHistogram(std::ostream& os) const;
+  void DumpBlockingGcCountRateHistogram(std::ostream& os) const;
+
  private:
   class ConcurrentGCTask;
   class CollectorTransitionTask;
@@ -873,6 +883,8 @@ class Heap {
       EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_)
       LOCKS_EXCLUDED(Locks::heap_bitmap_lock_);
 
+  void UpdateGcCountRateHistograms() EXCLUSIVE_LOCKS_REQUIRED(gc_complete_lock_);
+
   // All-known continuous spaces, where objects lie within fixed bounds.
   std::vector<space::ContinuousSpace*> continuous_spaces_;
 
@@ -979,7 +991,7 @@ class Heap {
   // programs it is "cleared" making it the same as capacity.
   size_t growth_limit_;
 
-  // When the number of bytes allocated exceeds the footprint TryAllocate returns NULL indicating
+  // When the number of bytes allocated exceeds the footprint TryAllocate returns null indicating
   // a GC should be triggered.
   size_t max_allowed_footprint_;
 
@@ -1155,6 +1167,28 @@ class Heap {
 
   // Whether or not we use homogeneous space compaction to avoid OOM errors.
   bool use_homogeneous_space_compaction_for_oom_;
+
+  // True if the currently running collection has made some thread wait.
+  bool running_collection_is_blocking_ GUARDED_BY(gc_complete_lock_);
+  // The number of blocking GC runs.
+  uint64_t blocking_gc_count_;
+  // The total duration of blocking GC runs.
+  uint64_t blocking_gc_time_;
+  // The duration of the window for the GC count rate histograms.
+  static constexpr uint64_t kGcCountRateHistogramWindowDuration = MsToNs(10 * 1000);  // 10s.
+  // The last time when the GC count rate histograms were updated.
+  // This is rounded by kGcCountRateHistogramWindowDuration (a multiple of 10s).
+  uint64_t last_update_time_gc_count_rate_histograms_;
+  // The running count of GC runs in the last window.
+  uint64_t gc_count_last_window_;
+  // The running count of blocking GC runs in the last window.
+  uint64_t blocking_gc_count_last_window_;
+  // The maximum number of buckets in the GC count rate histograms.
+  static constexpr size_t kGcCountRateMaxBucketCount = 200;
+  // The histogram of the number of GC invocations per window duration.
+  Histogram<uint64_t> gc_count_rate_histogram_ GUARDED_BY(gc_complete_lock_);
+  // The histogram of the number of blocking GC invocations per window duration.
+  Histogram<uint64_t> blocking_gc_count_rate_histogram_ GUARDED_BY(gc_complete_lock_);
 
   friend class CollectorTransitionTask;
   friend class collector::GarbageCollector;

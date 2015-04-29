@@ -43,7 +43,7 @@ TEST(BoundsCheckEliminationTest, NarrowingRangeArrayBoundsElimination) {
   ArenaAllocator allocator(&pool);
 
   HGraph* graph = new (&allocator) HGraph(&allocator);
-  graph->SetHasArrayAccesses(true);
+  graph->SetHasBoundsChecks(true);
 
   HBasicBlock* entry = new (&allocator) HBasicBlock(graph);
   graph->AddBlock(entry);
@@ -52,12 +52,11 @@ TEST(BoundsCheckEliminationTest, NarrowingRangeArrayBoundsElimination) {
       HParameterValue(0, Primitive::kPrimNot);  // array
   HInstruction* parameter2 = new (&allocator)
       HParameterValue(0, Primitive::kPrimInt);  // i
-  HInstruction* constant_1 = new (&allocator) HIntConstant(1);
-  HInstruction* constant_0 = new (&allocator) HIntConstant(0);
   entry->AddInstruction(parameter1);
   entry->AddInstruction(parameter2);
-  entry->AddInstruction(constant_1);
-  entry->AddInstruction(constant_0);
+
+  HInstruction* constant_1 = graph->GetIntConstant(1);
+  HInstruction* constant_0 = graph->GetIntConstant(0);
 
   HBasicBlock* block1 = new (&allocator) HBasicBlock(graph);
   graph->AddBlock(block1);
@@ -149,7 +148,7 @@ TEST(BoundsCheckEliminationTest, OverflowArrayBoundsElimination) {
   ArenaAllocator allocator(&pool);
 
   HGraph* graph = new (&allocator) HGraph(&allocator);
-  graph->SetHasArrayAccesses(true);
+  graph->SetHasBoundsChecks(true);
 
   HBasicBlock* entry = new (&allocator) HBasicBlock(graph);
   graph->AddBlock(entry);
@@ -158,14 +157,12 @@ TEST(BoundsCheckEliminationTest, OverflowArrayBoundsElimination) {
       HParameterValue(0, Primitive::kPrimNot);  // array
   HInstruction* parameter2 = new (&allocator)
       HParameterValue(0, Primitive::kPrimInt);  // i
-  HInstruction* constant_1 = new (&allocator) HIntConstant(1);
-  HInstruction* constant_0 = new (&allocator) HIntConstant(0);
-  HInstruction* constant_max_int = new (&allocator) HIntConstant(INT_MAX);
   entry->AddInstruction(parameter1);
   entry->AddInstruction(parameter2);
-  entry->AddInstruction(constant_1);
-  entry->AddInstruction(constant_0);
-  entry->AddInstruction(constant_max_int);
+
+  HInstruction* constant_1 = graph->GetIntConstant(1);
+  HInstruction* constant_0 = graph->GetIntConstant(0);
+  HInstruction* constant_max_int = graph->GetIntConstant(INT_MAX);
 
   HBasicBlock* block1 = new (&allocator) HBasicBlock(graph);
   graph->AddBlock(block1);
@@ -223,7 +220,7 @@ TEST(BoundsCheckEliminationTest, UnderflowArrayBoundsElimination) {
   ArenaAllocator allocator(&pool);
 
   HGraph* graph = new (&allocator) HGraph(&allocator);
-  graph->SetHasArrayAccesses(true);
+  graph->SetHasBoundsChecks(true);
 
   HBasicBlock* entry = new (&allocator) HBasicBlock(graph);
   graph->AddBlock(entry);
@@ -232,14 +229,12 @@ TEST(BoundsCheckEliminationTest, UnderflowArrayBoundsElimination) {
       HParameterValue(0, Primitive::kPrimNot);  // array
   HInstruction* parameter2 = new (&allocator)
       HParameterValue(0, Primitive::kPrimInt);  // i
-  HInstruction* constant_1 = new (&allocator) HIntConstant(1);
-  HInstruction* constant_0 = new (&allocator) HIntConstant(0);
-  HInstruction* constant_max_int = new (&allocator) HIntConstant(INT_MAX);
   entry->AddInstruction(parameter1);
   entry->AddInstruction(parameter2);
-  entry->AddInstruction(constant_1);
-  entry->AddInstruction(constant_0);
-  entry->AddInstruction(constant_max_int);
+
+  HInstruction* constant_1 = graph->GetIntConstant(1);
+  HInstruction* constant_0 = graph->GetIntConstant(0);
+  HInstruction* constant_max_int = graph->GetIntConstant(INT_MAX);
 
   HBasicBlock* block1 = new (&allocator) HBasicBlock(graph);
   graph->AddBlock(block1);
@@ -289,29 +284,26 @@ TEST(BoundsCheckEliminationTest, UnderflowArrayBoundsElimination) {
   ASSERT_FALSE(IsRemoved(bounds_check));
 }
 
-// array[5] = 1; // Can't eliminate.
-// array[4] = 1; // Can eliminate.
 // array[6] = 1; // Can't eliminate.
+// array[5] = 1; // Can eliminate.
+// array[4] = 1; // Can eliminate.
 TEST(BoundsCheckEliminationTest, ConstantArrayBoundsElimination) {
   ArenaPool pool;
   ArenaAllocator allocator(&pool);
 
   HGraph* graph = new (&allocator) HGraph(&allocator);
-  graph->SetHasArrayAccesses(true);
+  graph->SetHasBoundsChecks(true);
 
   HBasicBlock* entry = new (&allocator) HBasicBlock(graph);
   graph->AddBlock(entry);
   graph->SetEntryBlock(entry);
   HInstruction* parameter = new (&allocator) HParameterValue(0, Primitive::kPrimNot);
-  HInstruction* constant_5 = new (&allocator) HIntConstant(5);
-  HInstruction* constant_4 = new (&allocator) HIntConstant(4);
-  HInstruction* constant_6 = new (&allocator) HIntConstant(6);
-  HInstruction* constant_1 = new (&allocator) HIntConstant(1);
   entry->AddInstruction(parameter);
-  entry->AddInstruction(constant_5);
-  entry->AddInstruction(constant_4);
-  entry->AddInstruction(constant_6);
-  entry->AddInstruction(constant_1);
+
+  HInstruction* constant_5 = graph->GetIntConstant(5);
+  HInstruction* constant_4 = graph->GetIntConstant(4);
+  HInstruction* constant_6 = graph->GetIntConstant(6);
+  HInstruction* constant_1 = graph->GetIntConstant(1);
 
   HBasicBlock* block = new (&allocator) HBasicBlock(graph);
   graph->AddBlock(block);
@@ -319,9 +311,20 @@ TEST(BoundsCheckEliminationTest, ConstantArrayBoundsElimination) {
 
   HNullCheck* null_check = new (&allocator) HNullCheck(parameter, 0);
   HArrayLength* array_length = new (&allocator) HArrayLength(null_check);
+  HBoundsCheck* bounds_check6 = new (&allocator)
+      HBoundsCheck(constant_6, array_length, 0);
+  HInstruction* array_set = new (&allocator) HArraySet(
+    null_check, bounds_check6, constant_1, Primitive::kPrimInt, 0);
+  block->AddInstruction(null_check);
+  block->AddInstruction(array_length);
+  block->AddInstruction(bounds_check6);
+  block->AddInstruction(array_set);
+
+  null_check = new (&allocator) HNullCheck(parameter, 0);
+  array_length = new (&allocator) HArrayLength(null_check);
   HBoundsCheck* bounds_check5 = new (&allocator)
       HBoundsCheck(constant_5, array_length, 0);
-  HInstruction* array_set = new (&allocator) HArraySet(
+  array_set = new (&allocator) HArraySet(
     null_check, bounds_check5, constant_1, Primitive::kPrimInt, 0);
   block->AddInstruction(null_check);
   block->AddInstruction(array_length);
@@ -339,17 +342,6 @@ TEST(BoundsCheckEliminationTest, ConstantArrayBoundsElimination) {
   block->AddInstruction(bounds_check4);
   block->AddInstruction(array_set);
 
-  null_check = new (&allocator) HNullCheck(parameter, 0);
-  array_length = new (&allocator) HArrayLength(null_check);
-  HBoundsCheck* bounds_check6 = new (&allocator)
-      HBoundsCheck(constant_6, array_length, 0);
-  array_set = new (&allocator) HArraySet(
-    null_check, bounds_check6, constant_1, Primitive::kPrimInt, 0);
-  block->AddInstruction(null_check);
-  block->AddInstruction(array_length);
-  block->AddInstruction(bounds_check6);
-  block->AddInstruction(array_set);
-
   block->AddInstruction(new (&allocator) HGoto());
 
   HBasicBlock* exit = new (&allocator) HBasicBlock(graph);
@@ -361,9 +353,9 @@ TEST(BoundsCheckEliminationTest, ConstantArrayBoundsElimination) {
   RunSimplifierAndGvn(graph);
   BoundsCheckElimination bounds_check_elimination(graph);
   bounds_check_elimination.Run();
-  ASSERT_FALSE(IsRemoved(bounds_check5));
-  ASSERT_TRUE(IsRemoved(bounds_check4));
   ASSERT_FALSE(IsRemoved(bounds_check6));
+  ASSERT_TRUE(IsRemoved(bounds_check5));
+  ASSERT_TRUE(IsRemoved(bounds_check4));
 }
 
 // for (int i=initial; i<array.length; i+=increment) { array[i] = 10; }
@@ -373,19 +365,17 @@ static HGraph* BuildSSAGraph1(ArenaAllocator* allocator,
                               int increment,
                               IfCondition cond = kCondGE) {
   HGraph* graph = new (allocator) HGraph(allocator);
-  graph->SetHasArrayAccesses(true);
+  graph->SetHasBoundsChecks(true);
 
   HBasicBlock* entry = new (allocator) HBasicBlock(graph);
   graph->AddBlock(entry);
   graph->SetEntryBlock(entry);
   HInstruction* parameter = new (allocator) HParameterValue(0, Primitive::kPrimNot);
-  HInstruction* constant_initial = new (allocator) HIntConstant(initial);
-  HInstruction* constant_increment = new (allocator) HIntConstant(increment);
-  HInstruction* constant_10 = new (allocator) HIntConstant(10);
   entry->AddInstruction(parameter);
-  entry->AddInstruction(constant_initial);
-  entry->AddInstruction(constant_increment);
-  entry->AddInstruction(constant_10);
+
+  HInstruction* constant_initial = graph->GetIntConstant(initial);
+  HInstruction* constant_increment = graph->GetIntConstant(increment);
+  HInstruction* constant_10 = graph->GetIntConstant(10);
 
   HBasicBlock* block = new (allocator) HBasicBlock(graph);
   graph->AddBlock(block);
@@ -512,21 +502,18 @@ static HGraph* BuildSSAGraph2(ArenaAllocator* allocator,
                               int increment = -1,
                               IfCondition cond = kCondLE) {
   HGraph* graph = new (allocator) HGraph(allocator);
-  graph->SetHasArrayAccesses(true);
+  graph->SetHasBoundsChecks(true);
 
   HBasicBlock* entry = new (allocator) HBasicBlock(graph);
   graph->AddBlock(entry);
   graph->SetEntryBlock(entry);
   HInstruction* parameter = new (allocator) HParameterValue(0, Primitive::kPrimNot);
-  HInstruction* constant_initial = new (allocator) HIntConstant(initial);
-  HInstruction* constant_increment = new (allocator) HIntConstant(increment);
-  HInstruction* constant_minus_1 = new (allocator) HIntConstant(-1);
-  HInstruction* constant_10 = new (allocator) HIntConstant(10);
   entry->AddInstruction(parameter);
-  entry->AddInstruction(constant_initial);
-  entry->AddInstruction(constant_increment);
-  entry->AddInstruction(constant_minus_1);
-  entry->AddInstruction(constant_10);
+
+  HInstruction* constant_initial = graph->GetIntConstant(initial);
+  HInstruction* constant_increment = graph->GetIntConstant(increment);
+  HInstruction* constant_minus_1 = graph->GetIntConstant(-1);
+  HInstruction* constant_10 = graph->GetIntConstant(10);
 
   HBasicBlock* block = new (allocator) HBasicBlock(graph);
   graph->AddBlock(block);
@@ -646,17 +633,15 @@ static HGraph* BuildSSAGraph3(ArenaAllocator* allocator,
                               int increment,
                               IfCondition cond) {
   HGraph* graph = new (allocator) HGraph(allocator);
-  graph->SetHasArrayAccesses(true);
+  graph->SetHasBoundsChecks(true);
 
   HBasicBlock* entry = new (allocator) HBasicBlock(graph);
   graph->AddBlock(entry);
   graph->SetEntryBlock(entry);
-  HInstruction* constant_10 = new (allocator) HIntConstant(10);
-  HInstruction* constant_initial = new (allocator) HIntConstant(initial);
-  HInstruction* constant_increment = new (allocator) HIntConstant(increment);
-  entry->AddInstruction(constant_10);
-  entry->AddInstruction(constant_initial);
-  entry->AddInstruction(constant_increment);
+
+  HInstruction* constant_10 = graph->GetIntConstant(10);
+  HInstruction* constant_initial = graph->GetIntConstant(initial);
+  HInstruction* constant_increment = graph->GetIntConstant(increment);
 
   HBasicBlock* block = new (allocator) HBasicBlock(graph);
   graph->AddBlock(block);
@@ -759,21 +744,18 @@ static HGraph* BuildSSAGraph4(ArenaAllocator* allocator,
                               int initial,
                               IfCondition cond = kCondGE) {
   HGraph* graph = new (allocator) HGraph(allocator);
-  graph->SetHasArrayAccesses(true);
+  graph->SetHasBoundsChecks(true);
 
   HBasicBlock* entry = new (allocator) HBasicBlock(graph);
   graph->AddBlock(entry);
   graph->SetEntryBlock(entry);
   HInstruction* parameter = new (allocator) HParameterValue(0, Primitive::kPrimNot);
-  HInstruction* constant_initial = new (allocator) HIntConstant(initial);
-  HInstruction* constant_1 = new (allocator) HIntConstant(1);
-  HInstruction* constant_10 = new (allocator) HIntConstant(10);
-  HInstruction* constant_minus_1 = new (allocator) HIntConstant(-1);
   entry->AddInstruction(parameter);
-  entry->AddInstruction(constant_initial);
-  entry->AddInstruction(constant_1);
-  entry->AddInstruction(constant_10);
-  entry->AddInstruction(constant_minus_1);
+
+  HInstruction* constant_initial = graph->GetIntConstant(initial);
+  HInstruction* constant_1 = graph->GetIntConstant(1);
+  HInstruction* constant_10 = graph->GetIntConstant(10);
+  HInstruction* constant_minus_1 = graph->GetIntConstant(-1);
 
   HBasicBlock* block = new (allocator) HBasicBlock(graph);
   graph->AddBlock(block);
@@ -887,19 +869,17 @@ TEST(BoundsCheckEliminationTest, BubbleSortArrayBoundsElimination) {
   ArenaAllocator allocator(&pool);
 
   HGraph* graph = new (&allocator) HGraph(&allocator);
-  graph->SetHasArrayAccesses(true);
+  graph->SetHasBoundsChecks(true);
 
   HBasicBlock* entry = new (&allocator) HBasicBlock(graph);
   graph->AddBlock(entry);
   graph->SetEntryBlock(entry);
   HInstruction* parameter = new (&allocator) HParameterValue(0, Primitive::kPrimNot);
-  HInstruction* constant_0 = new (&allocator) HIntConstant(0);
-  HInstruction* constant_minus_1 = new (&allocator) HIntConstant(-1);
-  HInstruction* constant_1 = new (&allocator) HIntConstant(1);
   entry->AddInstruction(parameter);
-  entry->AddInstruction(constant_0);
-  entry->AddInstruction(constant_minus_1);
-  entry->AddInstruction(constant_1);
+
+  HInstruction* constant_0 = graph->GetIntConstant(0);
+  HInstruction* constant_minus_1 = graph->GetIntConstant(-1);
+  HInstruction* constant_1 = graph->GetIntConstant(1);
 
   HBasicBlock* block = new (&allocator) HBasicBlock(graph);
   graph->AddBlock(block);

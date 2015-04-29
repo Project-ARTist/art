@@ -17,7 +17,9 @@
 #ifndef ART_COMPILER_OPTIMIZING_NODES_H_
 #define ART_COMPILER_OPTIMIZING_NODES_H_
 
+#include "base/arena_containers.h"
 #include "base/arena_object.h"
+#include "dex/compiler_enums.h"
 #include "entrypoints/quick/quick_entrypoints_enum.h"
 #include "handle.h"
 #include "handle_scope.h"
@@ -33,16 +35,20 @@ namespace art {
 
 class GraphChecker;
 class HBasicBlock;
+class HDoubleConstant;
 class HEnvironment;
+class HFloatConstant;
+class HGraphVisitor;
 class HInstruction;
 class HIntConstant;
 class HInvoke;
-class HGraphVisitor;
+class HLongConstant;
 class HNullConstant;
 class HPhi;
 class HSuspendCheck;
 class LiveInterval;
 class LocationSummary;
+class SsaBuilder;
 
 static const int kDefaultNumberOfBlocks = 8;
 static const int kDefaultNumberOfSuccessors = 2;
@@ -69,6 +75,10 @@ class HInstructionList {
   void AddInstruction(HInstruction* instruction);
   void RemoveInstruction(HInstruction* instruction);
 
+  // Insert `instruction` before/after an existing instruction `cursor`.
+  void InsertInstructionBefore(HInstruction* instruction, HInstruction* cursor);
+  void InsertInstructionAfter(HInstruction* instruction, HInstruction* cursor);
+
   // Return true if this list contains `instruction`.
   bool Contains(HInstruction* instruction) const;
 
@@ -86,6 +96,9 @@ class HInstructionList {
 
   void AddAfter(HInstruction* cursor, const HInstructionList& instruction_list);
   void Add(const HInstructionList& instruction_list);
+
+  // Return the number of instructions in the list. This is an expensive operation.
+  size_t CountSize() const;
 
  private:
   HInstruction* first_instruction_;
@@ -107,15 +120,21 @@ class HGraph : public ArenaObject<kArenaAllocMisc> {
       : arena_(arena),
         blocks_(arena, kDefaultNumberOfBlocks),
         reverse_post_order_(arena, kDefaultNumberOfBlocks),
+        linear_order_(arena, kDefaultNumberOfBlocks),
         entry_block_(nullptr),
         exit_block_(nullptr),
         maximum_number_of_out_vregs_(0),
         number_of_vregs_(0),
         number_of_in_vregs_(0),
         temporaries_vreg_slots_(0),
-        has_array_accesses_(false),
+        has_bounds_checks_(false),
         debuggable_(debuggable),
-        current_instruction_id_(start_instruction_id) {}
+        current_instruction_id_(start_instruction_id),
+        cached_null_constant_(nullptr),
+        cached_int_constants_(std::less<int32_t>(), arena->Adapter()),
+        cached_float_constants_(std::less<int32_t>(), arena->Adapter()),
+        cached_long_constants_(std::less<int64_t>(), arena->Adapter()),
+        cached_double_constants_(std::less<int64_t>(), arena->Adapter()) {}
 
   ArenaAllocator* GetArena() const { return arena_; }
   const GrowableArray<HBasicBlock*>& GetBlocks() const { return blocks_; }
@@ -153,6 +172,9 @@ class HGraph : public ArenaObject<kArenaAllocMisc> {
 
   // Inline this graph in `outer_graph`, replacing the given `invoke` instruction.
   void InlineInto(HGraph* outer_graph, HInvoke* invoke);
+
+  // Removes `block` from the graph.
+  void DeleteDeadBlock(HBasicBlock* block);
 
   void SplitCriticalEdge(HBasicBlock* block, HBasicBlock* successor);
   void SimplifyLoop(HBasicBlock* header);
@@ -206,20 +228,41 @@ class HGraph : public ArenaObject<kArenaAllocMisc> {
     return reverse_post_order_;
   }
 
-  bool HasArrayAccesses() const {
-    return has_array_accesses_;
+  const GrowableArray<HBasicBlock*>& GetLinearOrder() const {
+    return linear_order_;
   }
 
-  void SetHasArrayAccesses(bool value) {
-    has_array_accesses_ = value;
+  bool HasBoundsChecks() const {
+    return has_bounds_checks_;
+  }
+
+  void SetHasBoundsChecks(bool value) {
+    has_bounds_checks_ = value;
   }
 
   bool IsDebuggable() const { return debuggable_; }
 
+  // Returns a constant of the given type and value. If it does not exist
+  // already, it is created and inserted into the graph. This method is only for
+  // integral types.
+  HConstant* GetConstant(Primitive::Type type, int64_t value);
   HNullConstant* GetNullConstant();
+  HIntConstant* GetIntConstant(int32_t value) {
+    return CreateConstant(value, &cached_int_constants_);
+  }
+  HLongConstant* GetLongConstant(int64_t value) {
+    return CreateConstant(value, &cached_long_constants_);
+  }
+  HFloatConstant* GetFloatConstant(float value) {
+    return CreateConstant(bit_cast<int32_t, float>(value), &cached_float_constants_);
+  }
+  HDoubleConstant* GetDoubleConstant(double value) {
+    return CreateConstant(bit_cast<int64_t, double>(value), &cached_double_constants_);
+  }
+
+  HBasicBlock* FindCommonDominator(HBasicBlock* first, HBasicBlock* second) const;
 
  private:
-  HBasicBlock* FindCommonDominator(HBasicBlock* first, HBasicBlock* second) const;
   void VisitBlockForDominatorTree(HBasicBlock* block,
                                   HBasicBlock* predecessor,
                                   GrowableArray<size_t>* visits);
@@ -228,7 +271,35 @@ class HGraph : public ArenaObject<kArenaAllocMisc> {
                               ArenaBitVector* visited,
                               ArenaBitVector* visiting);
   void RemoveInstructionsAsUsersFromDeadBlocks(const ArenaBitVector& visited) const;
-  void RemoveDeadBlocks(const ArenaBitVector& visited) const;
+  void RemoveDeadBlocks(const ArenaBitVector& visited);
+
+  template <class InstructionType, typename ValueType>
+  InstructionType* CreateConstant(ValueType value,
+                                  ArenaSafeMap<ValueType, InstructionType*>* cache) {
+    // Try to find an existing constant of the given value.
+    InstructionType* constant = nullptr;
+    auto cached_constant = cache->find(value);
+    if (cached_constant != cache->end()) {
+      constant = cached_constant->second;
+    }
+
+    // If not found or previously deleted, create and cache a new instruction.
+    if (constant == nullptr || constant->GetBlock() == nullptr) {
+      constant = new (arena_) InstructionType(value);
+      cache->Overwrite(value, constant);
+      InsertConstant(constant);
+    }
+    return constant;
+  }
+
+  void InsertConstant(HConstant* instruction);
+
+  // Cache a float constant into the graph. This method should only be
+  // called by the SsaBuilder when creating "equivalent" instructions.
+  void CacheFloatConstant(HFloatConstant* constant);
+
+  // See CacheFloatConstant comment.
+  void CacheDoubleConstant(HDoubleConstant* constant);
 
   ArenaAllocator* const arena_;
 
@@ -237,6 +308,9 @@ class HGraph : public ArenaObject<kArenaAllocMisc> {
 
   // List of blocks to perform a reverse post order tree traversal.
   GrowableArray<HBasicBlock*> reverse_post_order_;
+
+  // List of blocks to perform a linear order tree traversal.
+  GrowableArray<HBasicBlock*> linear_order_;
 
   HBasicBlock* entry_block_;
   HBasicBlock* exit_block_;
@@ -253,8 +327,8 @@ class HGraph : public ArenaObject<kArenaAllocMisc> {
   // Number of vreg size slots that the temporaries use (used in baseline compiler).
   size_t temporaries_vreg_slots_;
 
-  // Has array accesses. We can totally skip BCE if it's false.
-  bool has_array_accesses_;
+  // Has bounds checks. We can totally skip BCE if it's false.
+  bool has_bounds_checks_;
 
   // Indicates whether the graph should be compiled in a way that
   // ensures full debuggability. If false, we can apply more
@@ -264,9 +338,15 @@ class HGraph : public ArenaObject<kArenaAllocMisc> {
   // The current id to assign to a newly added instruction. See HInstruction.id_.
   int32_t current_instruction_id_;
 
-  // Cached null constant that might be created when building SSA form.
+  // Cached constants.
   HNullConstant* cached_null_constant_;
+  ArenaSafeMap<int32_t, HIntConstant*> cached_int_constants_;
+  ArenaSafeMap<int32_t, HFloatConstant*> cached_float_constants_;
+  ArenaSafeMap<int64_t, HLongConstant*> cached_long_constants_;
+  ArenaSafeMap<int64_t, HDoubleConstant*> cached_double_constants_;
 
+  friend class SsaBuilder;           // For caching constants.
+  friend class SsaLivenessAnalysis;  // For the linear order.
   ART_FRIEND_TEST(GraphTest, IfSuccessorSimpleJoinBlock1);
   DISALLOW_COPY_AND_ASSIGN(HGraph);
 };
@@ -300,9 +380,9 @@ class HLoopInformation : public ArenaObject<kArenaAllocMisc> {
     back_edges_.Delete(back_edge);
   }
 
-  bool IsBackEdge(HBasicBlock* block) {
+  bool IsBackEdge(const HBasicBlock& block) const {
     for (size_t i = 0, e = back_edges_.Size(); i < e; ++i) {
-      if (back_edges_.Get(i) == block) return true;
+      if (back_edges_.Get(i) == &block) return true;
     }
     return false;
   }
@@ -315,6 +395,11 @@ class HLoopInformation : public ArenaObject<kArenaAllocMisc> {
 
   const GrowableArray<HBasicBlock*>& GetBackEdges() const {
     return back_edges_;
+  }
+
+  HBasicBlock* GetSingleBackEdge() const {
+    DCHECK_EQ(back_edges_.Size(), 1u);
+    return back_edges_.Get(0);
   }
 
   void ClearBackEdges() {
@@ -336,6 +421,7 @@ class HLoopInformation : public ArenaObject<kArenaAllocMisc> {
   const ArenaBitVector& GetBlocks() const { return blocks_; }
 
   void Add(HBasicBlock* block);
+  void Remove(HBasicBlock* block);
 
  private:
   // Internal recursive implementation of `Populate`.
@@ -391,6 +477,8 @@ class HBasicBlock : public ArenaObject<kArenaAllocMisc> {
     return graph_->GetExitBlock() == this;
   }
 
+  bool IsSingleGoto() const;
+
   void AddBackEdge(HBasicBlock* back_edge) {
     if (loop_information_ == nullptr) {
       loop_information_ = new (graph_->GetArena()) HLoopInformation(this, graph_);
@@ -408,6 +496,7 @@ class HBasicBlock : public ArenaObject<kArenaAllocMisc> {
   HBasicBlock* GetDominator() const { return dominator_; }
   void SetDominator(HBasicBlock* dominator) { dominator_ = dominator; }
   void AddDominatedBlock(HBasicBlock* block) { dominated_blocks_.Add(block); }
+  void RemoveDominatedBlock(HBasicBlock* block) { dominated_blocks_.Delete(block); }
   void ReplaceDominatedBlock(HBasicBlock* existing, HBasicBlock* new_block) {
     for (size_t i = 0, e = dominated_blocks_.Size(); i < e; ++i) {
       if (dominated_blocks_.Get(i) == existing) {
@@ -428,8 +517,9 @@ class HBasicBlock : public ArenaObject<kArenaAllocMisc> {
   HInstruction* GetFirstInstruction() const { return instructions_.first_instruction_; }
   HInstruction* GetLastInstruction() const { return instructions_.last_instruction_; }
   const HInstructionList& GetInstructions() const { return instructions_; }
-  const HInstructionList& GetPhis() const { return phis_; }
   HInstruction* GetFirstPhi() const { return phis_.first_instruction_; }
+  HInstruction* GetLastPhi() const { return phis_.last_instruction_; }
+  const HInstructionList& GetPhis() const { return phis_; }
 
   void AddSuccessor(HBasicBlock* block) {
     successors_.Add(block);
@@ -476,6 +566,13 @@ class HBasicBlock : public ArenaObject<kArenaAllocMisc> {
     predecessors_.Put(1, temp);
   }
 
+  void SwapSuccessors() {
+    DCHECK_EQ(successors_.Size(), 2u);
+    HBasicBlock* temp = successors_.Get(0);
+    successors_.Put(0, successors_.Get(1));
+    successors_.Put(1, temp);
+  }
+
   size_t GetPredecessorIndexOf(HBasicBlock* predecessor) {
     for (size_t i = 0, e = predecessors_.Size(); i < e; ++i) {
       if (predecessors_.Get(i) == predecessor) {
@@ -506,16 +603,31 @@ class HBasicBlock : public ArenaObject<kArenaAllocMisc> {
   // that this method does not update the graph, reverse post order, loop
   // information, nor make sure the blocks are consistent (for example ending
   // with a control flow instruction).
-  void MergeWith(HBasicBlock* other);
+  void MergeWithInlined(HBasicBlock* other);
 
   // Replace `this` with `other`. Predecessors, successors, and dominated blocks
   // of `this` are moved to `other`.
   // Note that this method does not update the graph, reverse post order, loop
   // information, nor make sure the blocks are consistent (for example ending
+  // with a control flow instruction).
   void ReplaceWith(HBasicBlock* other);
 
+  // Merge `other` at the end of `this`. This method updates loops, reverse post
+  // order, links to predecessors, successors, dominators and deletes the block
+  // from the graph. The two blocks must be successive, i.e. `this` the only
+  // predecessor of `other` and vice versa.
+  void MergeWith(HBasicBlock* other);
+
+  // Disconnects `this` from all its predecessors, successors and dominator,
+  // removes it from all loops it is included in and eventually from the graph.
+  // The block must not dominate any other block. Predecessors and successors
+  // are safely updated.
+  void DisconnectAndDelete();
+
   void AddInstruction(HInstruction* instruction);
+  // Insert `instruction` before/after an existing instruction `cursor`.
   void InsertInstructionBefore(HInstruction* instruction, HInstruction* cursor);
+  void InsertInstructionAfter(HInstruction* instruction, HInstruction* cursor);
   // Replace instruction `initial` with `replacement` within this block.
   void ReplaceAndRemoveInstructionWith(HInstruction* initial,
                                        HInstruction* replacement);
@@ -526,9 +638,10 @@ class HBasicBlock : public ArenaObject<kArenaAllocMisc> {
   // instruction is not in use and removes it from the use lists of its inputs.
   void RemoveInstruction(HInstruction* instruction, bool ensure_safety = true);
   void RemovePhi(HPhi* phi, bool ensure_safety = true);
+  void RemoveInstructionOrPhi(HInstruction* instruction, bool ensure_safety = true);
 
   bool IsLoopHeader() const {
-    return (loop_information_ != nullptr) && (loop_information_->GetHeader() == this);
+    return IsInLoop() && (loop_information_->GetHeader() == this);
   }
 
   bool IsLoopPreHeaderFirstPredecessor() const {
@@ -547,7 +660,7 @@ class HBasicBlock : public ArenaObject<kArenaAllocMisc> {
   void SetInLoop(HLoopInformation* info) {
     if (IsLoopHeader()) {
       // Nothing to do. This just means `info` is an outer loop.
-    } else if (loop_information_ == nullptr) {
+    } else if (!IsInLoop()) {
       loop_information_ = info;
     } else if (loop_information_->Contains(*info->GetHeader())) {
       // Block is currently part of an outer loop. Make it part of this inner loop.
@@ -566,6 +679,11 @@ class HBasicBlock : public ArenaObject<kArenaAllocMisc> {
     loop_information_ = info;
   }
 
+  // Checks if the loop information points to a valid loop. If the loop has been
+  // dismantled (does not have a back edge any more), loop information is
+  // removed or replaced with the information of the first valid outer loop.
+  void UpdateLoopInformation();
+
   bool IsInLoop() const { return loop_information_ != nullptr; }
 
   // Returns wheter this block dominates the blocked passed as parameter.
@@ -581,6 +699,10 @@ class HBasicBlock : public ArenaObject<kArenaAllocMisc> {
 
   bool IsCatchBlock() const { return is_catch_block_; }
   void SetIsCatchBlock() { is_catch_block_ = true; }
+
+  bool EndsWithControlFlowInstruction() const;
+  bool EndsWithIf() const;
+  bool HasSinglePhi() const;
 
  private:
   HGraph* graph_;
@@ -604,18 +726,45 @@ class HBasicBlock : public ArenaObject<kArenaAllocMisc> {
   DISALLOW_COPY_AND_ASSIGN(HBasicBlock);
 };
 
+// Iterates over the LoopInformation of all loops which contain 'block'
+// from the innermost to the outermost.
+class HLoopInformationOutwardIterator : public ValueObject {
+ public:
+  explicit HLoopInformationOutwardIterator(const HBasicBlock& block)
+      : current_(block.GetLoopInformation()) {}
+
+  bool Done() const { return current_ == nullptr; }
+
+  void Advance() {
+    DCHECK(!Done());
+    current_ = current_->GetPreHeader()->GetLoopInformation();
+  }
+
+  HLoopInformation* Current() const {
+    DCHECK(!Done());
+    return current_;
+  }
+
+ private:
+  HLoopInformation* current_;
+
+  DISALLOW_COPY_AND_ASSIGN(HLoopInformationOutwardIterator);
+};
+
 #define FOR_EACH_CONCRETE_INSTRUCTION(M)                                \
   M(Add, BinaryOperation)                                               \
   M(And, BinaryOperation)                                               \
   M(ArrayGet, Instruction)                                              \
   M(ArrayLength, Instruction)                                           \
   M(ArraySet, Instruction)                                              \
+  M(BooleanNot, UnaryOperation)                                         \
   M(BoundsCheck, Instruction)                                           \
   M(BoundType, Instruction)                                             \
   M(CheckCast, Instruction)                                             \
   M(ClinitCheck, Instruction)                                           \
   M(Compare, BinaryOperation)                                           \
   M(Condition, BinaryOperation)                                         \
+  M(Deoptimize, Instruction)                                            \
   M(Div, BinaryOperation)                                               \
   M(DivZeroCheck, Instruction)                                          \
   M(DoubleConstant, Constant)                                           \
@@ -641,6 +790,7 @@ class HBasicBlock : public ArenaObject<kArenaAllocMisc> {
   M(LoadString, Instruction)                                            \
   M(Local, Instruction)                                                 \
   M(LongConstant, Constant)                                             \
+  M(MemoryBarrier, Instruction)                                         \
   M(MonitorOperation, Instruction)                                      \
   M(Mul, BinaryOperation)                                               \
   M(Neg, UnaryOperation)                                                \
@@ -831,6 +981,12 @@ class HUserRecord : public ValueObject {
   HUseListNode<T>* use_node_;
 };
 
+// TODO: Add better documentation to this class and maybe refactor with more suggestive names.
+// - Has(All)SideEffects suggests that all the side effects are present but only ChangesSomething
+//   flag is consider.
+// - DependsOn suggests that there is a real dependency between side effects but it only
+//   checks DependendsOnSomething flag.
+//
 // Represents the side effects an instruction may have.
 class SideEffects : public ValueObject {
  public:
@@ -906,6 +1062,10 @@ class HEnvironment : public ArenaObject<kArenaAllocMisc> {
   }
 
   void CopyFrom(HEnvironment* env);
+  // Copy from `env`. If it's a loop phi for `loop_header`, copy the first
+  // input to the loop phi instead. This is for inserting instructions that
+  // require an environment (like HDeoptimization) in the loop pre-header.
+  void CopyFromWithLoopPhiAdjustment(HEnvironment* env, HBasicBlock* loop_header);
 
   void SetRawEnvAt(size_t index, HInstruction* instruction) {
     vregs_.Put(index, HUserRecord<HEnvironment*>(instruction));
@@ -1064,8 +1224,6 @@ class HInstruction : public ArenaObject<kArenaAllocMisc> {
   virtual bool CanThrow() const { return false; }
   bool HasSideEffects() const { return side_effects_.HasSideEffects(); }
 
-  virtual bool ActAsNullConstant() const { return false; }
-
   // Does not apply for all instructions, but having this at top level greatly
   // simplifies the null check elimination.
   virtual bool CanBeNull() const {
@@ -1073,7 +1231,10 @@ class HInstruction : public ArenaObject<kArenaAllocMisc> {
     return true;
   }
 
-  virtual bool CanDoImplicitNullCheck() const { return false; }
+  virtual bool CanDoImplicitNullCheckOn(HInstruction* obj) const {
+    UNUSED(obj);
+    return false;
+  }
 
   void SetReferenceTypeInfo(ReferenceTypeInfo reference_type_info) {
     DCHECK_EQ(GetType(), Primitive::kPrimNot);
@@ -1110,6 +1271,9 @@ class HInstruction : public ArenaObject<kArenaAllocMisc> {
   bool HasUses() const { return !uses_.IsEmpty() || !env_uses_.IsEmpty(); }
   bool HasEnvironmentUses() const { return !env_uses_.IsEmpty(); }
   bool HasNonEnvironmentUses() const { return !uses_.IsEmpty(); }
+  bool HasOnlyOneNonEnvironmentUse() const {
+    return !HasEnvironmentUses() && GetUses().HasOnlyOneUse();
+  }
 
   // Does this instruction strictly dominate `other_instruction`?
   // Returns false if this instruction and `other_instruction` are the same.
@@ -1125,7 +1289,24 @@ class HInstruction : public ArenaObject<kArenaAllocMisc> {
 
   bool HasEnvironment() const { return environment_ != nullptr; }
   HEnvironment* GetEnvironment() const { return environment_; }
-  void SetEnvironment(HEnvironment* environment) { environment_ = environment; }
+  // Set the `environment_` field. Raw because this method does not
+  // update the uses lists.
+  void SetRawEnvironment(HEnvironment* environment) { environment_ = environment; }
+
+  // Set the environment of this instruction, copying it from `environment`. While
+  // copying, the uses lists are being updated.
+  void CopyEnvironmentFrom(HEnvironment* environment) {
+    ArenaAllocator* allocator = GetBlock()->GetGraph()->GetArena();
+    environment_ = new (allocator) HEnvironment(allocator, environment->Size());
+    environment_->CopyFrom(environment);
+  }
+
+  void CopyEnvironmentFromWithLoopPhiAdjustment(HEnvironment* environment,
+                                                HBasicBlock* block) {
+    ArenaAllocator* allocator = GetBlock()->GetGraph()->GetArena();
+    environment_ = new (allocator) HEnvironment(allocator, environment->Size());
+    environment_->CopyFromWithLoopPhiAdjustment(environment, block);
+  }
 
   // Returns the number of entries in the environment. Typically, that is the
   // number of dex registers in a method. It could be more in case of inlining.
@@ -1136,6 +1317,13 @@ class HInstruction : public ArenaObject<kArenaAllocMisc> {
 
   void ReplaceWith(HInstruction* instruction);
   void ReplaceInput(HInstruction* replacement, size_t index);
+
+  // This is almost the same as doing `ReplaceWith()`. But in this helper, the
+  // uses of this instruction by `other` are *not* updated.
+  void ReplaceWithExceptInReplacementAtIndex(HInstruction* other, size_t use_index) {
+    ReplaceWith(other);
+    other->ReplaceInput(this, use_index);
+  }
 
   // Move `this` instruction before `cursor`.
   void MoveBefore(HInstruction* cursor);
@@ -1199,6 +1387,8 @@ class HInstruction : public ArenaObject<kArenaAllocMisc> {
   bool NeedsCurrentMethod() const {
     return NeedsEnvironment() || IsLoadClass() || IsLoadString();
   }
+
+  virtual bool NeedsDexCache() const { return false; }
 
  protected:
   virtual const HUserRecord<HInstruction*> InputRecordAt(size_t i) const = 0;
@@ -1476,10 +1666,29 @@ class HIf : public HTemplateInstruction<1> {
 
   DECLARE_INSTRUCTION(If);
 
-  virtual bool IsIfInstruction() const { return true; }
-
  private:
   DISALLOW_COPY_AND_ASSIGN(HIf);
+};
+
+// Deoptimize to interpreter, upon checking a condition.
+class HDeoptimize : public HTemplateInstruction<1> {
+ public:
+  HDeoptimize(HInstruction* cond, uint32_t dex_pc)
+      : HTemplateInstruction(SideEffects::None()),
+        dex_pc_(dex_pc) {
+    SetRawInputAt(0, cond);
+  }
+
+  bool NeedsEnvironment() const OVERRIDE { return true; }
+  bool CanThrow() const OVERRIDE { return true; }
+  uint32_t GetDexPc() const { return dex_pc_; }
+
+  DECLARE_INSTRUCTION(Deoptimize);
+
+ private:
+  uint32_t dex_pc_;
+
+  DISALLOW_COPY_AND_ASSIGN(HDeoptimize);
 };
 
 class HUnaryOperation : public HExpression<1> {
@@ -1500,7 +1709,7 @@ class HUnaryOperation : public HExpression<1> {
 
   // Try to statically evaluate `operation` and return a HConstant
   // containing the result of this evaluation.  If `operation` cannot
-  // be evaluated as a constant, return nullptr.
+  // be evaluated as a constant, return null.
   HConstant* TryStaticEvaluation() const;
 
   // Apply this operation to `x`.
@@ -1568,7 +1777,7 @@ class HBinaryOperation : public HExpression<2> {
 
   // Try to statically evaluate `operation` and return a HConstant
   // containing the result of this evaluation.  If `operation` cannot
-  // be evaluated as a constant, return nullptr.
+  // be evaluated as a constant, return null.
   HConstant* TryStaticEvaluation() const;
 
   // Apply this operation to `x` and `y`.
@@ -1576,11 +1785,11 @@ class HBinaryOperation : public HExpression<2> {
   virtual int64_t Evaluate(int64_t x, int64_t y) const = 0;
 
   // Returns an input that can legally be used as the right input and is
-  // constant, or nullptr.
+  // constant, or null.
   HConstant* GetConstantRight() const;
 
   // If `GetConstantRight()` returns one of the input, this returns the other
-  // one. Otherwise it returns nullptr.
+  // one. Otherwise it returns null.
   HInstruction* GetLeastConstantLeft() const;
 
   DECLARE_INSTRUCTION(BinaryOperation);
@@ -1599,8 +1808,8 @@ class HCondition : public HBinaryOperation {
   void ClearNeedsMaterialization() { needs_materialization_ = false; }
 
   // For code generation purposes, returns whether this instruction is just before
-  // `if_`, and disregard moves in between.
-  bool IsBeforeWhenDisregardMoves(HIf* if_) const;
+  // `instruction`, and disregard moves in between.
+  bool IsBeforeWhenDisregardMoves(HInstruction* instruction) const;
 
   DECLARE_INSTRUCTION(Condition);
 
@@ -1858,8 +2067,6 @@ class HConstant : public HExpression<0> {
   virtual bool IsZero() const { return false; }
   virtual bool IsOne() const { return false; }
 
-  static HConstant* NewConstant(ArenaAllocator* allocator, Primitive::Type type, int64_t val);
-
   DECLARE_INSTRUCTION(Constant);
 
  private:
@@ -1868,81 +2075,94 @@ class HConstant : public HExpression<0> {
 
 class HFloatConstant : public HConstant {
  public:
-  explicit HFloatConstant(float value) : HConstant(Primitive::kPrimFloat), value_(value) {}
-
   float GetValue() const { return value_; }
 
   bool InstructionDataEquals(HInstruction* other) const OVERRIDE {
-    return bit_cast<float, int32_t>(other->AsFloatConstant()->value_) ==
-        bit_cast<float, int32_t>(value_);
+    return bit_cast<uint32_t, float>(other->AsFloatConstant()->value_) ==
+        bit_cast<uint32_t, float>(value_);
   }
 
   size_t ComputeHashCode() const OVERRIDE { return static_cast<size_t>(GetValue()); }
 
   bool IsMinusOne() const OVERRIDE {
-    return bit_cast<uint32_t>(AsFloatConstant()->GetValue()) == bit_cast<uint32_t>((-1.0f));
+    return bit_cast<uint32_t, float>(AsFloatConstant()->GetValue()) ==
+        bit_cast<uint32_t, float>((-1.0f));
   }
   bool IsZero() const OVERRIDE {
     return AsFloatConstant()->GetValue() == 0.0f;
   }
   bool IsOne() const OVERRIDE {
-    return bit_cast<uint32_t>(AsFloatConstant()->GetValue()) == bit_cast<uint32_t>(1.0f);
+    return bit_cast<uint32_t, float>(AsFloatConstant()->GetValue()) ==
+        bit_cast<uint32_t, float>(1.0f);
   }
 
   DECLARE_INSTRUCTION(FloatConstant);
 
  private:
+  explicit HFloatConstant(float value) : HConstant(Primitive::kPrimFloat), value_(value) {}
+  explicit HFloatConstant(int32_t value)
+      : HConstant(Primitive::kPrimFloat), value_(bit_cast<float, int32_t>(value)) {}
+
   const float value_;
 
+  // Only the SsaBuilder and HGraph can create floating-point constants.
+  friend class SsaBuilder;
+  friend class HGraph;
   DISALLOW_COPY_AND_ASSIGN(HFloatConstant);
 };
 
 class HDoubleConstant : public HConstant {
  public:
-  explicit HDoubleConstant(double value) : HConstant(Primitive::kPrimDouble), value_(value) {}
-
   double GetValue() const { return value_; }
 
   bool InstructionDataEquals(HInstruction* other) const OVERRIDE {
-    return bit_cast<double, int64_t>(other->AsDoubleConstant()->value_) ==
-        bit_cast<double, int64_t>(value_);
+    return bit_cast<uint64_t, double>(other->AsDoubleConstant()->value_) ==
+        bit_cast<uint64_t, double>(value_);
   }
 
   size_t ComputeHashCode() const OVERRIDE { return static_cast<size_t>(GetValue()); }
 
   bool IsMinusOne() const OVERRIDE {
-    return bit_cast<uint64_t>(AsDoubleConstant()->GetValue()) == bit_cast<uint64_t>((-1.0));
+    return bit_cast<uint64_t, double>(AsDoubleConstant()->GetValue()) ==
+        bit_cast<uint64_t, double>((-1.0));
   }
   bool IsZero() const OVERRIDE {
     return AsDoubleConstant()->GetValue() == 0.0;
   }
   bool IsOne() const OVERRIDE {
-    return bit_cast<uint64_t>(AsDoubleConstant()->GetValue()) == bit_cast<uint64_t>(1.0);
+    return bit_cast<uint64_t, double>(AsDoubleConstant()->GetValue()) ==
+        bit_cast<uint64_t, double>(1.0);
   }
 
   DECLARE_INSTRUCTION(DoubleConstant);
 
  private:
+  explicit HDoubleConstant(double value) : HConstant(Primitive::kPrimDouble), value_(value) {}
+  explicit HDoubleConstant(int64_t value)
+      : HConstant(Primitive::kPrimDouble), value_(bit_cast<double, int64_t>(value)) {}
+
   const double value_;
 
+  // Only the SsaBuilder and HGraph can create floating-point constants.
+  friend class SsaBuilder;
+  friend class HGraph;
   DISALLOW_COPY_AND_ASSIGN(HDoubleConstant);
 };
 
 class HNullConstant : public HConstant {
  public:
-  HNullConstant() : HConstant(Primitive::kPrimNot) {}
-
   bool InstructionDataEquals(HInstruction* other ATTRIBUTE_UNUSED) const OVERRIDE {
     return true;
   }
 
   size_t ComputeHashCode() const OVERRIDE { return 0; }
 
-  bool ActAsNullConstant() const OVERRIDE { return true; }
-
   DECLARE_INSTRUCTION(NullConstant);
 
  private:
+  HNullConstant() : HConstant(Primitive::kPrimNot) {}
+
+  friend class HGraph;
   DISALLOW_COPY_AND_ASSIGN(HNullConstant);
 };
 
@@ -1950,8 +2170,6 @@ class HNullConstant : public HConstant {
 // synthesized (for example with the if-eqz instruction).
 class HIntConstant : public HConstant {
  public:
-  explicit HIntConstant(int32_t value) : HConstant(Primitive::kPrimInt), value_(value) {}
-
   int32_t GetValue() const { return value_; }
 
   bool InstructionDataEquals(HInstruction* other) const OVERRIDE {
@@ -1960,11 +2178,6 @@ class HIntConstant : public HConstant {
 
   size_t ComputeHashCode() const OVERRIDE { return GetValue(); }
 
-  // TODO: Null is represented by the `0` constant. In most cases we replace it
-  // with a HNullConstant but we don't do it when comparing (a != null). This
-  // method is an workaround until we fix the above.
-  bool ActAsNullConstant() const OVERRIDE { return value_ == 0; }
-
   bool IsMinusOne() const OVERRIDE { return GetValue() == -1; }
   bool IsZero() const OVERRIDE { return GetValue() == 0; }
   bool IsOne() const OVERRIDE { return GetValue() == 1; }
@@ -1972,15 +2185,18 @@ class HIntConstant : public HConstant {
   DECLARE_INSTRUCTION(IntConstant);
 
  private:
+  explicit HIntConstant(int32_t value) : HConstant(Primitive::kPrimInt), value_(value) {}
+
   const int32_t value_;
 
+  friend class HGraph;
+  ART_FRIEND_TEST(GraphTest, InsertInstructionBefore);
+  ART_FRIEND_TYPED_TEST(ParallelMoveTest, ConstantLast);
   DISALLOW_COPY_AND_ASSIGN(HIntConstant);
 };
 
 class HLongConstant : public HConstant {
  public:
-  explicit HLongConstant(int64_t value) : HConstant(Primitive::kPrimLong), value_(value) {}
-
   int64_t GetValue() const { return value_; }
 
   bool InstructionDataEquals(HInstruction* other) const OVERRIDE {
@@ -1996,8 +2212,11 @@ class HLongConstant : public HConstant {
   DECLARE_INSTRUCTION(LongConstant);
 
  private:
+  explicit HLongConstant(int64_t value) : HConstant(Primitive::kPrimLong), value_(value) {}
+
   const int64_t value_;
 
+  friend class HGraph;
   DISALLOW_COPY_AND_ASSIGN(HLongConstant);
 };
 
@@ -2023,13 +2242,19 @@ class HInvoke : public HInstruction {
     SetRawInputAt(index, argument);
   }
 
+  // Return the number of arguments.  This number can be lower than
+  // the number of inputs returned by InputCount(), as some invoke
+  // instructions (e.g. HInvokeStaticOrDirect) can have non-argument
+  // inputs at the end of their list of inputs.
+  uint32_t GetNumberOfArguments() const { return number_of_arguments_; }
+
   Primitive::Type GetType() const OVERRIDE { return return_type_; }
 
   uint32_t GetDexPc() const { return dex_pc_; }
 
   uint32_t GetDexMethodIndex() const { return dex_method_index_; }
 
-  Intrinsics GetIntrinsic() {
+  Intrinsics GetIntrinsic() const {
     return intrinsic_;
   }
 
@@ -2042,16 +2267,19 @@ class HInvoke : public HInstruction {
  protected:
   HInvoke(ArenaAllocator* arena,
           uint32_t number_of_arguments,
+          uint32_t number_of_other_inputs,
           Primitive::Type return_type,
           uint32_t dex_pc,
           uint32_t dex_method_index)
     : HInstruction(SideEffects::All()),
+      number_of_arguments_(number_of_arguments),
       inputs_(arena, number_of_arguments),
       return_type_(return_type),
       dex_pc_(dex_pc),
       dex_method_index_(dex_method_index),
       intrinsic_(Intrinsics::kNone) {
-    inputs_.SetSize(number_of_arguments);
+    uint32_t number_of_inputs = number_of_arguments + number_of_other_inputs;
+    inputs_.SetSize(number_of_inputs);
   }
 
   const HUserRecord<HInstruction*> InputRecordAt(size_t i) const OVERRIDE { return inputs_.Get(i); }
@@ -2059,6 +2287,7 @@ class HInvoke : public HInstruction {
     inputs_.Put(index, input);
   }
 
+  uint32_t number_of_arguments_;
   GrowableArray<HUserRecord<HInstruction*> > inputs_;
   const Primitive::Type return_type_;
   const uint32_t dex_pc_;
@@ -2071,31 +2300,108 @@ class HInvoke : public HInstruction {
 
 class HInvokeStaticOrDirect : public HInvoke {
  public:
+  // Requirements of this method call regarding the class
+  // initialization (clinit) check of its declaring class.
+  enum class ClinitCheckRequirement {
+    kNone,      // Class already initialized.
+    kExplicit,  // Static call having explicit clinit check as last input.
+    kImplicit,  // Static call implicitly requiring a clinit check.
+  };
+
   HInvokeStaticOrDirect(ArenaAllocator* arena,
                         uint32_t number_of_arguments,
                         Primitive::Type return_type,
                         uint32_t dex_pc,
                         uint32_t dex_method_index,
                         bool is_recursive,
-                        InvokeType invoke_type)
-      : HInvoke(arena, number_of_arguments, return_type, dex_pc, dex_method_index),
+                        int32_t string_init_offset,
+                        InvokeType original_invoke_type,
+                        InvokeType invoke_type,
+                        ClinitCheckRequirement clinit_check_requirement)
+      : HInvoke(arena,
+                number_of_arguments,
+                clinit_check_requirement == ClinitCheckRequirement::kExplicit ? 1u : 0u,
+                return_type,
+                dex_pc,
+                dex_method_index),
+        original_invoke_type_(original_invoke_type),
         invoke_type_(invoke_type),
-        is_recursive_(is_recursive) {}
+        is_recursive_(is_recursive),
+        clinit_check_requirement_(clinit_check_requirement),
+        string_init_offset_(string_init_offset) {}
 
-  bool CanDoImplicitNullCheck() const OVERRIDE {
+  bool CanDoImplicitNullCheckOn(HInstruction* obj) const OVERRIDE {
+    UNUSED(obj);
     // We access the method via the dex cache so we can't do an implicit null check.
     // TODO: for intrinsics we can generate implicit null checks.
     return false;
   }
 
+  InvokeType GetOriginalInvokeType() const { return original_invoke_type_; }
   InvokeType GetInvokeType() const { return invoke_type_; }
   bool IsRecursive() const { return is_recursive_; }
+  bool NeedsDexCache() const OVERRIDE { return !IsRecursive(); }
+  bool IsStringInit() const { return string_init_offset_ != 0; }
+  int32_t GetStringInitOffset() const { return string_init_offset_; }
+
+  // Is this instruction a call to a static method?
+  bool IsStatic() const {
+    return GetInvokeType() == kStatic;
+  }
+
+  // Remove the art::HLoadClass instruction set as last input by
+  // art::PrepareForRegisterAllocation::VisitClinitCheck in lieu of
+  // the initial art::HClinitCheck instruction (only relevant for
+  // static calls with explicit clinit check).
+  void RemoveLoadClassAsLastInput() {
+    DCHECK(IsStaticWithExplicitClinitCheck());
+    size_t last_input_index = InputCount() - 1;
+    HInstruction* last_input = InputAt(last_input_index);
+    DCHECK(last_input != nullptr);
+    DCHECK(last_input->IsLoadClass()) << last_input->DebugName();
+    RemoveAsUserOfInput(last_input_index);
+    inputs_.DeleteAt(last_input_index);
+    clinit_check_requirement_ = ClinitCheckRequirement::kImplicit;
+    DCHECK(IsStaticWithImplicitClinitCheck());
+  }
+
+  // Is this a call to a static method whose declaring class has an
+  // explicit intialization check in the graph?
+  bool IsStaticWithExplicitClinitCheck() const {
+    return IsStatic() && (clinit_check_requirement_ == ClinitCheckRequirement::kExplicit);
+  }
+
+  // Is this a call to a static method whose declaring class has an
+  // implicit intialization check requirement?
+  bool IsStaticWithImplicitClinitCheck() const {
+    return IsStatic() && (clinit_check_requirement_ == ClinitCheckRequirement::kImplicit);
+  }
 
   DECLARE_INSTRUCTION(InvokeStaticOrDirect);
 
+ protected:
+  const HUserRecord<HInstruction*> InputRecordAt(size_t i) const OVERRIDE {
+    const HUserRecord<HInstruction*> input_record = HInvoke::InputRecordAt(i);
+    if (kIsDebugBuild && IsStaticWithExplicitClinitCheck() && (i == InputCount() - 1)) {
+      HInstruction* input = input_record.GetInstruction();
+      // `input` is the last input of a static invoke marked as having
+      // an explicit clinit check. It must either be:
+      // - an art::HClinitCheck instruction, set by art::HGraphBuilder; or
+      // - an art::HLoadClass instruction, set by art::PrepareForRegisterAllocation.
+      DCHECK(input != nullptr);
+      DCHECK(input->IsClinitCheck() || input->IsLoadClass()) << input->DebugName();
+    }
+    return input_record;
+  }
+
  private:
+  const InvokeType original_invoke_type_;
   const InvokeType invoke_type_;
   const bool is_recursive_;
+  ClinitCheckRequirement clinit_check_requirement_;
+  // Thread entrypoint offset for string init method if this is a string init invoke.
+  // Note that there are multiple string init methods, each having its own offset.
+  int32_t string_init_offset_;
 
   DISALLOW_COPY_AND_ASSIGN(HInvokeStaticOrDirect);
 };
@@ -2108,12 +2414,12 @@ class HInvokeVirtual : public HInvoke {
                  uint32_t dex_pc,
                  uint32_t dex_method_index,
                  uint32_t vtable_index)
-      : HInvoke(arena, number_of_arguments, return_type, dex_pc, dex_method_index),
+      : HInvoke(arena, number_of_arguments, 0u, return_type, dex_pc, dex_method_index),
         vtable_index_(vtable_index) {}
 
-  bool CanDoImplicitNullCheck() const OVERRIDE {
+  bool CanDoImplicitNullCheckOn(HInstruction* obj) const OVERRIDE {
     // TODO: Add implicit null checks in intrinsics.
-    return !GetLocations()->Intrinsified();
+    return (obj == InputAt(0)) && !GetLocations()->Intrinsified();
   }
 
   uint32_t GetVTableIndex() const { return vtable_index_; }
@@ -2134,12 +2440,12 @@ class HInvokeInterface : public HInvoke {
                    uint32_t dex_pc,
                    uint32_t dex_method_index,
                    uint32_t imt_index)
-      : HInvoke(arena, number_of_arguments, return_type, dex_pc, dex_method_index),
+      : HInvoke(arena, number_of_arguments, 0u, return_type, dex_pc, dex_method_index),
         imt_index_(imt_index) {}
 
-  bool CanDoImplicitNullCheck() const OVERRIDE {
+  bool CanDoImplicitNullCheckOn(HInstruction* obj) const OVERRIDE {
     // TODO: Add implicit null checks in intrinsics.
-    return !GetLocations()->Intrinsified();
+    return (obj == InputAt(0)) && !GetLocations()->Intrinsified();
   }
 
   uint32_t GetImtIndex() const { return imt_index_; }
@@ -2218,6 +2524,9 @@ class HNewArray : public HExpression<1> {
 
   // Calls runtime so needs an environment.
   bool NeedsEnvironment() const OVERRIDE { return true; }
+
+  // May throw NegativeArraySizeException, OutOfMemoryError, etc.
+  bool CanThrow() const OVERRIDE { return true; }
 
   bool CanBeNull() const OVERRIDE { return false; }
 
@@ -2512,6 +2821,33 @@ class HNot : public HUnaryOperation {
   DISALLOW_COPY_AND_ASSIGN(HNot);
 };
 
+class HBooleanNot : public HUnaryOperation {
+ public:
+  explicit HBooleanNot(HInstruction* input)
+      : HUnaryOperation(Primitive::Type::kPrimBoolean, input) {}
+
+  bool CanBeMoved() const OVERRIDE { return true; }
+  bool InstructionDataEquals(HInstruction* other) const OVERRIDE {
+    UNUSED(other);
+    return true;
+  }
+
+  int32_t Evaluate(int32_t x) const OVERRIDE {
+    DCHECK(IsUint<1>(x));
+    return !x;
+  }
+
+  int64_t Evaluate(int64_t x ATTRIBUTE_UNUSED) const OVERRIDE {
+    LOG(FATAL) << DebugName() << " cannot be used with 64-bit values";
+    UNREACHABLE();
+  }
+
+  DECLARE_INSTRUCTION(BooleanNot);
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(HBooleanNot);
+};
+
 class HTypeConversion : public HExpression<1> {
  public:
   // Instantiate a type conversion of `input` to `result_type`.
@@ -2570,6 +2906,7 @@ class HPhi : public HInstruction {
   size_t InputCount() const OVERRIDE { return inputs_.Size(); }
 
   void AddInput(HInstruction* input);
+  void RemoveInputAt(size_t index);
 
   Primitive::Type GetType() const OVERRIDE { return type_; }
   void SetType(Primitive::Type type) { type_ = type; }
@@ -2583,6 +2920,20 @@ class HPhi : public HInstruction {
   void SetLive() { is_live_ = true; }
   bool IsDead() const { return !is_live_; }
   bool IsLive() const { return is_live_; }
+
+  // Returns the next equivalent phi (starting from the current one) or null if there is none.
+  // An equivalent phi is a phi having the same dex register and type.
+  // It assumes that phis with the same dex register are adjacent.
+  HPhi* GetNextEquivalentPhiWithSameType() {
+    HInstruction* next = GetNext();
+    while (next != nullptr && next->AsPhi()->GetRegNumber() == reg_number_) {
+      if (next->GetType() == GetType()) {
+        return next->AsPhi();
+      }
+      next = next->GetNext();
+    }
+    return nullptr;
+  }
 
   DECLARE_INSTRUCTION(Phi);
 
@@ -2665,8 +3016,8 @@ class HInstanceFieldGet : public HExpression<1> {
     return GetFieldOffset().SizeValue() == other_get->GetFieldOffset().SizeValue();
   }
 
-  bool CanDoImplicitNullCheck() const OVERRIDE {
-    return GetFieldOffset().Uint32Value() < kPageSize;
+  bool CanDoImplicitNullCheckOn(HInstruction* obj) const OVERRIDE {
+    return (obj == InputAt(0)) && GetFieldOffset().Uint32Value() < kPageSize;
   }
 
   size_t ComputeHashCode() const OVERRIDE {
@@ -2699,8 +3050,8 @@ class HInstanceFieldSet : public HTemplateInstruction<2> {
     SetRawInputAt(1, value);
   }
 
-  bool CanDoImplicitNullCheck() const OVERRIDE {
-    return GetFieldOffset().Uint32Value() < kPageSize;
+  bool CanDoImplicitNullCheckOn(HInstruction* obj) const OVERRIDE {
+    return (obj == InputAt(0)) && GetFieldOffset().Uint32Value() < kPageSize;
   }
 
   const FieldInfo& GetFieldInfo() const { return field_info_; }
@@ -2730,7 +3081,8 @@ class HArrayGet : public HExpression<2> {
     UNUSED(other);
     return true;
   }
-  bool CanDoImplicitNullCheck() const OVERRIDE {
+  bool CanDoImplicitNullCheckOn(HInstruction* obj) const OVERRIDE {
+    UNUSED(obj);
     // TODO: We can be smarter here.
     // Currently, the array access is always preceded by an ArrayLength or a NullCheck
     // which generates the implicit null check. There are cases when these can be removed
@@ -2772,7 +3124,8 @@ class HArraySet : public HTemplateInstruction<3> {
     return needs_type_check_;
   }
 
-  bool CanDoImplicitNullCheck() const OVERRIDE {
+  bool CanDoImplicitNullCheckOn(HInstruction* obj) const OVERRIDE {
+    UNUSED(obj);
     // TODO: Same as for ArrayGet.
     return false;
   }
@@ -2824,7 +3177,9 @@ class HArrayLength : public HExpression<1> {
     UNUSED(other);
     return true;
   }
-  bool CanDoImplicitNullCheck() const OVERRIDE { return true; }
+  bool CanDoImplicitNullCheckOn(HInstruction* obj) const OVERRIDE {
+    return obj == InputAt(0);
+  }
 
   DECLARE_INSTRUCTION(ArrayLength);
 
@@ -2972,6 +3327,8 @@ class HLoadClass : public HExpression<0> {
     return loaded_class_rti_.IsExact();
   }
 
+  bool NeedsDexCache() const OVERRIDE { return !is_referrers_class_; }
+
   DECLARE_INSTRUCTION(LoadClass);
 
  private:
@@ -3007,6 +3364,7 @@ class HLoadString : public HExpression<0> {
 
   // TODO: Can we deopt or debug when we resolve a string?
   bool NeedsEnvironment() const OVERRIDE { return false; }
+  bool NeedsDexCache() const OVERRIDE { return true; }
 
   DECLARE_INSTRUCTION(LoadString);
 
@@ -3017,14 +3375,13 @@ class HLoadString : public HExpression<0> {
   DISALLOW_COPY_AND_ASSIGN(HLoadString);
 };
 
-// TODO: Pass this check to HInvokeStaticOrDirect nodes.
 /**
  * Performs an initialization check on its Class object input.
  */
 class HClinitCheck : public HExpression<1> {
  public:
   explicit HClinitCheck(HLoadClass* constant, uint32_t dex_pc)
-      : HExpression(Primitive::kPrimNot, SideEffects::All()),
+      : HExpression(Primitive::kPrimNot, SideEffects::ChangesSomething()),
         dex_pc_(dex_pc) {
     SetRawInputAt(0, constant);
   }
@@ -3158,6 +3515,7 @@ class HInstanceOf : public HExpression<2> {
               uint32_t dex_pc)
       : HExpression(Primitive::kPrimBoolean, SideEffects::None()),
         class_is_final_(class_is_final),
+        must_do_null_check_(true),
         dex_pc_(dex_pc) {
     SetRawInputAt(0, object);
     SetRawInputAt(1, constant);
@@ -3177,10 +3535,15 @@ class HInstanceOf : public HExpression<2> {
 
   bool IsClassFinal() const { return class_is_final_; }
 
+  // Used only in code generation.
+  bool MustDoNullCheck() const { return must_do_null_check_; }
+  void ClearMustDoNullCheck() { must_do_null_check_ = false; }
+
   DECLARE_INSTRUCTION(InstanceOf);
 
  private:
   const bool class_is_final_;
+  bool must_do_null_check_;
   const uint32_t dex_pc_;
 
   DISALLOW_COPY_AND_ASSIGN(HInstanceOf);
@@ -3221,6 +3584,7 @@ class HCheckCast : public HTemplateInstruction<2> {
              uint32_t dex_pc)
       : HTemplateInstruction(SideEffects::None()),
         class_is_final_(class_is_final),
+        must_do_null_check_(true),
         dex_pc_(dex_pc) {
     SetRawInputAt(0, object);
     SetRawInputAt(1, constant);
@@ -3239,6 +3603,9 @@ class HCheckCast : public HTemplateInstruction<2> {
 
   bool CanThrow() const OVERRIDE { return true; }
 
+  bool MustDoNullCheck() const { return must_do_null_check_; }
+  void ClearMustDoNullCheck() { must_do_null_check_ = false; }
+
   uint32_t GetDexPc() const { return dex_pc_; }
 
   bool IsClassFinal() const { return class_is_final_; }
@@ -3247,9 +3614,26 @@ class HCheckCast : public HTemplateInstruction<2> {
 
  private:
   const bool class_is_final_;
+  bool must_do_null_check_;
   const uint32_t dex_pc_;
 
   DISALLOW_COPY_AND_ASSIGN(HCheckCast);
+};
+
+class HMemoryBarrier : public HTemplateInstruction<0> {
+ public:
+  explicit HMemoryBarrier(MemBarrierKind barrier_kind)
+      : HTemplateInstruction(SideEffects::None()),
+        barrier_kind_(barrier_kind) {}
+
+  MemBarrierKind GetBarrierKind() { return barrier_kind_; }
+
+  DECLARE_INSTRUCTION(MemoryBarrier);
+
+ private:
+  const MemBarrierKind barrier_kind_;
+
+  DISALLOW_COPY_AND_ASSIGN(HMemoryBarrier);
 };
 
 class HMonitorOperation : public HTemplateInstruction<1> {
@@ -3284,8 +3668,11 @@ class HMonitorOperation : public HTemplateInstruction<1> {
 
 class MoveOperands : public ArenaObject<kArenaAllocMisc> {
  public:
-  MoveOperands(Location source, Location destination, HInstruction* instruction)
-      : source_(source), destination_(destination), instruction_(instruction) {}
+  MoveOperands(Location source,
+               Location destination,
+               Primitive::Type type,
+               HInstruction* instruction)
+      : source_(source), destination_(destination), type_(type), instruction_(instruction) {}
 
   Location GetSource() const { return source_; }
   Location GetDestination() const { return destination_; }
@@ -3314,7 +3701,7 @@ class MoveOperands : public ArenaObject<kArenaAllocMisc> {
 
   // True if this blocks a move from the given location.
   bool Blocks(Location loc) const {
-    return !IsEliminated() && (source_.Contains(loc) || loc.Contains(source_));
+    return !IsEliminated() && source_.OverlapsWith(loc);
   }
 
   // A move is redundant if it's been eliminated, if its source and
@@ -3333,11 +3720,17 @@ class MoveOperands : public ArenaObject<kArenaAllocMisc> {
     return source_.IsInvalid();
   }
 
+  bool Is64BitMove() const {
+    return Primitive::Is64BitType(type_);
+  }
+
   HInstruction* GetInstruction() const { return instruction_; }
 
  private:
   Location source_;
   Location destination_;
+  // The type this move is for.
+  Primitive::Type type_;
   // The instruction this move is assocatied with. Null when this move is
   // for moving an input in the expected locations of user (including a phi user).
   // This is only used in debug mode, to ensure we do not connect interval siblings
@@ -3352,7 +3745,10 @@ class HParallelMove : public HTemplateInstruction<0> {
   explicit HParallelMove(ArenaAllocator* arena)
       : HTemplateInstruction(SideEffects::None()), moves_(arena, kDefaultNumberOfMoves) {}
 
-  void AddMove(Location source, Location destination, HInstruction* instruction) {
+  void AddMove(Location source,
+               Location destination,
+               Primitive::Type type,
+               HInstruction* instruction) {
     DCHECK(source.IsValid());
     DCHECK(destination.IsValid());
     if (kIsDebugBuild) {
@@ -3374,11 +3770,11 @@ class HParallelMove : public HTemplateInstruction<0> {
         }
       }
       for (size_t i = 0, e = moves_.Size(); i < e; ++i) {
-        DCHECK(!destination.Equals(moves_.Get(i).GetDestination()))
-            << "Same destination for two moves in a parallel move.";
+        DCHECK(!destination.OverlapsWith(moves_.Get(i).GetDestination()))
+            << "Overlapped destination for two moves in a parallel move.";
       }
     }
-    moves_.Add(MoveOperands(source, destination, instruction));
+    moves_.Add(MoveOperands(source, destination, type, instruction));
   }
 
   MoveOperands* MoveOperandsAt(size_t index) const {
@@ -3459,7 +3855,10 @@ class HInsertionOrderIterator : public ValueObject {
 
 class HReversePostOrderIterator : public ValueObject {
  public:
-  explicit HReversePostOrderIterator(const HGraph& graph) : graph_(graph), index_(0) {}
+  explicit HReversePostOrderIterator(const HGraph& graph) : graph_(graph), index_(0) {
+    // Check that reverse post order of the graph has been built.
+    DCHECK(!graph.GetReversePostOrder().IsEmpty());
+  }
 
   bool Done() const { return index_ == graph_.GetReversePostOrder().Size(); }
   HBasicBlock* Current() const { return graph_.GetReversePostOrder().Get(index_); }
@@ -3475,7 +3874,10 @@ class HReversePostOrderIterator : public ValueObject {
 class HPostOrderIterator : public ValueObject {
  public:
   explicit HPostOrderIterator(const HGraph& graph)
-      : graph_(graph), index_(graph_.GetReversePostOrder().Size()) {}
+      : graph_(graph), index_(graph_.GetReversePostOrder().Size()) {
+    // Check that reverse post order of the graph has been built.
+    DCHECK(!graph.GetReversePostOrder().IsEmpty());
+  }
 
   bool Done() const { return index_ == 0; }
   HBasicBlock* Current() const { return graph_.GetReversePostOrder().Get(index_ - 1); }
@@ -3486,6 +3888,43 @@ class HPostOrderIterator : public ValueObject {
   size_t index_;
 
   DISALLOW_COPY_AND_ASSIGN(HPostOrderIterator);
+};
+
+class HLinearPostOrderIterator : public ValueObject {
+ public:
+  explicit HLinearPostOrderIterator(const HGraph& graph)
+      : order_(graph.GetLinearOrder()), index_(graph.GetLinearOrder().Size()) {}
+
+  bool Done() const { return index_ == 0; }
+
+  HBasicBlock* Current() const { return order_.Get(index_ -1); }
+
+  void Advance() {
+    --index_;
+    DCHECK_GE(index_, 0U);
+  }
+
+ private:
+  const GrowableArray<HBasicBlock*>& order_;
+  size_t index_;
+
+  DISALLOW_COPY_AND_ASSIGN(HLinearPostOrderIterator);
+};
+
+class HLinearOrderIterator : public ValueObject {
+ public:
+  explicit HLinearOrderIterator(const HGraph& graph)
+      : order_(graph.GetLinearOrder()), index_(0) {}
+
+  bool Done() const { return index_ == order_.Size(); }
+  HBasicBlock* Current() const { return order_.Get(index_); }
+  void Advance() { ++index_; }
+
+ private:
+  const GrowableArray<HBasicBlock*>& order_;
+  size_t index_;
+
+  DISALLOW_COPY_AND_ASSIGN(HLinearOrderIterator);
 };
 
 // Iterator over the blocks that art part of the loop. Includes blocks part

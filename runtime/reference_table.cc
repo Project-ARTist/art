@@ -40,7 +40,7 @@ ReferenceTable::~ReferenceTable() {
 }
 
 void ReferenceTable::Add(mirror::Object* obj) {
-  DCHECK(obj != NULL);
+  DCHECK(obj != nullptr);
   VerifyObject(obj);
   if (entries_.size() >= max_size_) {
     LOG(FATAL) << "ReferenceTable '" << name_ << "' "
@@ -79,8 +79,8 @@ static size_t GetElementCount(mirror::Object* obj) SHARED_LOCKS_REQUIRED(Locks::
 static void DumpSummaryLine(std::ostream& os, mirror::Object* obj, size_t element_count,
                             int identical, int equiv)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  if (obj == NULL) {
-    os << "    NULL reference (count=" << equiv << ")\n";
+  if (obj == nullptr) {
+    os << "    null reference (count=" << equiv << ")\n";
     return;
   }
   if (Runtime::Current()->IsClearedJniWeakGlobal(obj)) {
@@ -237,9 +237,10 @@ void ReferenceTable::Dump(std::ostream& os, Table& entries) {
   DumpSummaryLine(os, prev, GetElementCount(prev), identical, equiv);
 }
 
-void ReferenceTable::VisitRoots(RootCallback* visitor, void* arg, const RootInfo& root_info) {
+void ReferenceTable::VisitRoots(RootVisitor* visitor, const RootInfo& root_info) {
+  BufferedRootVisitor<kDefaultBufferedRootCount> buffered_visitor(visitor, root_info);
   for (GcRoot<mirror::Object>& root : entries_) {
-    root.VisitRoot(visitor, arg, root_info);
+    buffered_visitor.VisitRoot(root);
   }
 }
 

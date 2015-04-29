@@ -16,17 +16,16 @@
 
 #include "reflection-inl.h"
 
+#include "art_field-inl.h"
 #include "class_linker.h"
 #include "common_throws.h"
 #include "dex_file-inl.h"
 #include "entrypoints/entrypoint_utils.h"
 #include "jni_internal.h"
-#include "mirror/art_field-inl.h"
+#include "mirror/abstract_method.h"
 #include "mirror/art_method-inl.h"
 #include "mirror/class-inl.h"
-#include "mirror/class.h"
 #include "mirror/object_array-inl.h"
-#include "mirror/object_array.h"
 #include "nth_caller_visitor.h"
 #include "scoped_thread_state_change.h"
 #include "stack.h"
@@ -239,13 +238,13 @@ class ArgArray {
 
 #define DO_FIRST_ARG(match_descriptor, get_fn, append) { \
           if (LIKELY(arg != nullptr && arg->GetClass<>()->DescriptorEquals(match_descriptor))) { \
-            mirror::ArtField* primitive_field = arg->GetClass()->GetIFields()->Get(0); \
+            ArtField* primitive_field = arg->GetClass()->GetInstanceField(0); \
             append(primitive_field-> get_fn(arg));
 
 #define DO_ARG(match_descriptor, get_fn, append) \
           } else if (LIKELY(arg != nullptr && \
                             arg->GetClass<>()->DescriptorEquals(match_descriptor))) { \
-            mirror::ArtField* primitive_field = arg->GetClass()->GetIFields()->Get(0); \
+            ArtField* primitive_field = arg->GetClass()->GetInstanceField(0); \
             append(primitive_field-> get_fn(arg));
 
 #define DO_FAIL(expected) \
@@ -539,7 +538,7 @@ void InvokeWithShadowFrame(Thread* self, ShadowFrame* shadow_frame, uint16_t arg
 }
 
 jobject InvokeMethod(const ScopedObjectAccessAlreadyRunnable& soa, jobject javaMethod,
-                     jobject javaReceiver, jobject javaArgs, bool accessible) {
+                     jobject javaReceiver, jobject javaArgs, size_t num_frames) {
   // We want to make sure that the stack is not within a small distance from the
   // protected region in case we are calling into a leaf function whose stack
   // check has been elided.
@@ -549,7 +548,9 @@ jobject InvokeMethod(const ScopedObjectAccessAlreadyRunnable& soa, jobject javaM
     return nullptr;
   }
 
-  mirror::ArtMethod* m = mirror::ArtMethod::FromReflectedMethod(soa, javaMethod);
+  auto* abstract_method = soa.Decode<mirror::AbstractMethod*>(javaMethod);
+  const bool accessible = abstract_method->IsAccessible();
+  mirror::ArtMethod* m = abstract_method->GetArtMethod();
 
   mirror::Class* declaring_class = m->GetDeclaringClass();
   if (UNLIKELY(!declaring_class->IsInitialized())) {
@@ -563,19 +564,25 @@ jobject InvokeMethod(const ScopedObjectAccessAlreadyRunnable& soa, jobject javaM
 
   mirror::Object* receiver = nullptr;
   if (!m->IsStatic()) {
-    // Check that the receiver is non-null and an instance of the field's declaring class.
-    receiver = soa.Decode<mirror::Object*>(javaReceiver);
-    if (!VerifyObjectIsClass(receiver, declaring_class)) {
-      return nullptr;
-    }
+    // Replace calls to String.<init> with equivalent StringFactory call.
+    if (declaring_class->IsStringClass() && m->IsConstructor()) {
+      jmethodID mid = soa.EncodeMethod(m);
+      m = soa.DecodeMethod(WellKnownClasses::StringInitToStringFactoryMethodID(mid));
+      CHECK(javaReceiver == nullptr);
+    } else {
+      // Check that the receiver is non-null and an instance of the field's declaring class.
+      receiver = soa.Decode<mirror::Object*>(javaReceiver);
+      if (!VerifyObjectIsClass(receiver, declaring_class)) {
+        return nullptr;
+      }
 
-    // Find the actual implementation of the virtual method.
-    m = receiver->GetClass()->FindVirtualMethodForVirtualOrInterface(m);
+      // Find the actual implementation of the virtual method.
+      m = receiver->GetClass()->FindVirtualMethodForVirtualOrInterface(m);
+    }
   }
 
   // Get our arrays of arguments and their types, and check they're the same size.
-  mirror::ObjectArray<mirror::Object>* objects =
-      soa.Decode<mirror::ObjectArray<mirror::Object>*>(javaArgs);
+  auto* objects = soa.Decode<mirror::ObjectArray<mirror::Object>*>(javaArgs);
   const DexFile::TypeList* classes = m->GetParameterTypeList();
   uint32_t classes_size = (classes == nullptr) ? 0 : classes->Size();
   uint32_t arg_count = (objects != nullptr) ? objects->GetLength() : 0;
@@ -588,7 +595,7 @@ jobject InvokeMethod(const ScopedObjectAccessAlreadyRunnable& soa, jobject javaM
   // If method is not set to be accessible, verify it can be accessed by the caller.
   mirror::Class* calling_class = nullptr;
   if (!accessible && !VerifyAccess(soa.Self(), receiver, declaring_class, m->GetAccessFlags(),
-                                   &calling_class)) {
+                                   &calling_class, num_frames)) {
     ThrowIllegalAccessException(
         StringPrintf("Class %s cannot access %s method %s of class %s",
             calling_class == nullptr ? "null" : PrettyClass(calling_class).c_str(),
@@ -615,32 +622,27 @@ jobject InvokeMethod(const ScopedObjectAccessAlreadyRunnable& soa, jobject javaM
 
   // Wrap any exception with "Ljava/lang/reflect/InvocationTargetException;" and return early.
   if (soa.Self()->IsExceptionPending()) {
+    // If we get another exception when we are trying to wrap, then just use that instead.
     jthrowable th = soa.Env()->ExceptionOccurred();
-    soa.Env()->ExceptionClear();
+    soa.Self()->ClearException();
     jclass exception_class = soa.Env()->FindClass("java/lang/reflect/InvocationTargetException");
+    if (exception_class == nullptr) {
+      soa.Self()->AssertPendingOOMException();
+      return nullptr;
+    }
     jmethodID mid = soa.Env()->GetMethodID(exception_class, "<init>", "(Ljava/lang/Throwable;)V");
+    CHECK(mid != nullptr);
     jobject exception_instance = soa.Env()->NewObject(exception_class, mid, th);
+    if (exception_instance == nullptr) {
+      soa.Self()->AssertPendingOOMException();
+      return nullptr;
+    }
     soa.Env()->Throw(reinterpret_cast<jthrowable>(exception_instance));
     return nullptr;
   }
 
   // Box if necessary and return.
   return soa.AddLocalReference<jobject>(BoxPrimitive(Primitive::GetType(shorty[0]), result));
-}
-
-bool VerifyObjectIsClass(mirror::Object* o, mirror::Class* c) {
-  if (o == nullptr) {
-    ThrowNullPointerException("null receiver");
-    return false;
-  } else if (!o->InstanceOf(c)) {
-    std::string expected_class_name(PrettyDescriptor(c));
-    std::string actual_class_name(PrettyTypeOf(o));
-    ThrowIllegalArgumentException(StringPrintf("Expected receiver of type %s, but got %s",
-                                               expected_class_name.c_str(),
-                                               actual_class_name.c_str()).c_str());
-    return false;
-  }
-  return true;
 }
 
 mirror::Object* BoxPrimitive(Primitive::Type src_class, const JValue& value) {
@@ -708,7 +710,7 @@ mirror::Object* BoxPrimitive(Primitive::Type src_class, const JValue& value) {
   return result.GetL();
 }
 
-static std::string UnboxingFailureKind(mirror::ArtField* f)
+static std::string UnboxingFailureKind(ArtField* f)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
   if (f != nullptr) {
     return "field " + PrettyField(f, false);
@@ -717,7 +719,7 @@ static std::string UnboxingFailureKind(mirror::ArtField* f)
 }
 
 static bool UnboxPrimitive(mirror::Object* o,
-                           mirror::Class* dst_class, mirror::ArtField* f,
+                           mirror::Class* dst_class, ArtField* f,
                            JValue* unboxed_value)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
   bool unbox_for_result = (f == nullptr);
@@ -758,8 +760,8 @@ static bool UnboxPrimitive(mirror::Object* o,
   JValue boxed_value;
   mirror::Class* klass = o->GetClass();
   mirror::Class* src_class = nullptr;
-  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  mirror::ArtField* primitive_field = o->GetClass()->GetIFields()->Get(0);
+  ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
+  ArtField* primitive_field = &klass->GetIFields()[0];
   if (klass->DescriptorEquals("Ljava/lang/Boolean;")) {
     src_class = class_linker->FindPrimitiveClass('Z');
     boxed_value.SetZ(primitive_field->GetBoolean(o));
@@ -798,46 +800,62 @@ static bool UnboxPrimitive(mirror::Object* o,
                                boxed_value, unboxed_value);
 }
 
-bool UnboxPrimitiveForField(mirror::Object* o, mirror::Class* dst_class, mirror::ArtField* f,
+bool UnboxPrimitiveForField(mirror::Object* o, mirror::Class* dst_class, ArtField* f,
                             JValue* unboxed_value) {
   DCHECK(f != nullptr);
   return UnboxPrimitive(o, dst_class, f, unboxed_value);
 }
 
-bool UnboxPrimitiveForResult(mirror::Object* o,
-                             mirror::Class* dst_class, JValue* unboxed_value) {
+bool UnboxPrimitiveForResult(mirror::Object* o, mirror::Class* dst_class, JValue* unboxed_value) {
   return UnboxPrimitive(o, dst_class, nullptr, unboxed_value);
 }
 
+mirror::Class* GetCallingClass(Thread* self, size_t num_frames) {
+  NthCallerVisitor visitor(self, num_frames);
+  visitor.WalkStack();
+  return visitor.caller != nullptr ? visitor.caller->GetDeclaringClass() : nullptr;
+}
+
 bool VerifyAccess(Thread* self, mirror::Object* obj, mirror::Class* declaring_class,
-                  uint32_t access_flags, mirror::Class** calling_class) {
+                  uint32_t access_flags, mirror::Class** calling_class, size_t num_frames) {
   if ((access_flags & kAccPublic) != 0) {
     return true;
   }
-  NthCallerVisitor visitor(self, 2);
-  visitor.WalkStack();
-  if (UNLIKELY(visitor.caller == nullptr)) {
+  auto* klass = GetCallingClass(self, num_frames);
+  if (UNLIKELY(klass == nullptr)) {
     // The caller is an attached native thread.
     return false;
   }
-  mirror::Class* caller_class = visitor.caller->GetDeclaringClass();
-  if (caller_class == declaring_class) {
+  *calling_class = klass;
+  return VerifyAccess(self, obj, declaring_class, access_flags, klass);
+}
+
+bool VerifyAccess(Thread* self, mirror::Object* obj, mirror::Class* declaring_class,
+                  uint32_t access_flags, mirror::Class* calling_class) {
+  if (calling_class == declaring_class) {
     return true;
   }
   ScopedAssertNoThreadSuspension sants(self, "verify-access");
-  *calling_class = caller_class;
   if ((access_flags & kAccPrivate) != 0) {
     return false;
   }
   if ((access_flags & kAccProtected) != 0) {
-    if (obj != nullptr && !obj->InstanceOf(caller_class) &&
-        !declaring_class->IsInSamePackage(caller_class)) {
+    if (obj != nullptr && !obj->InstanceOf(calling_class) &&
+        !declaring_class->IsInSamePackage(calling_class)) {
       return false;
-    } else if (declaring_class->IsAssignableFrom(caller_class)) {
+    } else if (declaring_class->IsAssignableFrom(calling_class)) {
       return true;
     }
   }
-  return declaring_class->IsInSamePackage(caller_class);
+  return declaring_class->IsInSamePackage(calling_class);
+}
+
+void InvalidReceiverError(mirror::Object* o, mirror::Class* c) {
+  std::string expected_class_name(PrettyDescriptor(c));
+  std::string actual_class_name(PrettyTypeOf(o));
+  ThrowIllegalArgumentException(StringPrintf("Expected receiver of type %s, but got %s",
+                                             expected_class_name.c_str(),
+                                             actual_class_name.c_str()).c_str());
 }
 
 }  // namespace art

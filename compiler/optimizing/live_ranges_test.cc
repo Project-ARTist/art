@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "arch/x86/instruction_set_features_x86.h"
 #include "base/arena_allocator.h"
 #include "builder.h"
 #include "code_generator.h"
@@ -65,8 +66,10 @@ TEST(LiveRangesTest, CFG1) {
   ArenaAllocator allocator(&pool);
   HGraph* graph = BuildGraph(data, &allocator);
 
-  x86::CodeGeneratorX86 codegen(graph, CompilerOptions());
-  SsaLivenessAnalysis liveness(*graph, &codegen);
+  std::unique_ptr<const X86InstructionSetFeatures> features_x86(
+      X86InstructionSetFeatures::FromCppDefines());
+  x86::CodeGeneratorX86 codegen(graph, *features_x86.get(), CompilerOptions());
+  SsaLivenessAnalysis liveness(graph, &codegen);
   liveness.Analyze();
 
   LiveInterval* interval = liveness.GetInstructionFromSsaIndex(0)->GetLiveInterval();
@@ -111,8 +114,10 @@ TEST(LiveRangesTest, CFG2) {
   ArenaPool pool;
   ArenaAllocator allocator(&pool);
   HGraph* graph = BuildGraph(data, &allocator);
-  x86::CodeGeneratorX86 codegen(graph, CompilerOptions());
-  SsaLivenessAnalysis liveness(*graph, &codegen);
+  std::unique_ptr<const X86InstructionSetFeatures> features_x86(
+      X86InstructionSetFeatures::FromCppDefines());
+  x86::CodeGeneratorX86 codegen(graph, *features_x86.get(), CompilerOptions());
+  SsaLivenessAnalysis liveness(graph, &codegen);
   liveness.Analyze();
 
   LiveInterval* interval = liveness.GetInstructionFromSsaIndex(0)->GetLiveInterval();
@@ -160,8 +165,10 @@ TEST(LiveRangesTest, CFG3) {
   ArenaPool pool;
   ArenaAllocator allocator(&pool);
   HGraph* graph = BuildGraph(data, &allocator);
-  x86::CodeGeneratorX86 codegen(graph, CompilerOptions());
-  SsaLivenessAnalysis liveness(*graph, &codegen);
+  std::unique_ptr<const X86InstructionSetFeatures> features_x86(
+      X86InstructionSetFeatures::FromCppDefines());
+  x86::CodeGeneratorX86 codegen(graph, *features_x86.get(), CompilerOptions());
+  SsaLivenessAnalysis liveness(graph, &codegen);
   liveness.Analyze();
 
   // Test for the 4 constant.
@@ -237,8 +244,10 @@ TEST(LiveRangesTest, Loop1) {
   ArenaAllocator allocator(&pool);
   HGraph* graph = BuildGraph(data, &allocator);
   RemoveSuspendChecks(graph);
-  x86::CodeGeneratorX86 codegen(graph, CompilerOptions());
-  SsaLivenessAnalysis liveness(*graph, &codegen);
+  std::unique_ptr<const X86InstructionSetFeatures> features_x86(
+      X86InstructionSetFeatures::FromCppDefines());
+  x86::CodeGeneratorX86 codegen(graph, *features_x86.get(), CompilerOptions());
+  SsaLivenessAnalysis liveness(graph, &codegen);
   liveness.Analyze();
 
   // Test for the 0 constant.
@@ -315,8 +324,10 @@ TEST(LiveRangesTest, Loop2) {
   ArenaPool pool;
   ArenaAllocator allocator(&pool);
   HGraph* graph = BuildGraph(data, &allocator);
-  x86::CodeGeneratorX86 codegen(graph, CompilerOptions());
-  SsaLivenessAnalysis liveness(*graph, &codegen);
+  std::unique_ptr<const X86InstructionSetFeatures> features_x86(
+      X86InstructionSetFeatures::FromCppDefines());
+  x86::CodeGeneratorX86 codegen(graph, *features_x86.get(), CompilerOptions());
+  SsaLivenessAnalysis liveness(graph, &codegen);
   liveness.Analyze();
 
   // Test for the 0 constant.
@@ -391,8 +402,10 @@ TEST(LiveRangesTest, CFG4) {
   ArenaPool pool;
   ArenaAllocator allocator(&pool);
   HGraph* graph = BuildGraph(data, &allocator);
-  x86::CodeGeneratorX86 codegen(graph, CompilerOptions());
-  SsaLivenessAnalysis liveness(*graph, &codegen);
+  std::unique_ptr<const X86InstructionSetFeatures> features_x86(
+      X86InstructionSetFeatures::FromCppDefines());
+  x86::CodeGeneratorX86 codegen(graph, *features_x86.get(), CompilerOptions());
+  SsaLivenessAnalysis liveness(graph, &codegen);
   liveness.Analyze();
 
   // Test for the 0 constant.

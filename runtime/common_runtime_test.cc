@@ -16,6 +16,7 @@
 
 #include "common_runtime_test.h"
 
+#include <cstdio>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -34,6 +35,7 @@
 #include "gc_root-inl.h"
 #include "gc/heap.h"
 #include "gtest/gtest.h"
+#include "handle_scope-inl.h"
 #include "interpreter/unstarted_runtime.h"
 #include "jni_internal.h"
 #include "mirror/class_loader.h"
@@ -79,7 +81,7 @@ ScratchFile::ScratchFile(const ScratchFile& other, const char* suffix) {
 }
 
 ScratchFile::ScratchFile(File* file) {
-  CHECK(file != NULL);
+  CHECK(file != nullptr);
   filename_ = file->GetPath();
   file_.reset(file);
 }
@@ -187,6 +189,82 @@ void CommonRuntimeTest::TearDownAndroidData(const std::string& android_data, boo
   }
 }
 
+// Helper - find directory with the following format:
+// ${ANDROID_BUILD_TOP}/${subdir1}/${subdir2}-${version}/${subdir3}/bin/
+static std::string GetAndroidToolsDir(const std::string& subdir1,
+                                      const std::string& subdir2,
+                                      const std::string& subdir3) {
+  std::string root;
+  const char* android_build_top = getenv("ANDROID_BUILD_TOP");
+  if (android_build_top != nullptr) {
+    root = android_build_top;
+  } else {
+    // Not set by build server, so default to current directory
+    char* cwd = getcwd(nullptr, 0);
+    setenv("ANDROID_BUILD_TOP", cwd, 1);
+    root = cwd;
+    free(cwd);
+  }
+
+  std::string toolsdir = root + "/" + subdir1;
+  std::string founddir;
+  DIR* dir;
+  if ((dir = opendir(toolsdir.c_str())) != nullptr) {
+    float maxversion = 0;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+      std::string format = subdir2 + "-%f";
+      float version;
+      if (std::sscanf(entry->d_name, format.c_str(), &version) == 1) {
+        if (version > maxversion) {
+          maxversion = version;
+          founddir = toolsdir + "/" + entry->d_name + "/" + subdir3 + "/bin/";
+        }
+      }
+    }
+    closedir(dir);
+  }
+
+  if (founddir.empty()) {
+    ADD_FAILURE() << "Can not find Android tools directory.";
+  }
+  return founddir;
+}
+
+std::string CommonRuntimeTest::GetAndroidHostToolsDir() {
+  return GetAndroidToolsDir("prebuilts/gcc/linux-x86/host",
+                            "x86_64-linux-glibc2.15",
+                            "x86_64-linux");
+}
+
+std::string CommonRuntimeTest::GetAndroidTargetToolsDir(InstructionSet isa) {
+  switch (isa) {
+    case kArm:
+    case kThumb2:
+      return GetAndroidToolsDir("prebuilts/gcc/linux-x86/arm",
+                                "arm-linux-androideabi",
+                                "arm-linux-androideabi");
+    case kArm64:
+      return GetAndroidToolsDir("prebuilts/gcc/linux-x86/aarch64",
+                                "aarch64-linux-android",
+                                "aarch64-linux-android");
+    case kX86:
+    case kX86_64:
+      return GetAndroidToolsDir("prebuilts/gcc/linux-x86/x86",
+                                "x86_64-linux-android",
+                                "x86_64-linux-android");
+    case kMips:
+    case kMips64:
+      return GetAndroidToolsDir("prebuilts/gcc/linux-x86/mips",
+                                "mips64el-linux-android",
+                                "mips64el-linux-android");
+    case kNone:
+      break;
+  }
+  ADD_FAILURE() << "Invalid isa " << isa;
+  return "";
+}
+
 std::string CommonRuntimeTest::GetCoreArtLocation() {
   return GetCoreFileLocation("art");
 }
@@ -219,7 +297,6 @@ void CommonRuntimeTest::SetUp() {
   std::string min_heap_string(StringPrintf("-Xms%zdm", gc::Heap::kDefaultInitialSize / MB));
   std::string max_heap_string(StringPrintf("-Xmx%zdm", gc::Heap::kDefaultMaximumSize / MB));
 
-  callbacks_.reset(new NoopCompilerCallbacks());
 
   RuntimeOptions options;
   std::string boot_class_path_string = "-Xbootclasspath:" + GetLibCoreDexFileName();
@@ -227,8 +304,15 @@ void CommonRuntimeTest::SetUp() {
   options.push_back(std::make_pair("-Xcheck:jni", nullptr));
   options.push_back(std::make_pair(min_heap_string, nullptr));
   options.push_back(std::make_pair(max_heap_string, nullptr));
-  options.push_back(std::make_pair("compilercallbacks", callbacks_.get()));
+
+  callbacks_.reset(new NoopCompilerCallbacks());
+
   SetUpRuntimeOptions(&options);
+
+  // Install compiler-callbacks if SetupRuntimeOptions hasn't deleted them.
+  if (callbacks_.get() != nullptr) {
+    options.push_back(std::make_pair("compilercallbacks", callbacks_.get()));
+  }
 
   PreRuntimeCreate();
   if (!Runtime::Create(options, false)) {
@@ -386,22 +470,86 @@ std::unique_ptr<const DexFile> CommonRuntimeTest::OpenTestDexFile(const char* na
   return std::move(vector[0]);
 }
 
+std::vector<const DexFile*> CommonRuntimeTest::GetDexFiles(jobject jclass_loader) {
+  std::vector<const DexFile*> ret;
+
+  ScopedObjectAccess soa(Thread::Current());
+
+  StackHandleScope<2> hs(soa.Self());
+  Handle<mirror::ClassLoader> class_loader = hs.NewHandle(
+      soa.Decode<mirror::ClassLoader*>(jclass_loader));
+
+  DCHECK_EQ(class_loader->GetClass(),
+            soa.Decode<mirror::Class*>(WellKnownClasses::dalvik_system_PathClassLoader));
+  DCHECK_EQ(class_loader->GetParent()->GetClass(),
+            soa.Decode<mirror::Class*>(WellKnownClasses::java_lang_BootClassLoader));
+
+  // The class loader is a PathClassLoader which inherits from BaseDexClassLoader.
+  // We need to get the DexPathList and loop through it.
+  ArtField* cookie_field = soa.DecodeField(WellKnownClasses::dalvik_system_DexFile_cookie);
+  ArtField* dex_file_field =
+      soa.DecodeField(WellKnownClasses::dalvik_system_DexPathList__Element_dexFile);
+  mirror::Object* dex_path_list =
+      soa.DecodeField(WellKnownClasses::dalvik_system_PathClassLoader_pathList)->
+      GetObject(class_loader.Get());
+  if (dex_path_list != nullptr && dex_file_field!= nullptr && cookie_field != nullptr) {
+    // DexPathList has an array dexElements of Elements[] which each contain a dex file.
+    mirror::Object* dex_elements_obj =
+        soa.DecodeField(WellKnownClasses::dalvik_system_DexPathList_dexElements)->
+        GetObject(dex_path_list);
+    // Loop through each dalvik.system.DexPathList$Element's dalvik.system.DexFile and look
+    // at the mCookie which is a DexFile vector.
+    if (dex_elements_obj != nullptr) {
+      Handle<mirror::ObjectArray<mirror::Object>> dex_elements =
+          hs.NewHandle(dex_elements_obj->AsObjectArray<mirror::Object>());
+      for (int32_t i = 0; i < dex_elements->GetLength(); ++i) {
+        mirror::Object* element = dex_elements->GetWithoutChecks(i);
+        if (element == nullptr) {
+          // Should never happen, fall back to java code to throw a NPE.
+          break;
+        }
+        mirror::Object* dex_file = dex_file_field->GetObject(element);
+        if (dex_file != nullptr) {
+          mirror::LongArray* long_array = cookie_field->GetObject(dex_file)->AsLongArray();
+          DCHECK(long_array != nullptr);
+          int32_t long_array_size = long_array->GetLength();
+          for (int32_t j = 0; j < long_array_size; ++j) {
+            const DexFile* cp_dex_file = reinterpret_cast<const DexFile*>(static_cast<uintptr_t>(
+                long_array->GetWithoutChecks(j)));
+            if (cp_dex_file == nullptr) {
+              LOG(WARNING) << "Null DexFile";
+              continue;
+            }
+            ret.push_back(cp_dex_file);
+          }
+        }
+      }
+    }
+  }
+
+  return ret;
+}
+
+const DexFile* CommonRuntimeTest::GetFirstDexFile(jobject jclass_loader) {
+  std::vector<const DexFile*> tmp(GetDexFiles(jclass_loader));
+  DCHECK(!tmp.empty());
+  const DexFile* ret = tmp[0];
+  DCHECK(ret != nullptr);
+  return ret;
+}
+
 jobject CommonRuntimeTest::LoadDex(const char* dex_name) {
   std::vector<std::unique_ptr<const DexFile>> dex_files = OpenTestDexFiles(dex_name);
   std::vector<const DexFile*> class_path;
   CHECK_NE(0U, dex_files.size());
   for (auto& dex_file : dex_files) {
     class_path.push_back(dex_file.get());
-    class_linker_->RegisterDexFile(*dex_file);
     loaded_dex_files_.push_back(std::move(dex_file));
   }
+
   Thread* self = Thread::Current();
-  JNIEnvExt* env = self->GetJniEnv();
-  ScopedLocalRef<jobject> class_loader_local(env,
-      env->AllocObject(WellKnownClasses::dalvik_system_PathClassLoader));
-  jobject class_loader = env->NewGlobalRef(class_loader_local.get());
-  self->SetClassLoaderOverride(class_loader_local.get());
-  Runtime::Current()->SetCompileTimeClassPath(class_loader, class_path);
+  jobject class_loader = Runtime::Current()->GetClassLinker()->CreatePathClassLoader(self,                                                                                   class_path);
+  self->SetClassLoaderOverride(class_loader);
   return class_loader;
 }
 
@@ -411,7 +559,7 @@ std::string CommonRuntimeTest::GetCoreFileLocation(const char* suffix) {
   std::string location;
   if (IsHost()) {
     const char* host_dir = getenv("ANDROID_HOST_OUT");
-    CHECK(host_dir != NULL);
+    CHECK(host_dir != nullptr);
     location = StringPrintf("%s/framework/core.%s", host_dir, suffix);
   } else {
     location = StringPrintf("/data/art-test/core.%s", suffix);

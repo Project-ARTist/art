@@ -33,10 +33,10 @@
 
 namespace art {
 
+class ArtField;
 class DexFile;
 
 namespace mirror {
-class ArtField;
 class ArtMethod;
 class Class;
 class Object;
@@ -109,11 +109,17 @@ static inline bool IsAlignedParam(T x, int n) {
   DCHECK(::art::IsAlignedParam(value, alignment)) << reinterpret_cast<const void*>(value)
 
 // Check whether an N-bit two's-complement representation can hold value.
-static inline bool IsInt(int N, intptr_t value) {
-  CHECK_LT(0, N);
-  CHECK_LT(N, kBitsPerIntPtrT);
-  intptr_t limit = static_cast<intptr_t>(1) << (N - 1);
-  return (-limit <= value) && (value < limit);
+template <typename T>
+static inline bool IsInt(int N, T value) {
+  int bitsPerT = sizeof(T) * kBitsPerByte;
+  if (N == bitsPerT) {
+    return true;
+  } else {
+    CHECK_LT(0, N);
+    CHECK_LT(N, bitsPerT);
+    T limit = static_cast<T>(1) << (N - 1);
+    return (-limit <= value) && (value < limit);
+  }
 }
 
 template <typename T>
@@ -294,6 +300,18 @@ static inline int WhichPowerOf2(T x) {
   return CTZ(x);
 }
 
+// Return whether x / divisor == x * (1.0f / divisor), for every float x.
+static constexpr bool CanDivideByReciprocalMultiplyFloat(int32_t divisor) {
+  // True, if the most significant bits of divisor are 0.
+  return ((divisor & 0x7fffff) == 0);
+}
+
+// Return whether x / divisor == x * (1.0 / divisor), for every double x.
+static constexpr bool CanDivideByReciprocalMultiplyDouble(int64_t divisor) {
+  // True, if the most significant bits of divisor are 0.
+  return ((divisor & ((UINT64_C(1) << 52) - 1)) == 0);
+}
+
 template<typename T>
 static constexpr int POPCOUNT(T x) {
   return (sizeof(T) == sizeof(uint32_t))
@@ -309,19 +327,6 @@ static inline uint32_t PointerToLowMemUInt32(const void* p) {
 
 static inline bool NeedsEscaping(uint16_t ch) {
   return (ch < ' ' || ch > '~');
-}
-
-// Interpret the bit pattern of input (type U) as type V. Requires the size
-// of V >= size of U (compile-time checked).
-template<typename U, typename V>
-static inline V bit_cast(U in) {
-  static_assert(sizeof(U) <= sizeof(V), "Size of U not <= size of V");
-  union {
-    U u;
-    V v;
-  } tmp;
-  tmp.u = in;
-  return tmp.v;
 }
 
 std::string PrintableChar(uint16_t ch);
@@ -350,7 +355,7 @@ std::string PrettyDescriptor(Primitive::Type type);
 
 // Returns a human-readable signature for 'f'. Something like "a.b.C.f" or
 // "int a.b.C.f" (depending on the value of 'with_type').
-std::string PrettyField(mirror::ArtField* f, bool with_type = true)
+std::string PrettyField(ArtField* f, bool with_type = true)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 std::string PrettyField(uint32_t field_idx, const DexFile& dex_file, bool with_type = true);
 
@@ -515,9 +520,12 @@ const char* GetAndroidRoot();
 
 // Find $ANDROID_DATA, /data, or abort.
 const char* GetAndroidData();
-// Find $ANDROID_DATA, /data, or return nullptr.
+// Find $ANDROID_DATA, /data, or return null.
 const char* GetAndroidDataSafe(std::string* error_msg);
 
+// Returns the dalvik-cache location, with subdir appended. Returns the empty string if the cache
+// could not be found (or created).
+std::string GetDalvikCache(const char* subdir, bool create_if_absent = true);
 // Returns the dalvik-cache location, or dies trying. subdir will be
 // appended to the cache location.
 std::string GetDalvikCacheOrDie(const char* subdir, bool create_if_absent = true);

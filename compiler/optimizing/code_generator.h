@@ -105,6 +105,25 @@ class SlowPathCode : public ArenaObject<kArenaAllocSlowPaths> {
   DISALLOW_COPY_AND_ASSIGN(SlowPathCode);
 };
 
+class InvokeDexCallingConventionVisitor {
+ public:
+  virtual Location GetNextLocation(Primitive::Type type) = 0;
+
+ protected:
+  InvokeDexCallingConventionVisitor() {}
+  virtual ~InvokeDexCallingConventionVisitor() {}
+
+  // The current index for core registers.
+  uint32_t gp_index_ = 0u;
+  // The current index for floating-point registers.
+  uint32_t float_index_ = 0u;
+  // The current stack index.
+  uint32_t stack_index_ = 0u;
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConventionVisitor);
+};
+
 class CodeGenerator {
  public:
   // Compiles the graph to executable instructions. Returns whether the compilation
@@ -205,11 +224,16 @@ class CodeGenerator {
     slow_paths_.Add(slow_path);
   }
 
-  void BuildMappingTable(std::vector<uint8_t>* vector, DefaultSrcMap* src_map) const;
+  void BuildSourceMap(DefaultSrcMap* src_map) const;
+  void BuildMappingTable(std::vector<uint8_t>* vector) const;
   void BuildVMapTable(std::vector<uint8_t>* vector) const;
   void BuildNativeGCMap(
       std::vector<uint8_t>* vector, const DexCompilationUnit& dex_compilation_unit) const;
   void BuildStackMaps(std::vector<uint8_t>* vector);
+
+  bool IsBaseline() const {
+    return is_baseline_;
+  }
 
   bool IsLeafMethod() const {
     return is_leaf_;
@@ -243,15 +267,17 @@ class CodeGenerator {
   // of the architecture.
   static size_t GetCacheOffset(uint32_t index);
 
-  void EmitParallelMoves(Location from1, Location to1, Location from2, Location to2);
+  void EmitParallelMoves(Location from1,
+                         Location to1,
+                         Primitive::Type type1,
+                         Location from2,
+                         Location to2,
+                         Primitive::Type type2);
 
   static bool StoreNeedsWriteBarrier(Primitive::Type type, HInstruction* value) {
-    if (kIsDebugBuild) {
-      if (type == Primitive::kPrimNot && value->IsIntConstant()) {
-        CHECK_EQ(value->AsIntConstant()->GetValue(), 0);
-      }
-    }
-    return type == Primitive::kPrimNot && !value->IsIntConstant();
+    // Check that null value is not represented as an integer constant.
+    DCHECK(type != Primitive::kPrimNot || !value->IsIntConstant());
+    return type == Primitive::kPrimNot && !value->IsNullConstant();
   }
 
   void AddAllocatedRegister(Location location) {
@@ -274,7 +300,7 @@ class CodeGenerator {
       return 0;
     } else {
       DCHECK(constant->IsFloatConstant());
-      return bit_cast<float, int32_t>(constant->AsFloatConstant()->GetValue());
+      return bit_cast<int32_t, float>(constant->AsFloatConstant()->GetValue());
     }
   }
 
@@ -284,12 +310,12 @@ class CodeGenerator {
     } else if (constant->IsNullConstant()) {
       return 0;
     } else if (constant->IsFloatConstant()) {
-      return bit_cast<float, int32_t>(constant->AsFloatConstant()->GetValue());
+      return bit_cast<int32_t, float>(constant->AsFloatConstant()->GetValue());
     } else if (constant->IsLongConstant()) {
       return constant->AsLongConstant()->GetValue();
     } else {
       DCHECK(constant->IsDoubleConstant());
-      return bit_cast<double, int64_t>(constant->AsDoubleConstant()->GetValue());
+      return bit_cast<int64_t, double>(constant->AsDoubleConstant()->GetValue());
     }
   }
 
@@ -301,6 +327,7 @@ class CodeGenerator {
     return GetFpuSpillSize() + GetCoreSpillSize();
   }
 
+  virtual ParallelMoveResolver* GetMoveResolver() = 0;
 
  protected:
   CodeGenerator(HGraph* graph,
@@ -322,6 +349,7 @@ class CodeGenerator {
         number_of_register_pairs_(number_of_register_pairs),
         core_callee_save_mask_(core_callee_save_mask),
         fpu_callee_save_mask_(fpu_callee_save_mask),
+        is_baseline_(false),
         graph_(graph),
         compiler_options_(compiler_options),
         pc_infos_(graph->GetArena(), 32),
@@ -343,7 +371,6 @@ class CodeGenerator {
 
   virtual Location GetStackLocation(HLoadLocal* load) const = 0;
 
-  virtual ParallelMoveResolver* GetMoveResolver() = 0;
   virtual HGraphVisitor* GetLocationBuilder() = 0;
   virtual HGraphVisitor* GetInstructionVisitor() = 0;
 
@@ -401,6 +428,9 @@ class CodeGenerator {
   const uint32_t core_callee_save_mask_;
   const uint32_t fpu_callee_save_mask_;
 
+  // Whether we are using baseline.
+  bool is_baseline_;
+
  private:
   void InitLocationsBaseline(HInstruction* instruction);
   size_t GetStackOffsetOfSavedRegister(size_t index);
@@ -427,6 +457,8 @@ class CodeGenerator {
   bool requires_current_method_;
 
   StackMapStream stack_map_stream_;
+
+  friend class OptimizingCFITest;
 
   DISALLOW_COPY_AND_ASSIGN(CodeGenerator);
 };

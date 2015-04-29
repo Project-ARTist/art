@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -23,6 +24,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #if defined(__linux__) && defined(__arm__)
@@ -109,8 +111,18 @@ NO_RETURN static void Usage(const char* fmt, ...) {
 
   UsageError("Usage: dex2oat [options]...");
   UsageError("");
-  UsageError("  --dex-file=<dex-file>: specifies a .dex file to compile.");
+  UsageError("  -j<number>: specifies the number of threads used for compilation.");
+  UsageError("       Default is the number of detected hardware threads available on the");
+  UsageError("       host system.");
+  UsageError("      Example: -j12");
+  UsageError("");
+  UsageError("  --dex-file=<dex-file>: specifies a .dex, .jar, or .apk file to compile.");
   UsageError("      Example: --dex-file=/system/framework/core.jar");
+  UsageError("");
+  UsageError("  --dex-location=<dex-location>: specifies an alternative dex location to");
+  UsageError("      encode in the oat file for the corresponding --dex-file argument.");
+  UsageError("      Example: --dex-file=/home/build/out/system/framework/core.jar");
+  UsageError("               --dex-location=/system/framework/core.jar");
   UsageError("");
   UsageError("  --zip-fd=<file-descriptor>: specifies a file descriptor of a zip file");
   UsageError("      containing a classes.dex file to compile.");
@@ -183,11 +195,6 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      Example: --compiler-filter=everything");
   UsageError("      Default: speed");
   UsageError("");
-  UsageError("  --huge-method-max=<method-instruction-count>: the threshold size for a huge");
-  UsageError("      method for compiler filter tuning.");
-  UsageError("      Example: --huge-method-max=%d", CompilerOptions::kDefaultHugeMethodThreshold);
-  UsageError("      Default: %d", CompilerOptions::kDefaultHugeMethodThreshold);
-  UsageError("");
   UsageError("  --huge-method-max=<method-instruction-count>: threshold size for a huge");
   UsageError("      method for compiler filter tuning.");
   UsageError("      Example: --huge-method-max=%d", CompilerOptions::kDefaultHugeMethodThreshold);
@@ -225,6 +232,11 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("  --include-debug-symbols: Include ELF symbols in this oat file");
   UsageError("");
   UsageError("  --no-include-debug-symbols: Do not include ELF symbols in this oat file");
+  UsageError("");
+  UsageError("  --include-cfi: Include call frame information in the .eh_frame section.");
+  UsageError("      The --include-debug-symbols option implies --include-cfi.");
+  UsageError("");
+  UsageError("  --no-include-cfi: Do not include call frame information in the .eh_frame section.");
   UsageError("");
   UsageError("  --runtime-arg <argument>: used to specify various arguments for the runtime,");
   UsageError("      such as initial heap size, maximum heap size, and verbose output.");
@@ -313,26 +325,19 @@ class WatchDog {
     return nullptr;
   }
 
-  static void Message(char severity, const std::string& message) {
-    // TODO: Remove when we switch to LOG when we can guarantee it won't prevent shutdown in error
-    //       cases.
-    fprintf(stderr, "dex2oat%s %c %d %d %s\n",
-            kIsDebugBuild ? "d" : "",
-            severity,
-            getpid(),
-            GetTid(),
-            message.c_str());
-  }
-
   NO_RETURN static void Fatal(const std::string& message) {
-    Message('F', message);
+    // TODO: When we can guarantee it won't prevent shutdown in error cases, move to LOG. However,
+    //       it's rather easy to hang in unwinding.
+    //       LogLine also avoids ART logging lock issues, as it's really only a wrapper around
+    //       logcat logging or stderr output.
+    LogMessage::LogLine(__FILE__, __LINE__, LogSeverity::FATAL, message.c_str());
     exit(1);
   }
 
   void Wait() {
     // TODO: tune the multiplier for GC verification, the following is just to make the timeout
     //       large.
-    int64_t multiplier = kVerifyObjectSupport > kVerifyObjectModeFast ? 100 : 1;
+    constexpr int64_t multiplier = kVerifyObjectSupport > kVerifyObjectModeFast ? 100 : 1;
     timespec timeout_ts;
     InitTimeSpec(true, CLOCK_REALTIME, multiplier * kWatchDogTimeoutSeconds * 1000, 0, &timeout_ts);
     const char* reason = "dex2oat watch dog thread waiting";
@@ -340,7 +345,8 @@ class WatchDog {
     while (!shutting_down_) {
       int rc = TEMP_FAILURE_RETRY(pthread_cond_timedwait(&cond_, &mutex_, &timeout_ts));
       if (rc == ETIMEDOUT) {
-        Fatal(StringPrintf("dex2oat did not finish after %d seconds", kWatchDogTimeoutSeconds));
+        Fatal(StringPrintf("dex2oat did not finish after %" PRId64 " seconds",
+                           kWatchDogTimeoutSeconds));
       } else if (rc != 0) {
         std::string message(StringPrintf("pthread_cond_timedwait failed: %s",
                                          strerror(errno)));
@@ -352,10 +358,10 @@ class WatchDog {
 
   // When setting timeouts, keep in mind that the build server may not be as fast as your desktop.
   // Debug builds are slower so they have larger timeouts.
-  static const unsigned int kSlowdownFactor = kIsDebugBuild ? 5U : 1U;
+  static constexpr int64_t kSlowdownFactor = kIsDebugBuild ? 5U : 1U;
 
-  // 6 minutes scaled by kSlowdownFactor.
-  static const unsigned int kWatchDogTimeoutSeconds = kSlowdownFactor * 6 * 60;
+  // 10 minutes scaled by kSlowdownFactor.
+  static constexpr int64_t kWatchDogTimeoutSeconds = kSlowdownFactor * 10 * 60;
 
   bool is_watch_dog_enabled_;
   bool shutting_down_;
@@ -434,6 +440,8 @@ class Dex2Oat FINAL {
       image_classes_filename_(nullptr),
       compiled_classes_zip_filename_(nullptr),
       compiled_classes_filename_(nullptr),
+      compiled_methods_zip_filename_(nullptr),
+      compiled_methods_filename_(nullptr),
       image_(false),
       is_host_(false),
       dump_stats_(false),
@@ -491,9 +499,10 @@ class Dex2Oat FINAL {
     bool debuggable = false;
     bool include_patch_information = CompilerOptions::kDefaultIncludePatchInformation;
     bool include_debug_symbols = kIsDebugBuild;
+    bool include_cfi = kIsDebugBuild;
     bool watch_dog_enabled = true;
-    bool generate_gdb_information = kIsDebugBuild;
     bool abort_on_hard_verifier_error = false;
+    bool requested_specific_compiler = false;
 
     PassManagerOptions pass_manager_options;
 
@@ -535,12 +544,6 @@ class Dex2Oat FINAL {
         watch_dog_enabled = true;
       } else if (option == "--no-watch-dog") {
         watch_dog_enabled = false;
-      } else if (option == "--gen-gdb-info") {
-        generate_gdb_information = true;
-        // Debug symbols are needed for gdb information.
-        include_debug_symbols = true;
-      } else if (option == "--no-gen-gdb-info") {
-        generate_gdb_information = false;
       } else if (option.starts_with("-j")) {
         const char* thread_count_str = option.substr(strlen("-j")).data();
         if (!ParseUint(thread_count_str, &thread_count_)) {
@@ -558,6 +561,10 @@ class Dex2Oat FINAL {
         compiled_classes_filename_ = option.substr(strlen("--compiled-classes=")).data();
       } else if (option.starts_with("--compiled-classes-zip=")) {
         compiled_classes_zip_filename_ = option.substr(strlen("--compiled-classes-zip=")).data();
+      } else if (option.starts_with("--compiled-methods=")) {
+        compiled_methods_filename_ = option.substr(strlen("--compiled-methods=")).data();
+      } else if (option.starts_with("--compiled-methods-zip=")) {
+        compiled_methods_zip_filename_ = option.substr(strlen("--compiled-methods-zip=")).data();
       } else if (option.starts_with("--base=")) {
         const char* image_base_str = option.substr(strlen("--base=")).data();
         char* end;
@@ -603,6 +610,7 @@ class Dex2Oat FINAL {
           Usage("Error parsing '%s': %s", option.data(), error_msg.c_str());
         }
       } else if (option.starts_with("--compiler-backend=")) {
+        requested_specific_compiler = true;
         StringPiece backend_str = option.substr(strlen("--compiler-backend=")).data();
         if (backend_str == "Quick") {
           compiler_kind_ = Compiler::kQuick;
@@ -677,7 +685,10 @@ class Dex2Oat FINAL {
         include_debug_symbols = true;
       } else if (option == "--no-include-debug-symbols" || option == "--strip-symbols") {
         include_debug_symbols = false;
-        generate_gdb_information = false;  // Depends on debug symbols, see above.
+      } else if (option == "--include-cfi") {
+        include_cfi = true;
+      } else if (option == "--no-include-cfi") {
+        include_cfi = false;
       } else if (option == "--debuggable") {
         debuggable = true;
       } else if (option.starts_with("--profile-file=")) {
@@ -741,6 +752,13 @@ class Dex2Oat FINAL {
       }
     }
 
+    image_ = (!image_filename_.empty());
+    if (!requested_specific_compiler && !kUseOptimizingCompiler) {
+      // If no specific compiler is requested, the current behavior is
+      // to compile the boot image with Quick, and the rest with Optimizing.
+      compiler_kind_ = image_ ? Compiler::kQuick : Compiler::kOptimizing;
+    }
+
     if (compiler_kind_ == Compiler::kOptimizing) {
       // Optimizing only supports PIC mode.
       compile_pic = true;
@@ -774,7 +792,6 @@ class Dex2Oat FINAL {
       android_root_ += android_root_env_var;
     }
 
-    image_ = (!image_filename_.empty());
     if (!image_ && boot_image_filename.empty()) {
       boot_image_filename += android_root_;
       boot_image_filename += "/framework/boot.art";
@@ -868,15 +885,7 @@ class Dex2Oat FINAL {
     }
 
     if (compiler_filter_string == nullptr) {
-      if (instruction_set_ == kMips &&
-          reinterpret_cast<const MipsInstructionSetFeatures*>(instruction_set_features_.get())->
-          IsR6()) {
-        // For R6, only interpreter mode is working.
-        // TODO: fix compiler for Mips32r6.
-        compiler_filter_string = "interpret-only";
-      } else {
-        compiler_filter_string = "speed";
-      }
+      compiler_filter_string = "speed";
     }
 
     CHECK(compiler_filter_string != nullptr);
@@ -885,6 +894,8 @@ class Dex2Oat FINAL {
       compiler_filter = CompilerOptions::kVerifyNone;
     } else if (strcmp(compiler_filter_string, "interpret-only") == 0) {
       compiler_filter = CompilerOptions::kInterpretOnly;
+    } else if (strcmp(compiler_filter_string, "verify-at-runtime") == 0) {
+      compiler_filter = CompilerOptions::kVerifyAtRuntime;
     } else if (strcmp(compiler_filter_string, "space") == 0) {
       compiler_filter = CompilerOptions::kSpace;
     } else if (strcmp(compiler_filter_string, "balanced") == 0) {
@@ -929,11 +940,11 @@ class Dex2Oat FINAL {
                                                 small_method_threshold,
                                                 tiny_method_threshold,
                                                 num_dex_methods_threshold,
-                                                generate_gdb_information,
                                                 include_patch_information,
                                                 top_k_profile_threshold,
                                                 debuggable,
                                                 include_debug_symbols,
+                                                include_cfi,
                                                 implicit_null_checks,
                                                 implicit_so_checks,
                                                 implicit_suspend_checks,
@@ -1046,7 +1057,12 @@ class Dex2Oat FINAL {
     }
 
     verification_results_.reset(new VerificationResults(compiler_options_.get()));
-    callbacks_.reset(new QuickCompilerCallbacks(verification_results_.get(), &method_inliner_map_));
+    callbacks_.reset(new QuickCompilerCallbacks(
+        verification_results_.get(),
+        &method_inliner_map_,
+        image_ ?
+            CompilerCallbacks::CallbackMode::kCompileBootImage :
+            CompilerCallbacks::CallbackMode::kCompileApp));
     runtime_options.push_back(std::make_pair("compilercallbacks", callbacks_.get()));
     runtime_options.push_back(
         std::make_pair("imageinstructionset", GetInstructionSetString(instruction_set_)));
@@ -1077,8 +1093,8 @@ class Dex2Oat FINAL {
       std::string error_msg;
       if (image_classes_zip_filename_ != nullptr) {
         image_classes_.reset(ReadImageClassesFromZip(image_classes_zip_filename_,
-                                                    image_classes_filename_,
-                                                    &error_msg));
+                                                     image_classes_filename_,
+                                                     &error_msg));
       } else {
         image_classes_.reset(ReadImageClassesFromFile(image_classes_filename_));
       }
@@ -1088,7 +1104,7 @@ class Dex2Oat FINAL {
         return false;
       }
     } else if (image_) {
-      image_classes_.reset(new std::set<std::string>);
+      image_classes_.reset(new std::unordered_set<std::string>);
     }
     // If --compiled-classes was specified, calculate the full list of classes to compile in the
     // image.
@@ -1106,8 +1122,28 @@ class Dex2Oat FINAL {
                    << compiled_classes_filename_ << "': " << error_msg;
         return false;
       }
-    } else if (image_) {
+    } else {
       compiled_classes_.reset(nullptr);  // By default compile everything.
+    }
+    // If --compiled-methods was specified, read the methods to compile from the given file(s).
+    if (compiled_methods_filename_ != nullptr) {
+      std::string error_msg;
+      if (compiled_methods_zip_filename_ != nullptr) {
+        compiled_methods_.reset(ReadCommentedInputFromZip(compiled_methods_zip_filename_,
+                                                          compiled_methods_filename_,
+                                                          nullptr,            // No post-processing.
+                                                          &error_msg));
+      } else {
+        compiled_methods_.reset(ReadCommentedInputFromFile(compiled_methods_filename_,
+                                                           nullptr));         // No post-processing.
+      }
+      if (compiled_methods_.get() == nullptr) {
+        LOG(ERROR) << "Failed to create list of compiled methods from '"
+            << compiled_methods_filename_ << "': " << error_msg;
+        return false;
+      }
+    } else {
+      compiled_methods_.reset(nullptr);  // By default compile everything.
     }
 
     if (boot_image_option_.empty()) {
@@ -1176,9 +1212,9 @@ class Dex2Oat FINAL {
       if (!UseSwap(image_, dex_files_)) {
         close(swap_fd_);
         swap_fd_ = -1;
-        LOG(INFO) << "Decided to run without swap.";
+        VLOG(compiler) << "Decided to run without swap.";
       } else {
-        LOG(INFO) << "Accepted running with swap.";
+        LOG(INFO) << "Large app, accepted running with swap.";
       }
     }
     // Note that dex2oat won't close the swap_fd_. The compiler driver's swap space will do that.
@@ -1217,19 +1253,21 @@ class Dex2Oat FINAL {
       ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
       OpenClassPathFiles(runtime_->GetClassPathString(), dex_files_, &class_path_files_);
       ScopedObjectAccess soa(self);
-      std::vector<const DexFile*> class_path_files(dex_files_);
+
+      // Classpath: first the class-path given.
+      std::vector<const DexFile*> class_path_files;
       for (auto& class_path_file : class_path_files_) {
         class_path_files.push_back(class_path_file.get());
       }
 
-      for (size_t i = 0; i < class_path_files.size(); i++) {
-        class_linker->RegisterDexFile(*class_path_files[i]);
-      }
-      soa.Env()->AllocObject(WellKnownClasses::dalvik_system_PathClassLoader);
-      ScopedLocalRef<jobject> class_loader_local(soa.Env(),
-          soa.Env()->AllocObject(WellKnownClasses::dalvik_system_PathClassLoader));
-      class_loader = soa.Env()->NewGlobalRef(class_loader_local.get());
-      Runtime::Current()->SetCompileTimeClassPath(class_loader, class_path_files);
+      // Store the classpath we have right now.
+      key_value_store_->Put(OatHeader::kClassPathKey,
+                            OatFile::EncodeDexFileDependencies(class_path_files));
+
+      // Then the dex files we'll compile. Thus we'll resolve the class-path first.
+      class_path_files.insert(class_path_files.end(), dex_files_.begin(), dex_files_.end());
+
+      class_loader = class_linker->CreatePathClassLoader(self, class_path_files);
     }
 
     driver_.reset(new CompilerDriver(compiler_options_.get(),
@@ -1241,6 +1279,7 @@ class Dex2Oat FINAL {
                                      image_,
                                      image_classes_.release(),
                                      compiled_classes_.release(),
+                                     nullptr,
                                      thread_count_,
                                      dump_stats_,
                                      dump_passes_,
@@ -1474,7 +1513,7 @@ class Dex2Oat FINAL {
   static size_t OpenDexFiles(const std::vector<const char*>& dex_filenames,
                              const std::vector<const char*>& dex_locations,
                              std::vector<std::unique_ptr<const DexFile>>* dex_files) {
-    DCHECK(dex_files != nullptr) << "OpenDexFiles out-param is NULL";
+    DCHECK(dex_files != nullptr) << "OpenDexFiles out-param is nullptr";
     size_t failure_count = 0;
     for (size_t i = 0; i < dex_filenames.size(); i++) {
       const char* dex_filename = dex_filenames[i];
@@ -1494,11 +1533,16 @@ class Dex2Oat FINAL {
     return failure_count;
   }
 
-  // Returns true if dex_files has a dex with the named location.
+  // Returns true if dex_files has a dex with the named location. We compare canonical locations,
+  // so that relative and absolute paths will match. Not caching for the dex_files isn't very
+  // efficient, but under normal circumstances the list is neither large nor is this part too
+  // sensitive.
   static bool DexFilesContains(const std::vector<const DexFile*>& dex_files,
                                const std::string& location) {
+    std::string canonical_location(DexFile::GetDexCanonicalLocation(location.c_str()));
     for (size_t i = 0; i < dex_files.size(); ++i) {
-      if (dex_files[i]->GetLocation() == location) {
+      if (DexFile::GetDexCanonicalLocation(dex_files[i]->GetLocation().c_str()) ==
+          canonical_location) {
         return true;
       }
     }
@@ -1510,7 +1554,7 @@ class Dex2Oat FINAL {
   static void OpenClassPathFiles(const std::string& class_path,
                                  std::vector<const DexFile*> dex_files,
                                  std::vector<std::unique_ptr<const DexFile>>* opened_dex_files) {
-    DCHECK(opened_dex_files != nullptr) << "OpenClassPathFiles out-param is NULL";
+    DCHECK(opened_dex_files != nullptr) << "OpenClassPathFiles out-param is nullptr";
     std::vector<std::string> parsed;
     Split(class_path, ':', &parsed);
     // Take Locks::mutator_lock_ so that lock ordering on the ClassLinker::dex_lock_ is maintained.
@@ -1594,58 +1638,88 @@ class Dex2Oat FINAL {
   }
 
   // Reads the class names (java.lang.Object) and returns a set of descriptors (Ljava/lang/Object;)
-  static std::set<std::string>* ReadImageClassesFromFile(const char* image_classes_filename) {
-    std::unique_ptr<std::ifstream> image_classes_file(new std::ifstream(image_classes_filename,
-                                                                        std::ifstream::in));
-    if (image_classes_file.get() == nullptr) {
-      LOG(ERROR) << "Failed to open image classes file " << image_classes_filename;
-      return nullptr;
-    }
-    std::unique_ptr<std::set<std::string>> result(ReadImageClasses(*image_classes_file));
-    image_classes_file->close();
-    return result.release();
-  }
-
-  static std::set<std::string>* ReadImageClasses(std::istream& image_classes_stream) {
-    std::unique_ptr<std::set<std::string>> image_classes(new std::set<std::string>);
-    while (image_classes_stream.good()) {
-      std::string dot;
-      std::getline(image_classes_stream, dot);
-      if (StartsWith(dot, "#") || dot.empty()) {
-        continue;
-      }
-      std::string descriptor(DotToDescriptor(dot.c_str()));
-      image_classes->insert(descriptor);
-    }
-    return image_classes.release();
+  static std::unordered_set<std::string>* ReadImageClassesFromFile(
+      const char* image_classes_filename) {
+    std::function<std::string(const char*)> process = DotToDescriptor;
+    return ReadCommentedInputFromFile(image_classes_filename, &process);
   }
 
   // Reads the class names (java.lang.Object) and returns a set of descriptors (Ljava/lang/Object;)
-  static std::set<std::string>* ReadImageClassesFromZip(const char* zip_filename,
-                                                        const char* image_classes_filename,
-                                                        std::string* error_msg) {
+  static std::unordered_set<std::string>* ReadImageClassesFromZip(
+        const char* zip_filename,
+        const char* image_classes_filename,
+        std::string* error_msg) {
+    std::function<std::string(const char*)> process = DotToDescriptor;
+    return ReadCommentedInputFromZip(zip_filename, image_classes_filename, &process, error_msg);
+  }
+
+  // Read lines from the given file, dropping comments and empty lines. Post-process each line with
+  // the given function.
+  static std::unordered_set<std::string>* ReadCommentedInputFromFile(
+      const char* input_filename, std::function<std::string(const char*)>* process) {
+    std::unique_ptr<std::ifstream> input_file(new std::ifstream(input_filename, std::ifstream::in));
+    if (input_file.get() == nullptr) {
+      LOG(ERROR) << "Failed to open input file " << input_filename;
+      return nullptr;
+    }
+    std::unique_ptr<std::unordered_set<std::string>> result(
+        ReadCommentedInputStream(*input_file, process));
+    input_file->close();
+    return result.release();
+  }
+
+  // Read lines from the given file from the given zip file, dropping comments and empty lines.
+  // Post-process each line with the given function.
+  static std::unordered_set<std::string>* ReadCommentedInputFromZip(
+      const char* zip_filename,
+      const char* input_filename,
+      std::function<std::string(const char*)>* process,
+      std::string* error_msg) {
     std::unique_ptr<ZipArchive> zip_archive(ZipArchive::Open(zip_filename, error_msg));
     if (zip_archive.get() == nullptr) {
       return nullptr;
     }
-    std::unique_ptr<ZipEntry> zip_entry(zip_archive->Find(image_classes_filename, error_msg));
+    std::unique_ptr<ZipEntry> zip_entry(zip_archive->Find(input_filename, error_msg));
     if (zip_entry.get() == nullptr) {
-      *error_msg = StringPrintf("Failed to find '%s' within '%s': %s", image_classes_filename,
+      *error_msg = StringPrintf("Failed to find '%s' within '%s': %s", input_filename,
                                 zip_filename, error_msg->c_str());
       return nullptr;
     }
-    std::unique_ptr<MemMap> image_classes_file(zip_entry->ExtractToMemMap(zip_filename,
-                                                                          image_classes_filename,
-                                                                          error_msg));
-    if (image_classes_file.get() == nullptr) {
-      *error_msg = StringPrintf("Failed to extract '%s' from '%s': %s", image_classes_filename,
+    std::unique_ptr<MemMap> input_file(zip_entry->ExtractToMemMap(zip_filename,
+                                                                  input_filename,
+                                                                  error_msg));
+    if (input_file.get() == nullptr) {
+      *error_msg = StringPrintf("Failed to extract '%s' from '%s': %s", input_filename,
                                 zip_filename, error_msg->c_str());
       return nullptr;
     }
-    const std::string image_classes_string(reinterpret_cast<char*>(image_classes_file->Begin()),
-                                           image_classes_file->Size());
-    std::istringstream image_classes_stream(image_classes_string);
-    return ReadImageClasses(image_classes_stream);
+    const std::string input_string(reinterpret_cast<char*>(input_file->Begin()),
+                                   input_file->Size());
+    std::istringstream input_stream(input_string);
+    return ReadCommentedInputStream(input_stream, process);
+  }
+
+  // Read lines from the given stream, dropping comments and empty lines. Post-process each line
+  // with the given function.
+  static std::unordered_set<std::string>* ReadCommentedInputStream(
+      std::istream& in_stream,
+      std::function<std::string(const char*)>* process) {
+    std::unique_ptr<std::unordered_set<std::string>> image_classes(
+        new std::unordered_set<std::string>);
+    while (in_stream.good()) {
+      std::string dot;
+      std::getline(in_stream, dot);
+      if (StartsWith(dot, "#") || dot.empty()) {
+        continue;
+      }
+      if (process != nullptr) {
+        std::string descriptor((*process)(dot.c_str()));
+        image_classes->insert(descriptor);
+      } else {
+        image_classes->insert(dot);
+      }
+    }
+    return image_classes.release();
   }
 
   void LogCompletionTime() {
@@ -1699,8 +1773,11 @@ class Dex2Oat FINAL {
   const char* image_classes_filename_;
   const char* compiled_classes_zip_filename_;
   const char* compiled_classes_filename_;
-  std::unique_ptr<std::set<std::string>> image_classes_;
-  std::unique_ptr<std::set<std::string>> compiled_classes_;
+  const char* compiled_methods_zip_filename_;
+  const char* compiled_methods_filename_;
+  std::unique_ptr<std::unordered_set<std::string>> image_classes_;
+  std::unique_ptr<std::unordered_set<std::string>> compiled_classes_;
+  std::unique_ptr<std::unordered_set<std::string>> compiled_methods_;
   bool image_;
   std::unique_ptr<ImageWriter> image_writer_;
   bool is_host_;
@@ -1723,8 +1800,6 @@ class Dex2Oat FINAL {
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(Dex2Oat);
 };
-
-const unsigned int WatchDog::kWatchDogTimeoutSeconds;
 
 static void b13564922() {
 #if defined(__linux__) && defined(__arm__)

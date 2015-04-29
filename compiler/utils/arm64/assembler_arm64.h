@@ -30,9 +30,11 @@
 
 // TODO: make vixl clean wrt -Wshadow.
 #pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #pragma GCC diagnostic ignored "-Wshadow"
-#include "a64/macro-assembler-a64.h"
-#include "a64/disasm-a64.h"
+#pragma GCC diagnostic ignored "-Wmissing-noreturn"
+#include "vixl/a64/macro-assembler-a64.h"
+#include "vixl/a64/disasm-a64.h"
 #pragma GCC diagnostic pop
 
 namespace art {
@@ -80,6 +82,9 @@ class Arm64Assembler FINAL : public Assembler {
 
   // Copy instructions out of assembly buffer into the given region of memory.
   void FinalizeInstructions(const MemoryRegion& region);
+
+  void SpillRegisters(vixl::CPURegList registers, int offset);
+  void UnspillRegisters(vixl::CPURegList registers, int offset);
 
   // Emit code that will create an activation on the stack.
   void BuildFrame(size_t frame_size, ManagedRegister method_reg,
@@ -144,14 +149,14 @@ class Arm64Assembler FINAL : public Assembler {
   void GetCurrentThread(ManagedRegister tr) OVERRIDE;
   void GetCurrentThread(FrameOffset dest_offset, ManagedRegister scratch) OVERRIDE;
 
-  // Set up out_reg to hold a Object** into the handle scope, or to be NULL if the
+  // Set up out_reg to hold a Object** into the handle scope, or to be null if the
   // value is null and null_allowed. in_reg holds a possibly stale reference
   // that can be used to avoid loading the handle scope entry to see if the value is
-  // NULL.
+  // null.
   void CreateHandleScopeEntry(ManagedRegister out_reg, FrameOffset handlescope_offset,
                        ManagedRegister in_reg, bool null_allowed) OVERRIDE;
 
-  // Set up out_off to hold a Object** into the handle scope, or to be NULL if the
+  // Set up out_off to hold a Object** into the handle scope, or to be null if the
   // value is null and null_allowed.
   void CreateHandleScopeEntry(FrameOffset out_off, FrameOffset handlescope_offset,
                        ManagedRegister scratch, bool null_allowed) OVERRIDE;

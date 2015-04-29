@@ -19,6 +19,7 @@
 
 #include "nodes.h"
 #include "optimization.h"
+#include "optimizing_compiler_stats.h"
 
 namespace art {
 
@@ -28,8 +29,10 @@ namespace art {
  */
 class HDeadCodeElimination : public HOptimization {
  public:
-  explicit HDeadCodeElimination(HGraph* graph)
-      : HOptimization(graph, true, kDeadCodeEliminationPassName) {}
+  HDeadCodeElimination(HGraph* graph,
+                       OptimizingCompilerStats* stats = nullptr,
+                       const char* name = kDeadCodeEliminationPassName)
+      : HOptimization(graph, true, name, stats) {}
 
   void Run() OVERRIDE;
 
@@ -37,6 +40,10 @@ class HDeadCodeElimination : public HOptimization {
     "dead_code_elimination";
 
  private:
+  void MaybeRecordDeadBlock(HBasicBlock* block);
+  void RemoveDeadBlocks();
+  void RemoveDeadInstructions();
+
   DISALLOW_COPY_AND_ASSIGN(HDeadCodeElimination);
 };
 

@@ -27,11 +27,11 @@ CompilerOptions::CompilerOptions()
       small_method_threshold_(kDefaultSmallMethodThreshold),
       tiny_method_threshold_(kDefaultTinyMethodThreshold),
       num_dex_methods_threshold_(kDefaultNumDexMethodsThreshold),
-      generate_gdb_information_(false),
       include_patch_information_(kDefaultIncludePatchInformation),
       top_k_profile_threshold_(kDefaultTopKProfileThreshold),
       debuggable_(false),
       include_debug_symbols_(kDefaultIncludeDebugSymbols),
+      include_cfi_(false),
       implicit_null_checks_(true),
       implicit_so_checks_(true),
       implicit_suspend_checks_(false),
@@ -42,17 +42,22 @@ CompilerOptions::CompilerOptions()
       init_failure_output_(nullptr) {
 }
 
+CompilerOptions::~CompilerOptions() {
+  // The destructor looks empty but it destroys a PassManagerOptions object. We keep it here
+  // because we don't want to include the PassManagerOptions definition from the header file.
+}
+
 CompilerOptions::CompilerOptions(CompilerFilter compiler_filter,
                                  size_t huge_method_threshold,
                                  size_t large_method_threshold,
                                  size_t small_method_threshold,
                                  size_t tiny_method_threshold,
                                  size_t num_dex_methods_threshold,
-                                 bool generate_gdb_information,
                                  bool include_patch_information,
                                  double top_k_profile_threshold,
                                  bool debuggable,
                                  bool include_debug_symbols,
+                                 bool include_cfi,
                                  bool implicit_null_checks,
                                  bool implicit_so_checks,
                                  bool implicit_suspend_checks,
@@ -68,11 +73,11 @@ CompilerOptions::CompilerOptions(CompilerFilter compiler_filter,
     small_method_threshold_(small_method_threshold),
     tiny_method_threshold_(tiny_method_threshold),
     num_dex_methods_threshold_(num_dex_methods_threshold),
-    generate_gdb_information_(generate_gdb_information),
     include_patch_information_(include_patch_information),
     top_k_profile_threshold_(top_k_profile_threshold),
     debuggable_(debuggable),
     include_debug_symbols_(include_debug_symbols),
+    include_cfi_(include_cfi),
     implicit_null_checks_(implicit_null_checks),
     implicit_so_checks_(implicit_so_checks),
     implicit_suspend_checks_(implicit_suspend_checks),

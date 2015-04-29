@@ -45,7 +45,6 @@
 #include "dex/quick/arm/backend_arm.h"
 #include "dex/quick/arm64/backend_arm64.h"
 #include "dex/quick/mips/backend_mips.h"
-#include "dex/quick/mips64/backend_mips64.h"
 #include "dex/quick/x86/backend_x86.h"
 
 namespace art {
@@ -103,7 +102,7 @@ static constexpr uint32_t kDisabledOptimizationsPerISA[] = {
 static_assert(sizeof(kDisabledOptimizationsPerISA) == 8 * sizeof(uint32_t),
               "kDisabledOpts unexpected");
 
-// Supported shorty types per instruction set. nullptr means that all are available.
+// Supported shorty types per instruction set. null means that all are available.
 // Z : boolean
 // B : byte
 // S : short
@@ -250,7 +249,7 @@ static int kAllOpcodes[] = {
     Instruction::INVOKE_DIRECT,
     Instruction::INVOKE_STATIC,
     Instruction::INVOKE_INTERFACE,
-    Instruction::RETURN_VOID_BARRIER,
+    Instruction::RETURN_VOID_NO_BARRIER,
     Instruction::INVOKE_VIRTUAL_RANGE,
     Instruction::INVOKE_SUPER_RANGE,
     Instruction::INVOKE_DIRECT_RANGE,
@@ -423,7 +422,7 @@ static int kInvokeOpcodes[] = {
     Instruction::INVOKE_VIRTUAL_RANGE_QUICK,
 };
 
-// Unsupported opcodes. nullptr can be used when everything is supported. Size of the lists is
+// Unsupported opcodes. null can be used when everything is supported. Size of the lists is
 // recorded below.
 static const int* kUnsupportedOpcodes[] = {
     // 0 = kNone.
@@ -516,7 +515,7 @@ bool QuickCompiler::CanCompileMethod(uint32_t method_idx, const DexFile& dex_fil
 
   for (unsigned int idx = 0; idx < cu->mir_graph->GetNumBlocks(); idx++) {
     BasicBlock* bb = cu->mir_graph->GetBasicBlock(idx);
-    if (bb == NULL) continue;
+    if (bb == nullptr) continue;
     if (bb->block_type == kDead) continue;
     for (MIR* mir = bb->first_mir_insn; mir != nullptr; mir = mir->next) {
       int opcode = mir->dalvikInsn.opcode;
@@ -576,7 +575,7 @@ static uint32_t kCompilerOptimizerDisableFlags = 0 |  // Disable specific optimi
   // (1 << kNullCheckElimination) |
   // (1 << kClassInitCheckElimination) |
   // (1 << kGlobalValueNumbering) |
-  (1 << kGvnDeadCodeElimination) |
+  // (1 << kGvnDeadCodeElimination) |
   // (1 << kLocalValueNumbering) |
   // (1 << kPromoteRegs) |
   // (1 << kTrackLiveTemps) |
@@ -635,6 +634,12 @@ CompiledMethod* QuickCompiler::Compile(const DexFile::CodeItem* code_item,
     instruction_set = kThumb2;
   }
   CompilationUnit cu(runtime->GetArenaPool(), instruction_set, driver, class_linker);
+  cu.dex_file = &dex_file;
+  cu.class_def_idx = class_def_idx;
+  cu.method_idx = method_idx;
+  cu.access_flags = access_flags;
+  cu.invoke_type = invoke_type;
+  cu.shorty = dex_file.GetMethodShorty(dex_file.GetMethodId(method_idx));
 
   CHECK((cu.instruction_set == kThumb2) ||
         (cu.instruction_set == kArm64) ||
@@ -708,7 +713,7 @@ CompiledMethod* QuickCompiler::Compile(const DexFile::CodeItem* code_item,
   }
 
   /* Create the pass driver and launch it */
-  PassDriverMEOpts pass_driver(GetPreOptPassManager(), &cu);
+  PassDriverMEOpts pass_driver(GetPreOptPassManager(), GetPostOptPassManager(), &cu);
   pass_driver.Launch();
 
   /* For non-leaf methods check if we should skip compilation when the profiler is enabled. */
@@ -788,16 +793,7 @@ uintptr_t QuickCompiler::GetEntryPointOf(mirror::ArtMethod* method) const {
       InstructionSetPointerSize(GetCompilerDriver()->GetInstructionSet())));
 }
 
-bool QuickCompiler::WriteElf(art::File* file,
-                             OatWriter* oat_writer,
-                             const std::vector<const art::DexFile*>& dex_files,
-                             const std::string& android_root,
-                             bool is_host) const {
-  return art::ElfWriterQuick32::Create(file, oat_writer, dex_files, android_root, is_host,
-                                       *GetCompilerDriver());
-}
-
-Mir2Lir* QuickCompiler::GetCodeGenerator(CompilationUnit* cu, void* compilation_unit) const {
+Mir2Lir* QuickCompiler::GetCodeGenerator(CompilationUnit* cu, void* compilation_unit) {
   UNUSED(compilation_unit);
   Mir2Lir* mir_to_lir = nullptr;
   switch (cu->instruction_set) {
@@ -808,10 +804,9 @@ Mir2Lir* QuickCompiler::GetCodeGenerator(CompilationUnit* cu, void* compilation_
       mir_to_lir = Arm64CodeGenerator(cu, cu->mir_graph.get(), &cu->arena);
       break;
     case kMips:
-      mir_to_lir = MipsCodeGenerator(cu, cu->mir_graph.get(), &cu->arena);
-      break;
+      // Fall-through.
     case kMips64:
-      mir_to_lir = Mips64CodeGenerator(cu, cu->mir_graph.get(), &cu->arena);
+      mir_to_lir = MipsCodeGenerator(cu, cu->mir_graph.get(), &cu->arena);
       break;
     case kX86:
       // Fall-through.

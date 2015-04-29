@@ -39,6 +39,25 @@ static constexpr size_t kParameterCoreRegistersLength = arraysize(kParameterCore
 static constexpr XmmRegister kParameterFpuRegisters[] = { XMM0, XMM1, XMM2, XMM3 };
 static constexpr size_t kParameterFpuRegistersLength = arraysize(kParameterFpuRegisters);
 
+static constexpr Register kRuntimeParameterCoreRegisters[] = { EAX, ECX, EDX, EBX };
+static constexpr size_t kRuntimeParameterCoreRegistersLength =
+    arraysize(kRuntimeParameterCoreRegisters);
+static constexpr XmmRegister kRuntimeParameterFpuRegisters[] = { XMM0, XMM1, XMM2, XMM3 };
+static constexpr size_t kRuntimeParameterFpuRegistersLength =
+    arraysize(kRuntimeParameterFpuRegisters);
+
+class InvokeRuntimeCallingConvention : public CallingConvention<Register, XmmRegister> {
+ public:
+  InvokeRuntimeCallingConvention()
+      : CallingConvention(kRuntimeParameterCoreRegisters,
+                          kRuntimeParameterCoreRegistersLength,
+                          kRuntimeParameterFpuRegisters,
+                          kRuntimeParameterFpuRegistersLength) {}
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(InvokeRuntimeCallingConvention);
+};
+
 class InvokeDexCallingConvention : public CallingConvention<Register, XmmRegister> {
  public:
   InvokeDexCallingConvention() : CallingConvention(
@@ -56,28 +75,23 @@ class InvokeDexCallingConvention : public CallingConvention<Register, XmmRegiste
   DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConvention);
 };
 
-class InvokeDexCallingConventionVisitor {
+class InvokeDexCallingConventionVisitorX86 : public InvokeDexCallingConventionVisitor {
  public:
-  InvokeDexCallingConventionVisitor() : gp_index_(0), fp_index_(0), stack_index_(0) {}
+  InvokeDexCallingConventionVisitorX86() {}
+  virtual ~InvokeDexCallingConventionVisitorX86() {}
 
-  Location GetNextLocation(Primitive::Type type);
+  Location GetNextLocation(Primitive::Type type) OVERRIDE;
 
  private:
   InvokeDexCallingConvention calling_convention;
-  // The current index for cpu registers.
-  uint32_t gp_index_;
-  // The current index for fpu registers.
-  uint32_t fp_index_;
-  // The current stack index.
-  uint32_t stack_index_;
 
-  DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConventionVisitor);
+  DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConventionVisitorX86);
 };
 
-class ParallelMoveResolverX86 : public ParallelMoveResolver {
+class ParallelMoveResolverX86 : public ParallelMoveResolverWithSwap {
  public:
   ParallelMoveResolverX86(ArenaAllocator* allocator, CodeGeneratorX86* codegen)
-      : ParallelMoveResolver(allocator), codegen_(codegen) {}
+      : ParallelMoveResolverWithSwap(allocator), codegen_(codegen) {}
 
   void EmitMove(size_t index) OVERRIDE;
   void EmitSwap(size_t index) OVERRIDE;
@@ -118,7 +132,7 @@ class LocationsBuilderX86 : public HGraphVisitor {
   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info);
 
   CodeGeneratorX86* const codegen_;
-  InvokeDexCallingConventionVisitor parameter_visitor_;
+  InvokeDexCallingConventionVisitorX86 parameter_visitor_;
 
   DISALLOW_COPY_AND_ASSIGN(LocationsBuilderX86);
 };
@@ -144,6 +158,9 @@ class InstructionCodeGeneratorX86 : public HGraphVisitor {
   void GenerateClassInitializationCheck(SlowPathCodeX86* slow_path, Register class_reg);
   void HandleBitwiseOperation(HBinaryOperation* instruction);
   void GenerateDivRemIntegral(HBinaryOperation* instruction);
+  void DivRemOneOrMinusOne(HBinaryOperation* instruction);
+  void DivByPowerOfTwo(HDiv* instruction);
+  void GenerateDivRemWithAnyConstant(HBinaryOperation* instruction);
   void GenerateRemFP(HRem *rem);
   void HandleShift(HBinaryOperation* instruction);
   void GenerateShlLong(const Location& loc, Register shifter);
@@ -152,11 +169,17 @@ class InstructionCodeGeneratorX86 : public HGraphVisitor {
   void GenerateMemoryBarrier(MemBarrierKind kind);
   void HandleFieldSet(HInstruction* instruction, const FieldInfo& field_info);
   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info);
+  // Push value to FPU stack. `is_fp` specifies whether the value is floating point or not.
+  // `is_wide` specifies whether it is long/double or not.
   void PushOntoFPStack(Location source, uint32_t temp_offset,
-                       uint32_t stack_adjustment, bool is_float);
+                       uint32_t stack_adjustment, bool is_fp, bool is_wide);
 
   void GenerateImplicitNullCheck(HNullCheck* instruction);
   void GenerateExplicitNullCheck(HNullCheck* instruction);
+  void GenerateTestAndBranch(HInstruction* instruction,
+                             Label* true_target,
+                             Label* false_target,
+                             Label* always_true_target);
 
   X86Assembler* const assembler_;
   CodeGeneratorX86* const codegen_;
@@ -166,7 +189,9 @@ class InstructionCodeGeneratorX86 : public HGraphVisitor {
 
 class CodeGeneratorX86 : public CodeGenerator {
  public:
-  CodeGeneratorX86(HGraph* graph, const CompilerOptions& compiler_options);
+  CodeGeneratorX86(HGraph* graph,
+                   const X86InstructionSetFeatures& isa_features,
+                   const CompilerOptions& compiler_options);
   virtual ~CodeGeneratorX86() {}
 
   void GenerateFrameEntry() OVERRIDE;
@@ -228,6 +253,9 @@ class CodeGeneratorX86 : public CodeGenerator {
   // Helper method to move a 64bits value between two locations.
   void Move64(Location destination, Location source);
 
+  // Generate a call to a static or direct method.
+  void GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Register temp);
+
   // Emit a write barrier.
   void MarkGCCard(Register temp, Register card, Register object, Register value);
 
@@ -249,6 +277,10 @@ class CodeGeneratorX86 : public CodeGenerator {
 
   Label* GetFrameEntryLabel() { return &frame_entry_label_; }
 
+  const X86InstructionSetFeatures& GetInstructionSetFeatures() const {
+    return isa_features_;
+  }
+
  private:
   // Labels for each block that will be compiled.
   GrowableArray<Label> block_labels_;
@@ -257,8 +289,23 @@ class CodeGeneratorX86 : public CodeGenerator {
   InstructionCodeGeneratorX86 instruction_visitor_;
   ParallelMoveResolverX86 move_resolver_;
   X86Assembler assembler_;
+  const X86InstructionSetFeatures& isa_features_;
 
   DISALLOW_COPY_AND_ASSIGN(CodeGeneratorX86);
+};
+
+class SlowPathCodeX86 : public SlowPathCode {
+ public:
+  SlowPathCodeX86() : entry_label_(), exit_label_() {}
+
+  Label* GetEntryLabel() { return &entry_label_; }
+  Label* GetExitLabel() { return &exit_label_; }
+
+ private:
+  Label entry_label_;
+  Label exit_label_;
+
+  DISALLOW_COPY_AND_ASSIGN(SlowPathCodeX86);
 };
 
 }  // namespace x86

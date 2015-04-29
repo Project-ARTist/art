@@ -28,8 +28,9 @@
 #include "monitor.h"
 #include "object_array-inl.h"
 #include "read_barrier-inl.h"
-#include "runtime.h"
 #include "reference.h"
+#include "runtime.h"
+#include "string-inl.h"
 #include "throwable.h"
 
 namespace art {
@@ -48,7 +49,7 @@ inline Class* Object::GetClass() {
 
 template<VerifyObjectFlags kVerifyFlags>
 inline void Object::SetClass(Class* new_klass) {
-  // new_klass may be NULL prior to class linker initialization.
+  // new_klass may be null prior to class linker initialization.
   // We don't mark the card as this occurs as part of object allocation. Not all objects have
   // backing cards, such as large objects.
   // We use non transactional version since we can't undo this write. We also disable checking as
@@ -115,8 +116,11 @@ inline void Object::Wait(Thread* self, int64_t ms, int32_t ns) {
 }
 
 inline Object* Object::GetReadBarrierPointer() {
-#ifdef USE_BAKER_OR_BROOKS_READ_BARRIER
-  DCHECK(kUseBakerOrBrooksReadBarrier);
+#ifdef USE_BAKER_READ_BARRIER
+  DCHECK(kUseBakerReadBarrier);
+  return reinterpret_cast<Object*>(GetLockWord(false).ReadBarrierState());
+#elif USE_BROOKS_READ_BARRIER
+  DCHECK(kUseBrooksReadBarrier);
   return GetFieldObject<Object, kVerifyNone, kWithoutReadBarrier>(
       OFFSET_OF_OBJECT_MEMBER(Object, x_rb_ptr_));
 #else
@@ -126,8 +130,14 @@ inline Object* Object::GetReadBarrierPointer() {
 }
 
 inline void Object::SetReadBarrierPointer(Object* rb_ptr) {
-#ifdef USE_BAKER_OR_BROOKS_READ_BARRIER
-  DCHECK(kUseBakerOrBrooksReadBarrier);
+#ifdef USE_BAKER_READ_BARRIER
+  DCHECK(kUseBakerReadBarrier);
+  DCHECK_EQ(reinterpret_cast<uint64_t>(rb_ptr) >> 32, 0U);
+  LockWord lw = GetLockWord(false);
+  lw.SetReadBarrierState(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(rb_ptr)));
+  SetLockWord(lw, false);
+#elif USE_BROOKS_READ_BARRIER
+  DCHECK(kUseBrooksReadBarrier);
   // We don't mark the card as this occurs as part of object allocation. Not all objects have
   // backing cards, such as large objects.
   SetFieldObjectWithoutWriteBarrier<false, false, kVerifyNone>(
@@ -140,8 +150,27 @@ inline void Object::SetReadBarrierPointer(Object* rb_ptr) {
 }
 
 inline bool Object::AtomicSetReadBarrierPointer(Object* expected_rb_ptr, Object* rb_ptr) {
-#ifdef USE_BAKER_OR_BROOKS_READ_BARRIER
-  DCHECK(kUseBakerOrBrooksReadBarrier);
+#ifdef USE_BAKER_READ_BARRIER
+  DCHECK(kUseBakerReadBarrier);
+  DCHECK_EQ(reinterpret_cast<uint64_t>(expected_rb_ptr) >> 32, 0U);
+  DCHECK_EQ(reinterpret_cast<uint64_t>(rb_ptr) >> 32, 0U);
+  LockWord expected_lw;
+  LockWord new_lw;
+  do {
+    LockWord lw = GetLockWord(false);
+    if (UNLIKELY(reinterpret_cast<Object*>(lw.ReadBarrierState()) != expected_rb_ptr)) {
+      // Lost the race.
+      return false;
+    }
+    expected_lw = lw;
+    expected_lw.SetReadBarrierState(
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(expected_rb_ptr)));
+    new_lw = lw;
+    new_lw.SetReadBarrierState(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(rb_ptr)));
+  } while (!CasLockWordWeakSequentiallyConsistent(expected_lw, new_lw));
+  return true;
+#elif USE_BROOKS_READ_BARRIER
+  DCHECK(kUseBrooksReadBarrier);
   MemberOffset offset = OFFSET_OF_OBJECT_MEMBER(Object, x_rb_ptr_);
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + offset.SizeValue();
   Atomic<uint32_t>* atomic_rb_ptr = reinterpret_cast<Atomic<uint32_t>*>(raw_addr);
@@ -179,15 +208,15 @@ inline void Object::AssertReadBarrierPointer() const {
 
 template<VerifyObjectFlags kVerifyFlags>
 inline bool Object::VerifierInstanceOf(Class* klass) {
-  DCHECK(klass != NULL);
-  DCHECK(GetClass<kVerifyFlags>() != NULL);
+  DCHECK(klass != nullptr);
+  DCHECK(GetClass<kVerifyFlags>() != nullptr);
   return klass->IsInterface() || InstanceOf(klass);
 }
 
 template<VerifyObjectFlags kVerifyFlags>
 inline bool Object::InstanceOf(Class* klass) {
-  DCHECK(klass != NULL);
-  DCHECK(GetClass<kVerifyNone>() != NULL);
+  DCHECK(klass != nullptr);
+  DCHECK(GetClass<kVerifyNone>() != nullptr);
   return klass->IsAssignableFrom(GetClass<kVerifyFlags>());
 }
 
@@ -222,18 +251,6 @@ template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
 inline bool Object::IsArrayInstance() {
   return GetClass<kVerifyFlags, kReadBarrierOption>()->
       template IsArrayClass<kVerifyFlags, kReadBarrierOption>();
-}
-
-template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
-inline bool Object::IsArtField() {
-  return GetClass<kVerifyFlags, kReadBarrierOption>()->
-      template IsArtFieldClass<kReadBarrierOption>();
-}
-
-template<VerifyObjectFlags kVerifyFlags>
-inline ArtField* Object::AsArtField() {
-  DCHECK(IsArtField<kVerifyFlags>());
-  return down_cast<ArtField*>(this);
 }
 
 template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
@@ -318,8 +335,8 @@ inline ShortArray* Object::AsShortSizedArray() {
 template<VerifyObjectFlags kVerifyFlags>
 inline IntArray* Object::AsIntArray() {
   constexpr auto kNewFlags = static_cast<VerifyObjectFlags>(kVerifyFlags & ~kVerifyThis);
-  DCHECK(GetClass<kVerifyFlags>()->IsArrayClass());
-  DCHECK(GetClass<kNewFlags>()->template GetComponentType<kNewFlags>()->IsPrimitiveInt() ||
+  CHECK(GetClass<kVerifyFlags>()->IsArrayClass());
+  CHECK(GetClass<kNewFlags>()->template GetComponentType<kNewFlags>()->IsPrimitiveInt() ||
          GetClass<kNewFlags>()->template GetComponentType<kNewFlags>()->IsPrimitiveFloat());
   return down_cast<IntArray*>(this);
 }
@@ -327,8 +344,8 @@ inline IntArray* Object::AsIntArray() {
 template<VerifyObjectFlags kVerifyFlags>
 inline LongArray* Object::AsLongArray() {
   constexpr auto kNewFlags = static_cast<VerifyObjectFlags>(kVerifyFlags & ~kVerifyThis);
-  DCHECK(GetClass<kVerifyFlags>()->IsArrayClass());
-  DCHECK(GetClass<kNewFlags>()->template GetComponentType<kNewFlags>()->IsPrimitiveLong() ||
+  CHECK(GetClass<kVerifyFlags>()->IsArrayClass());
+  CHECK(GetClass<kNewFlags>()->template GetComponentType<kNewFlags>()->IsPrimitiveLong() ||
          GetClass<kNewFlags>()->template GetComponentType<kNewFlags>()->IsPrimitiveDouble());
   return down_cast<LongArray*>(this);
 }
@@ -349,9 +366,14 @@ inline DoubleArray* Object::AsDoubleArray() {
   return down_cast<DoubleArray*>(this);
 }
 
-template<VerifyObjectFlags kVerifyFlags>
+template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+inline bool Object::IsString() {
+  return GetClass<kVerifyFlags, kReadBarrierOption>()->IsStringClass();
+}
+
+template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
 inline String* Object::AsString() {
-  DCHECK(GetClass<kVerifyFlags>()->IsStringClass());
+  DCHECK((IsString<kVerifyFlags, kReadBarrierOption>()));
   return down_cast<String*>(this);
 }
 
@@ -397,13 +419,15 @@ inline size_t Object::SizeOf() {
   } else if (IsClass<kNewFlags, kReadBarrierOption>()) {
     result = AsClass<kNewFlags, kReadBarrierOption>()->
         template SizeOf<kNewFlags, kReadBarrierOption>();
+  } else if (GetClass<kNewFlags, kReadBarrierOption>()->IsStringClass()) {
+    result = AsString<kNewFlags, kReadBarrierOption>()->
+        template SizeOf<kNewFlags>();
   } else {
     result = GetClass<kNewFlags, kReadBarrierOption>()->
         template GetObjectSize<kNewFlags, kReadBarrierOption>();
   }
   DCHECK_GE(result, sizeof(Object))
       << " class=" << PrettyTypeOf(GetClass<kNewFlags, kReadBarrierOption>());
-  DCHECK(!(IsArtField<kNewFlags, kReadBarrierOption>()) || result == sizeof(ArtField));
   return result;
 }
 
@@ -960,7 +984,7 @@ inline void Object::VisitReferences(const Visitor& visitor,
   mirror::Class* klass = GetClass<kVerifyFlags>();
   if (klass == Class::GetJavaLangClass()) {
     AsClass<kVerifyNone>()->VisitReferences<kVisitClass>(klass, visitor);
-  } else if (klass->IsArrayClass()) {
+  } else if (klass->IsArrayClass() || klass->IsStringClass()) {
     if (klass->IsObjectArrayClass<kVerifyNone>()) {
       AsObjectArray<mirror::Object, kVerifyNone>()->VisitReferences<kVisitClass>(visitor);
     } else if (kVisitClass) {

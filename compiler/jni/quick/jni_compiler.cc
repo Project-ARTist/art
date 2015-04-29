@@ -28,6 +28,7 @@
 #include "compiled_method.h"
 #include "dex_file-inl.h"
 #include "driver/compiler_driver.h"
+#include "driver/compiler_options.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "jni_env_ext.h"
 #include "mirror/art_method.h"
@@ -93,7 +94,7 @@ CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
 
   // Assembler that holds generated instructions
   std::unique_ptr<Assembler> jni_asm(Assembler::Create(instruction_set));
-  jni_asm->InitializeFrameDescriptionEntry();
+  jni_asm->cfi().SetEnabled(driver->GetCompilerOptions().GetIncludeCFI());
 
   // Offsets into data structures
   // TODO: if cross compiling these offsets are for the host not the target
@@ -105,6 +106,7 @@ CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
   const size_t frame_size(main_jni_conv->FrameSize());
   const std::vector<ManagedRegister>& callee_save_regs = main_jni_conv->CalleeSaveRegisters();
   __ BuildFrame(frame_size, mr_conv->MethodRegister(), callee_save_regs, mr_conv->EntrySpills());
+  DCHECK_EQ(jni_asm->cfi().GetCurrentCFAOffset(), static_cast<int>(frame_size));
 
   // 2. Set up the HandleScope
   mr_conv->ResetIterator(FrameOffset(frame_size));
@@ -150,9 +152,9 @@ CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
     // References need placing in handle scope and the entry value passing
     if (ref_param) {
       // Compute handle scope entry, note null is placed in the handle scope but its boxed value
-      // must be NULL
+      // must be null.
       FrameOffset handle_scope_offset = main_jni_conv->CurrentParamHandleScopeEntryOffset();
-      // Check handle scope offset is within frame and doesn't run into the saved segment state
+      // Check handle scope offset is within frame and doesn't run into the saved segment state.
       CHECK_LT(handle_scope_offset.Uint32Value(), frame_size);
       CHECK_NE(handle_scope_offset.Uint32Value(),
                main_jni_conv->SavedLocalReferenceCookieOffset().Uint32Value());
@@ -241,9 +243,9 @@ CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
   // 7. Iterate over arguments placing values from managed calling convention in
   //    to the convention required for a native call (shuffling). For references
   //    place an index/pointer to the reference after checking whether it is
-  //    NULL (which must be encoded as NULL).
+  //    null (which must be encoded as null).
   //    Note: we do this prior to materializing the JNIEnv* and static's jclass to
-  //    give as many free registers for the shuffle as possible
+  //    give as many free registers for the shuffle as possible.
   mr_conv->ResetIterator(FrameOffset(frame_size + main_out_arg_size));
   uint32_t args_count = 0;
   while (mr_conv->HasNext()) {
@@ -424,7 +426,9 @@ CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
 
   // 16. Remove activation - need to restore callee save registers since the GC may have changed
   //     them.
+  DCHECK_EQ(jni_asm->cfi().GetCurrentCFAOffset(), static_cast<int>(frame_size));
   __ RemoveFrame(frame_size, callee_save_regs);
+  DCHECK_EQ(jni_asm->cfi().GetCurrentCFAOffset(), static_cast<int>(frame_size));
 
   // 17. Finalize code generation
   __ EmitSlowPaths();
@@ -432,22 +436,22 @@ CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
   std::vector<uint8_t> managed_code(cs);
   MemoryRegion code(&managed_code[0], managed_code.size());
   __ FinalizeInstructions(code);
-  jni_asm->FinalizeFrameDescriptionEntry();
-  std::vector<uint8_t>* fde(jni_asm->GetFrameDescriptionEntry());
-  ArrayRef<const uint8_t> cfi_ref;
-  if (fde != nullptr) {
-    cfi_ref = ArrayRef<const uint8_t>(*fde);
-  }
-  return CompiledMethod::SwapAllocCompiledMethodCFI(driver,
-                                                    instruction_set,
-                                                    ArrayRef<const uint8_t>(managed_code),
-                                                    frame_size,
-                                                    main_jni_conv->CoreSpillMask(),
-                                                    main_jni_conv->FpSpillMask(),
-                                                    cfi_ref);
+
+  return CompiledMethod::SwapAllocCompiledMethod(driver,
+                                                 instruction_set,
+                                                 ArrayRef<const uint8_t>(managed_code),
+                                                 frame_size,
+                                                 main_jni_conv->CoreSpillMask(),
+                                                 main_jni_conv->FpSpillMask(),
+                                                 nullptr,  // src_mapping_table.
+                                                 ArrayRef<const uint8_t>(),  // mapping_table.
+                                                 ArrayRef<const uint8_t>(),  // vmap_table.
+                                                 ArrayRef<const uint8_t>(),  // native_gc_map.
+                                                 ArrayRef<const uint8_t>(*jni_asm->cfi().data()),
+                                                 ArrayRef<const LinkerPatch>());
 }
 
-// Copy a single parameter from the managed to the JNI calling convention
+// Copy a single parameter from the managed to the JNI calling convention.
 static void CopyParameter(Assembler* jni_asm,
                           ManagedRuntimeCallingConvention* mr_conv,
                           JniCallingConvention* jni_conv,
@@ -465,7 +469,7 @@ static void CopyParameter(Assembler* jni_asm,
   } else {
     CHECK(jni_conv->IsCurrentParamOnStack());
   }
-  // References need placing in handle scope and the entry address passing
+  // References need placing in handle scope and the entry address passing.
   if (ref_param) {
     null_allowed = mr_conv->IsCurrentArgPossiblyNull();
     // Compute handle scope offset. Note null is placed in the handle scope but the jobject

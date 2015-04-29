@@ -36,18 +36,82 @@
 
 namespace art {
 
-size_t CodeGenerator::GetCacheOffset(uint32_t index) {
-  return mirror::ObjectArray<mirror::Object>::OffsetOfElement(index).SizeValue();
+// Return whether a location is consistent with a type.
+static bool CheckType(Primitive::Type type, Location location) {
+  if (location.IsFpuRegister()
+      || (location.IsUnallocated() && (location.GetPolicy() == Location::kRequiresFpuRegister))) {
+    return (type == Primitive::kPrimFloat) || (type == Primitive::kPrimDouble);
+  } else if (location.IsRegister() ||
+             (location.IsUnallocated() && (location.GetPolicy() == Location::kRequiresRegister))) {
+    return Primitive::IsIntegralType(type) || (type == Primitive::kPrimNot);
+  } else if (location.IsRegisterPair()) {
+    return type == Primitive::kPrimLong;
+  } else if (location.IsFpuRegisterPair()) {
+    return type == Primitive::kPrimDouble;
+  } else if (location.IsStackSlot()) {
+    return (Primitive::IsIntegralType(type) && type != Primitive::kPrimLong)
+           || (type == Primitive::kPrimFloat)
+           || (type == Primitive::kPrimNot);
+  } else if (location.IsDoubleStackSlot()) {
+    return (type == Primitive::kPrimLong) || (type == Primitive::kPrimDouble);
+  } else if (location.IsConstant()) {
+    if (location.GetConstant()->IsIntConstant()) {
+      return Primitive::IsIntegralType(type) && (type != Primitive::kPrimLong);
+    } else if (location.GetConstant()->IsNullConstant()) {
+      return type == Primitive::kPrimNot;
+    } else if (location.GetConstant()->IsLongConstant()) {
+      return type == Primitive::kPrimLong;
+    } else if (location.GetConstant()->IsFloatConstant()) {
+      return type == Primitive::kPrimFloat;
+    } else {
+      return location.GetConstant()->IsDoubleConstant()
+          && (type == Primitive::kPrimDouble);
+    }
+  } else {
+    return location.IsInvalid() || (location.GetPolicy() == Location::kAny);
+  }
 }
 
-static bool IsSingleGoto(HBasicBlock* block) {
-  HLoopInformation* loop_info = block->GetLoopInformation();
-  // TODO: Remove the null check b/19084197.
-  return (block->GetFirstInstruction() != nullptr)
-      && (block->GetFirstInstruction() == block->GetLastInstruction())
-      && block->GetLastInstruction()->IsGoto()
-      // Back edges generate the suspend check.
-      && (loop_info == nullptr || !loop_info->IsBackEdge(block));
+// Check that a location summary is consistent with an instruction.
+static bool CheckTypeConsistency(HInstruction* instruction) {
+  LocationSummary* locations = instruction->GetLocations();
+  if (locations == nullptr) {
+    return true;
+  }
+
+  if (locations->Out().IsUnallocated()
+      && (locations->Out().GetPolicy() == Location::kSameAsFirstInput)) {
+    DCHECK(CheckType(instruction->GetType(), locations->InAt(0)))
+        << instruction->GetType()
+        << " " << locations->InAt(0);
+  } else {
+    DCHECK(CheckType(instruction->GetType(), locations->Out()))
+        << instruction->GetType()
+        << " " << locations->Out();
+  }
+
+  for (size_t i = 0, e = instruction->InputCount(); i < e; ++i) {
+    DCHECK(CheckType(instruction->InputAt(i)->GetType(), locations->InAt(i)))
+      << instruction->InputAt(i)->GetType()
+      << " " << locations->InAt(i);
+  }
+
+  HEnvironment* environment = instruction->GetEnvironment();
+  for (size_t i = 0; i < instruction->EnvironmentSize(); ++i) {
+    if (environment->GetInstructionAt(i) != nullptr) {
+      Primitive::Type type = environment->GetInstructionAt(i)->GetType();
+      DCHECK(CheckType(type, locations->GetEnvironmentAt(i)))
+        << type << " " << locations->GetEnvironmentAt(i);
+    } else {
+      DCHECK(locations->GetEnvironmentAt(i).IsInvalid())
+        << locations->GetEnvironmentAt(i);
+    }
+  }
+  return true;
+}
+
+size_t CodeGenerator::GetCacheOffset(uint32_t index) {
+  return mirror::ObjectArray<mirror::Object>::OffsetOfElement(index).SizeValue();
 }
 
 void CodeGenerator::CompileBaseline(CodeAllocator* allocator, bool is_leaf) {
@@ -74,7 +138,7 @@ bool CodeGenerator::GoesToNextBlock(HBasicBlock* current, HBasicBlock* next) con
 HBasicBlock* CodeGenerator::GetNextBlockToEmit() const {
   for (size_t i = current_block_index_ + 1; i < block_order_->Size(); ++i) {
     HBasicBlock* block = block_order_->Get(i);
-    if (!IsSingleGoto(block)) {
+    if (!block->IsSingleGoto()) {
       return block;
     }
   }
@@ -82,28 +146,31 @@ HBasicBlock* CodeGenerator::GetNextBlockToEmit() const {
 }
 
 HBasicBlock* CodeGenerator::FirstNonEmptyBlock(HBasicBlock* block) const {
-  while (IsSingleGoto(block)) {
+  while (block->IsSingleGoto()) {
     block = block->GetSuccessors().Get(0);
   }
   return block;
 }
 
 void CodeGenerator::CompileInternal(CodeAllocator* allocator, bool is_baseline) {
+  is_baseline_ = is_baseline;
   HGraphVisitor* instruction_visitor = GetInstructionVisitor();
   DCHECK_EQ(current_block_index_, 0u);
   GenerateFrameEntry();
+  DCHECK_EQ(GetAssembler()->cfi().GetCurrentCFAOffset(), static_cast<int>(frame_size_));
   for (size_t e = block_order_->Size(); current_block_index_ < e; ++current_block_index_) {
     HBasicBlock* block = block_order_->Get(current_block_index_);
     // Don't generate code for an empty block. Its predecessors will branch to its successor
     // directly. Also, the label of that block will not be emitted, so this helps catch
     // errors where we reference that label.
-    if (IsSingleGoto(block)) continue;
+    if (block->IsSingleGoto()) continue;
     Bind(block);
     for (HInstructionIterator it(block->GetInstructions()); !it.Done(); it.Advance()) {
       HInstruction* current = it.Current();
       if (is_baseline) {
         InitLocationsBaseline(current);
       }
+      DCHECK(CheckTypeConsistency(current));
       current->Accept(instruction_visitor);
     }
   }
@@ -142,7 +209,6 @@ size_t CodeGenerator::FindFreeEntry(bool* array, size_t length) {
   }
   LOG(FATAL) << "Could not find a register in baseline register allocator";
   UNREACHABLE();
-  return -1;
 }
 
 size_t CodeGenerator::FindTwoFreeConsecutiveAlignedEntries(bool* array, size_t length) {
@@ -155,7 +221,6 @@ size_t CodeGenerator::FindTwoFreeConsecutiveAlignedEntries(bool* array, size_t l
   }
   LOG(FATAL) << "Could not find a register in baseline register allocator";
   UNREACHABLE();
-  return -1;
 }
 
 void CodeGenerator::InitializeCodeGeneration(size_t number_of_spill_slots,
@@ -358,6 +423,7 @@ void CodeGenerator::InitLocationsBaseline(HInstruction* instruction) {
 
 void CodeGenerator::AllocateLocations(HInstruction* instruction) {
   instruction->Accept(GetLocationBuilder());
+  DCHECK(CheckTypeConsistency(instruction));
   LocationSummary* locations = instruction->GetLocations();
   if (!instruction->IsSuspendCheckEntry()) {
     if (locations != nullptr && locations->CanCall()) {
@@ -388,10 +454,14 @@ CodeGenerator* CodeGenerator::Create(HGraph* graph,
     case kMips:
       return nullptr;
     case kX86: {
-      return new x86::CodeGeneratorX86(graph, compiler_options);
+      return new x86::CodeGeneratorX86(graph,
+           *isa_features.AsX86InstructionSetFeatures(),
+           compiler_options);
     }
     case kX86_64: {
-      return new x86_64::CodeGeneratorX86_64(graph, compiler_options);
+      return new x86_64::CodeGeneratorX86_64(graph,
+          *isa_features.AsX86_64InstructionSetFeatures(),
+          compiler_options);
     }
     default:
       return nullptr;
@@ -423,7 +493,16 @@ void CodeGenerator::BuildNativeGCMap(
   }
 }
 
-void CodeGenerator::BuildMappingTable(std::vector<uint8_t>* data, DefaultSrcMap* src_map) const {
+void CodeGenerator::BuildSourceMap(DefaultSrcMap* src_map) const {
+  for (size_t i = 0; i < pc_infos_.Size(); i++) {
+    struct PcInfo pc_info = pc_infos_.Get(i);
+    uint32_t pc2dex_offset = pc_info.native_pc;
+    int32_t pc2dex_dalvik_offset = pc_info.dex_pc;
+    src_map->push_back(SrcMapElem({pc2dex_offset, pc2dex_dalvik_offset}));
+  }
+}
+
+void CodeGenerator::BuildMappingTable(std::vector<uint8_t>* data) const {
   uint32_t pc2dex_data_size = 0u;
   uint32_t pc2dex_entries = pc_infos_.Size();
   uint32_t pc2dex_offset = 0u;
@@ -433,19 +512,12 @@ void CodeGenerator::BuildMappingTable(std::vector<uint8_t>* data, DefaultSrcMap*
   uint32_t dex2pc_offset = 0u;
   int32_t dex2pc_dalvik_offset = 0;
 
-  if (src_map != nullptr) {
-    src_map->reserve(pc2dex_entries);
-  }
-
   for (size_t i = 0; i < pc2dex_entries; i++) {
     struct PcInfo pc_info = pc_infos_.Get(i);
     pc2dex_data_size += UnsignedLeb128Size(pc_info.native_pc - pc2dex_offset);
     pc2dex_data_size += SignedLeb128Size(pc_info.dex_pc - pc2dex_dalvik_offset);
     pc2dex_offset = pc_info.native_pc;
     pc2dex_dalvik_offset = pc_info.dex_pc;
-    if (src_map != nullptr) {
-      src_map->push_back(SrcMapElem({pc2dex_offset, pc2dex_dalvik_offset}));
-    }
   }
 
   // Walk over the blocks and find which ones correspond to catch block entries.
@@ -541,7 +613,7 @@ void CodeGenerator::BuildVMapTable(std::vector<uint8_t>* data) const {
 }
 
 void CodeGenerator::BuildStackMaps(std::vector<uint8_t>* data) {
-  uint32_t size = stack_map_stream_.ComputeNeededSize();
+  uint32_t size = stack_map_stream_.PrepareForFillIn();
   data->resize(size);
   MemoryRegion region(data->data(), size);
   stack_map_stream_.FillIn(region);
@@ -583,7 +655,8 @@ void CodeGenerator::RecordPcInfo(HInstruction* instruction,
 
   if (instruction == nullptr) {
     // For stack overflow checks.
-    stack_map_stream_.AddStackMapEntry(dex_pc, pc_info.native_pc, 0, 0, 0, inlining_depth);
+    stack_map_stream_.BeginStackMapEntry(dex_pc, pc_info.native_pc, 0, 0, 0, inlining_depth);
+    stack_map_stream_.EndStackMapEntry();
     return;
   }
   LocationSummary* locations = instruction->GetLocations();
@@ -601,12 +674,12 @@ void CodeGenerator::RecordPcInfo(HInstruction* instruction,
   }
   // The register mask must be a subset of callee-save registers.
   DCHECK_EQ(register_mask & core_callee_save_mask_, register_mask);
-  stack_map_stream_.AddStackMapEntry(dex_pc,
-                                     pc_info.native_pc,
-                                     register_mask,
-                                     locations->GetStackMask(),
-                                     environment_size,
-                                     inlining_depth);
+  stack_map_stream_.BeginStackMapEntry(dex_pc,
+                                       pc_info.native_pc,
+                                       register_mask,
+                                       locations->GetStackMask(),
+                                       environment_size,
+                                       inlining_depth);
 
   // Walk over the environment, and record the location of dex registers.
   for (size_t i = 0; i < environment_size; ++i) {
@@ -628,7 +701,7 @@ void CodeGenerator::RecordPcInfo(HInstruction* instruction,
               ++i, DexRegisterLocation::Kind::kConstant, High32Bits(value));
           DCHECK_LT(i, environment_size);
         } else if (current->IsDoubleConstant()) {
-          int64_t value = bit_cast<double, int64_t>(current->AsDoubleConstant()->GetValue());
+          int64_t value = bit_cast<int64_t, double>(current->AsDoubleConstant()->GetValue());
           stack_map_stream_.AddDexRegisterEntry(
               i, DexRegisterLocation::Kind::kConstant, Low32Bits(value));
           stack_map_stream_.AddDexRegisterEntry(
@@ -641,7 +714,7 @@ void CodeGenerator::RecordPcInfo(HInstruction* instruction,
           stack_map_stream_.AddDexRegisterEntry(i, DexRegisterLocation::Kind::kConstant, 0);
         } else {
           DCHECK(current->IsFloatConstant()) << current->DebugName();
-          int32_t value = bit_cast<float, int32_t>(current->AsFloatConstant()->GetValue());
+          int32_t value = bit_cast<int32_t, float>(current->AsFloatConstant()->GetValue());
           stack_map_stream_.AddDexRegisterEntry(i, DexRegisterLocation::Kind::kConstant, value);
         }
         break;
@@ -752,11 +825,14 @@ void CodeGenerator::RecordPcInfo(HInstruction* instruction,
         LOG(FATAL) << "Unexpected kind " << location.GetKind();
     }
   }
+  stack_map_stream_.EndStackMapEntry();
 }
 
 bool CodeGenerator::CanMoveNullCheckToUser(HNullCheck* null_check) {
   HInstruction* first_next_not_move = null_check->GetNextDisregardingMoves();
-  return (first_next_not_move != nullptr) && first_next_not_move->CanDoImplicitNullCheck();
+
+  return (first_next_not_move != nullptr)
+      && first_next_not_move->CanDoImplicitNullCheckOn(null_check->InputAt(0));
 }
 
 void CodeGenerator::MaybeRecordImplicitNullCheck(HInstruction* instr) {
@@ -771,7 +847,7 @@ void CodeGenerator::MaybeRecordImplicitNullCheck(HInstruction* instr) {
     return;
   }
 
-  if (!instr->CanDoImplicitNullCheck()) {
+  if (!instr->CanDoImplicitNullCheckOn(instr->InputAt(0))) {
     return;
   }
 
@@ -807,10 +883,15 @@ void CodeGenerator::ClearSpillSlotsFromLoopPhisInStackMap(HSuspendCheck* suspend
   }
 }
 
-void CodeGenerator::EmitParallelMoves(Location from1, Location to1, Location from2, Location to2) {
+void CodeGenerator::EmitParallelMoves(Location from1,
+                                      Location to1,
+                                      Primitive::Type type1,
+                                      Location from2,
+                                      Location to2,
+                                      Primitive::Type type2) {
   HParallelMove parallel_move(GetGraph()->GetArena());
-  parallel_move.AddMove(from1, to1, nullptr);
-  parallel_move.AddMove(from2, to2, nullptr);
+  parallel_move.AddMove(from1, to1, type1, nullptr);
+  parallel_move.AddMove(from2, to2, type2, nullptr);
   GetMoveResolver()->EmitNativeCode(&parallel_move);
 }
 

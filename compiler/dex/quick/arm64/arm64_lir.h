@@ -36,8 +36,7 @@ namespace art {
  *          the linker, by the trampolines and other stubs (the backend uses
  *          these as temporary registers).
  * r18    : (rxSELF) is reserved (pointer to thread-local storage).
- * r19    : (rwSUSPEND) is reserved (suspend check/debugger assist).
- * r20-r29: Callee save registers (promotion targets).
+ * r19-r29: Callee save registers (promotion targets).
  * r30    : (lr) is reserved (the link register).
  * rsp    : (sp) is reserved (the stack pointer).
  * rzr    : (zr) is reserved (the zero register).
@@ -146,7 +145,6 @@ enum A64NativeRegisterPool {  // private marker to avoid generate-operator-out.p
   // Aliases which are not defined in "ARM Architecture Reference, register names".
   rxIP0 = rx16,
   rxIP1 = rx17,
-  rxSUSPEND = rx19,
   rxSELF = rx18,
   rxLR = rx30,
   /*
@@ -156,7 +154,6 @@ enum A64NativeRegisterPool {  // private marker to avoid generate-operator-out.p
    */
   rwIP0 = rw16,
   rwIP1 = rw17,
-  rwSUSPEND = rw19,
   rwSELF = rw18,
   rwLR = rw30,
 };
@@ -176,12 +173,10 @@ constexpr RegStorage rs_wIP0(RegStorage::kValid | rwIP0);
 constexpr RegStorage rs_xIP1(RegStorage::kValid | rxIP1);
 constexpr RegStorage rs_wIP1(RegStorage::kValid | rwIP1);
 // Reserved registers.
-constexpr RegStorage rs_xSUSPEND(RegStorage::kValid | rxSUSPEND);
 constexpr RegStorage rs_xSELF(RegStorage::kValid | rxSELF);
 constexpr RegStorage rs_sp(RegStorage::kValid | rsp);
 constexpr RegStorage rs_xLR(RegStorage::kValid | rxLR);
 // TODO: eliminate the need for these.
-constexpr RegStorage rs_wSUSPEND(RegStorage::kValid | rwSUSPEND);
 constexpr RegStorage rs_wSELF(RegStorage::kValid | rwSELF);
 constexpr RegStorage rs_wsp(RegStorage::kValid | rwsp);
 constexpr RegStorage rs_wLR(RegStorage::kValid | rwLR);
@@ -236,6 +231,7 @@ enum A64Opcode {
   kA64Add4rrro,      // add [00001011000] rm[20-16] imm_6[15-10] rn[9-5] rd[4-0].
   kA64Add4RRre,      // add [00001011001] rm[20-16] option[15-13] imm_3[12-10] rn[9-5] rd[4-0].
   kA64Adr2xd,        // adr [0] immlo[30-29] [10000] immhi[23-5] rd[4-0].
+  kA64Adrp2xd,       // adrp [1] immlo[30-29] [10000] immhi[23-5] rd[4-0].
   kA64And3Rrl,       // and [00010010] N[22] imm_r[21-16] imm_s[15-10] rn[9-5] rd[4-0].
   kA64And4rrro,      // and [00001010] shift[23-22] [N=0] rm[20-16] imm_6[15-10] rn[9-5] rd[4-0].
   kA64Asr3rrd,       // asr [0001001100] immr[21-16] imms[15-10] rn[9-5] rd[4-0].

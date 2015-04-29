@@ -205,7 +205,7 @@ class Address : public Operand {
 
 class X86Assembler FINAL : public Assembler {
  public:
-  explicit X86Assembler() : cfi_cfa_offset_(0), cfi_pc_(0) {}
+  explicit X86Assembler() {}
   virtual ~X86Assembler() {}
 
   /*
@@ -230,6 +230,8 @@ class X86Assembler FINAL : public Assembler {
   void movl(const Address& dst, Register src);
   void movl(const Address& dst, const Immediate& imm);
   void movl(const Address& dst, Label* lbl);
+
+  void bswapl(Register dst);
 
   void movzxb(Register dst, ByteRegister src);
   void movzxb(Register dst, const Address& src);
@@ -310,6 +312,9 @@ class X86Assembler FINAL : public Assembler {
   void ucomiss(XmmRegister a, XmmRegister b);
   void ucomisd(XmmRegister a, XmmRegister b);
 
+  void roundsd(XmmRegister dst, XmmRegister src, const Immediate& imm);
+  void roundss(XmmRegister dst, XmmRegister src, const Immediate& imm);
+
   void sqrtsd(XmmRegister dst, XmmRegister src);
   void sqrtss(XmmRegister dst, XmmRegister src);
 
@@ -318,7 +323,13 @@ class X86Assembler FINAL : public Assembler {
   void xorps(XmmRegister dst, const Address& src);
   void xorps(XmmRegister dst, XmmRegister src);
 
+  void andpd(XmmRegister dst, XmmRegister src);
   void andpd(XmmRegister dst, const Address& src);
+  void andps(XmmRegister dst, XmmRegister src);
+  void andps(XmmRegister dst, const Address& src);
+
+  void orpd(XmmRegister dst, XmmRegister src);
+  void orps(XmmRegister dst, XmmRegister src);
 
   void flds(const Address& src);
   void fstps(const Address& dst);
@@ -338,6 +349,7 @@ class X86Assembler FINAL : public Assembler {
   void fistpl(const Address& dst);
   void fistps(const Address& dst);
   void fildl(const Address& src);
+  void filds(const Address& src);
 
   void fincstp();
   void ffree(const Immediate& index);
@@ -389,6 +401,7 @@ class X86Assembler FINAL : public Assembler {
   void subl(Register dst, Register src);
   void subl(Register reg, const Immediate& imm);
   void subl(Register reg, const Address& address);
+  void subl(const Address& address, Register src);
 
   void cdq();
 
@@ -407,6 +420,7 @@ class X86Assembler FINAL : public Assembler {
   void sbbl(Register dst, Register src);
   void sbbl(Register reg, const Immediate& imm);
   void sbbl(Register reg, const Address& address);
+  void sbbl(const Address& address, Register src);
 
   void incl(Register reg);
   void incl(const Address& address);
@@ -444,6 +458,7 @@ class X86Assembler FINAL : public Assembler {
 
   X86Assembler* lock();
   void cmpxchgl(const Address& address, Register reg);
+  void cmpxchg8b(const Address& address);
 
   void mfence();
 
@@ -461,6 +476,10 @@ class X86Assembler FINAL : public Assembler {
 
   void LockCmpxchgl(const Address& address, Register reg) {
     lock()->cmpxchgl(address, reg);
+  }
+
+  void LockCmpxchg8b(const Address& address) {
+    lock()->cmpxchg8b(address);
   }
 
   //
@@ -557,17 +576,17 @@ class X86Assembler FINAL : public Assembler {
   void GetCurrentThread(ManagedRegister tr) OVERRIDE;
   void GetCurrentThread(FrameOffset dest_offset, ManagedRegister scratch) OVERRIDE;
 
-  // Set up out_reg to hold a Object** into the handle scope, or to be NULL if the
+  // Set up out_reg to hold a Object** into the handle scope, or to be null if the
   // value is null and null_allowed. in_reg holds a possibly stale reference
   // that can be used to avoid loading the handle scope entry to see if the value is
-  // NULL.
-  void CreateHandleScopeEntry(ManagedRegister out_reg, FrameOffset handlescope_offset, ManagedRegister in_reg,
-                       bool null_allowed) OVERRIDE;
+  // null.
+  void CreateHandleScopeEntry(ManagedRegister out_reg, FrameOffset handlescope_offset,
+                              ManagedRegister in_reg, bool null_allowed) OVERRIDE;
 
-  // Set up out_off to hold a Object** into the handle scope, or to be NULL if the
+  // Set up out_off to hold a Object** into the handle scope, or to be null if the
   // value is null and null_allowed.
-  void CreateHandleScopeEntry(FrameOffset out_off, FrameOffset handlescope_offset, ManagedRegister scratch,
-                       bool null_allowed) OVERRIDE;
+  void CreateHandleScopeEntry(FrameOffset out_off, FrameOffset handlescope_offset,
+                              ManagedRegister scratch, bool null_allowed) OVERRIDE;
 
   // src holds a handle scope entry (Object**) load this into dst
   void LoadReferenceFromHandleScope(ManagedRegister dst, ManagedRegister src) OVERRIDE;
@@ -586,12 +605,6 @@ class X86Assembler FINAL : public Assembler {
   // and branch to a ExceptionSlowPath if it is.
   void ExceptionPoll(ManagedRegister scratch, size_t stack_adjust) OVERRIDE;
 
-  void InitializeFrameDescriptionEntry() OVERRIDE;
-  void FinalizeFrameDescriptionEntry() OVERRIDE;
-  std::vector<uint8_t>* GetFrameDescriptionEntry() OVERRIDE {
-    return &cfi_info_;
-  }
-
  private:
   inline void EmitUint8(uint8_t value);
   inline void EmitInt32(int32_t value);
@@ -609,9 +622,6 @@ class X86Assembler FINAL : public Assembler {
 
   void EmitGenericShift(int rm, Register reg, const Immediate& imm);
   void EmitGenericShift(int rm, Register operand, Register shifter);
-
-  std::vector<uint8_t> cfi_info_;
-  uint32_t cfi_cfa_offset_, cfi_pc_;
 
   DISALLOW_COPY_AND_ASSIGN(X86Assembler);
 };

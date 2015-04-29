@@ -16,13 +16,14 @@
 
 #include "entrypoints/entrypoint_utils.h"
 
+#include "art_field-inl.h"
 #include "base/mutex.h"
 #include "class_linker-inl.h"
 #include "dex_file-inl.h"
 #include "gc/accounting/card_table-inl.h"
-#include "mirror/art_field-inl.h"
 #include "mirror/art_method-inl.h"
 #include "mirror/class-inl.h"
+#include "mirror/method.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 #include "reflection.h"
@@ -43,9 +44,9 @@ static inline mirror::Class* CheckFilledNewArrayAlloc(uint32_t type_idx,
     return nullptr;  // Failure
   }
   mirror::Class* klass = referrer->GetDexCacheResolvedType<false>(type_idx);
-  if (UNLIKELY(klass == NULL)) {  // Not in dex cache so try to resolve
+  if (UNLIKELY(klass == nullptr)) {  // Not in dex cache so try to resolve
     klass = Runtime::Current()->GetClassLinker()->ResolveType(type_idx, referrer);
-    if (klass == NULL) {  // Error
+    if (klass == nullptr) {  // Error
       DCHECK(self->IsExceptionPending());
       return nullptr;  // Failure
     }
@@ -230,13 +231,13 @@ JValue InvokeProxyInvocationHandler(ScopedObjectAccessAlreadyRunnable& soa, cons
 
   // Build argument array possibly triggering GC.
   soa.Self()->AssertThreadSuspensionIsAllowable();
-  jobjectArray args_jobj = NULL;
+  jobjectArray args_jobj = nullptr;
   const JValue zero;
   int32_t target_sdk_version = Runtime::Current()->GetTargetSdkVersion();
   // Do not create empty arrays unless needed to maintain Dalvik bug compatibility.
   if (args.size() > 0 || (target_sdk_version > 0 && target_sdk_version <= 21)) {
-    args_jobj = soa.Env()->NewObjectArray(args.size(), WellKnownClasses::java_lang_Object, NULL);
-    if (args_jobj == NULL) {
+    args_jobj = soa.Env()->NewObjectArray(args.size(), WellKnownClasses::java_lang_Object, nullptr);
+    if (args_jobj == nullptr) {
       CHECK(soa.Self()->IsExceptionPending());
       return zero;
     }
@@ -248,7 +249,7 @@ JValue InvokeProxyInvocationHandler(ScopedObjectAccessAlreadyRunnable& soa, cons
         JValue jv;
         jv.SetJ(args.at(i).j);
         mirror::Object* val = BoxPrimitive(Primitive::GetType(shorty[i + 1]), jv);
-        if (val == NULL) {
+        if (val == nullptr) {
           CHECK(soa.Self()->IsExceptionPending());
           return zero;
         }
@@ -257,7 +258,7 @@ JValue InvokeProxyInvocationHandler(ScopedObjectAccessAlreadyRunnable& soa, cons
     }
   }
 
-  // Call Proxy.invoke(Proxy proxy, ArtMethod method, Object[] args).
+  // Call Proxy.invoke(Proxy proxy, Method method, Object[] args).
   jvalue invocation_args[3];
   invocation_args[0].l = rcvr_jobj;
   invocation_args[1].l = interface_method_jobj;
@@ -269,15 +270,14 @@ JValue InvokeProxyInvocationHandler(ScopedObjectAccessAlreadyRunnable& soa, cons
 
   // Unbox result and handle error conditions.
   if (LIKELY(!soa.Self()->IsExceptionPending())) {
-    if (shorty[0] == 'V' || (shorty[0] == 'L' && result == NULL)) {
+    if (shorty[0] == 'V' || (shorty[0] == 'L' && result == nullptr)) {
       // Do nothing.
       return zero;
     } else {
       StackHandleScope<1> hs(soa.Self());
-      Handle<mirror::ArtMethod> h_interface_method(
-          hs.NewHandle(soa.Decode<mirror::ArtMethod*>(interface_method_jobj)));
+      auto h_interface_method(hs.NewHandle(soa.Decode<mirror::Method*>(interface_method_jobj)));
       // This can cause thread suspension.
-      mirror::Class* result_type = h_interface_method->GetReturnType();
+      mirror::Class* result_type = h_interface_method->GetArtMethod()->GetReturnType();
       mirror::Object* result_ref = soa.Decode<mirror::Object*>(result);
       JValue result_unboxed;
       if (!UnboxPrimitiveForResult(result_ref, result_type, &result_unboxed)) {
@@ -293,10 +293,9 @@ JValue InvokeProxyInvocationHandler(ScopedObjectAccessAlreadyRunnable& soa, cons
     if (exception->IsCheckedException()) {
       mirror::Object* rcvr = soa.Decode<mirror::Object*>(rcvr_jobj);
       mirror::Class* proxy_class = rcvr->GetClass();
-      mirror::ArtMethod* interface_method =
-          soa.Decode<mirror::ArtMethod*>(interface_method_jobj);
+      mirror::Method* interface_method = soa.Decode<mirror::Method*>(interface_method_jobj);
       mirror::ArtMethod* proxy_method =
-          rcvr->GetClass()->FindVirtualMethodForInterface(interface_method);
+          rcvr->GetClass()->FindVirtualMethodForInterface(interface_method->GetArtMethod());
       int throws_index = -1;
       size_t num_virt_methods = proxy_class->NumVirtualMethods();
       for (size_t i = 0; i < num_virt_methods; i++) {
@@ -316,7 +315,7 @@ JValue InvokeProxyInvocationHandler(ScopedObjectAccessAlreadyRunnable& soa, cons
       }
       if (!declares_exception) {
         soa.Self()->ThrowNewWrappedException("Ljava/lang/reflect/UndeclaredThrowableException;",
-                                             NULL);
+                                             nullptr);
       }
     }
     return zero;

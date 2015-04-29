@@ -50,11 +50,6 @@ namespace instrumentation {
 
 const bool kVerboseInstrumentation = false;
 
-// Do we want to deoptimize for method entry and exit listeners or just try to intercept
-// invocations? Deoptimization forces all code to run in the interpreter and considerably hurts the
-// application's performance.
-static constexpr bool kDeoptimizeForAccurateMethodEntryExitListeners = true;
-
 static bool InstallStubsClassVisitor(mirror::Class* klass, void* arg)
     EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_) {
   Instrumentation* instrumentation = reinterpret_cast<Instrumentation*>(arg);
@@ -182,14 +177,14 @@ static void InstrumentationInstallStack(Thread* thread, void* arg)
 
     virtual bool VisitFrame() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
       mirror::ArtMethod* m = GetMethod();
-      if (m == NULL) {
+      if (m == nullptr) {
         if (kVerboseInstrumentation) {
           LOG(INFO) << "  Skipping upcall. Frame " << GetFrameId();
         }
         last_return_pc_ = 0;
         return true;  // Ignore upcalls.
       }
-      if (GetCurrentQuickFrame() == NULL) {
+      if (GetCurrentQuickFrame() == nullptr) {
         bool interpreter_frame = true;
         InstrumentationStackFrame instrumentation_frame(GetThisObject(), m, 0, GetFrameId(),
                                                         interpreter_frame);
@@ -314,7 +309,7 @@ static void InstrumentationRestoreStack(Thread* thread, void* arg)
   struct RestoreStackVisitor : public StackVisitor {
     RestoreStackVisitor(Thread* thread_in, uintptr_t instrumentation_exit_pc,
                         Instrumentation* instrumentation)
-        : StackVisitor(thread_in, NULL), thread_(thread_in),
+        : StackVisitor(thread_in, nullptr), thread_(thread_in),
           instrumentation_exit_pc_(instrumentation_exit_pc),
           instrumentation_(instrumentation),
           instrumentation_stack_(thread_in->GetInstrumentationStack()),
@@ -325,14 +320,14 @@ static void InstrumentationRestoreStack(Thread* thread, void* arg)
         return false;  // Stop.
       }
       mirror::ArtMethod* m = GetMethod();
-      if (GetCurrentQuickFrame() == NULL) {
+      if (GetCurrentQuickFrame() == nullptr) {
         if (kVerboseInstrumentation) {
           LOG(INFO) << "  Ignoring a shadow frame. Frame " << GetFrameId()
               << " Method=" << PrettyMethod(m);
         }
         return true;  // Ignore shadow frames.
       }
-      if (m == NULL) {
+      if (m == nullptr) {
         if (kVerboseInstrumentation) {
           LOG(INFO) << "  Skipping upcall. Frame " << GetFrameId();
         }
@@ -650,7 +645,7 @@ void Instrumentation::ResetQuickAllocEntryPoints() {
   Runtime* runtime = Runtime::Current();
   if (runtime->IsStarted()) {
     MutexLock mu(Thread::Current(), *Locks::thread_list_lock_);
-    runtime->GetThreadList()->ForEach(ResetQuickAllocEntryPointsForThread, NULL);
+    runtime->GetThreadList()->ForEach(ResetQuickAllocEntryPointsForThread, nullptr);
   }
 }
 
@@ -846,8 +841,7 @@ void Instrumentation::UndeoptimizeEverything() {
   ConfigureStubs(false, false);
 }
 
-void Instrumentation::EnableMethodTracing() {
-  bool require_interpreter = kDeoptimizeForAccurateMethodEntryExitListeners;
+void Instrumentation::EnableMethodTracing(bool require_interpreter) {
   ConfigureStubs(!require_interpreter, require_interpreter);
 }
 
@@ -929,7 +923,7 @@ void Instrumentation::BackwardBranchImpl(Thread* thread, mirror::ArtMethod* meth
 
 void Instrumentation::FieldReadEventImpl(Thread* thread, mirror::Object* this_object,
                                          mirror::ArtMethod* method, uint32_t dex_pc,
-                                         mirror::ArtField* field) const {
+                                         ArtField* field) const {
   if (HasFieldReadListeners()) {
     std::shared_ptr<std::list<InstrumentationListener*>> original(field_read_listeners_);
     for (InstrumentationListener* listener : *original.get()) {
@@ -940,7 +934,7 @@ void Instrumentation::FieldReadEventImpl(Thread* thread, mirror::Object* this_ob
 
 void Instrumentation::FieldWriteEventImpl(Thread* thread, mirror::Object* this_object,
                                          mirror::ArtMethod* method, uint32_t dex_pc,
-                                         mirror::ArtField* field, const JValue& field_value) const {
+                                         ArtField* field, const JValue& field_value) const {
   if (HasFieldWriteListeners()) {
     std::shared_ptr<std::list<InstrumentationListener*>> original(field_write_listeners_);
     for (InstrumentationListener* listener : *original.get()) {
@@ -1030,7 +1024,8 @@ TwoWordReturn Instrumentation::PopInstrumentationStackFrame(Thread* self, uintpt
   NthCallerVisitor visitor(self, 1, true);
   visitor.WalkStack(true);
   bool deoptimize = (visitor.caller != nullptr) &&
-                    (interpreter_stubs_installed_ || IsDeoptimized(visitor.caller));
+                    (interpreter_stubs_installed_ || IsDeoptimized(visitor.caller) ||
+                    Dbg::IsForcedInterpreterNeededForUpcall(self, visitor.caller));
   if (deoptimize) {
     if (kVerboseInstrumentation) {
       LOG(INFO) << StringPrintf("Deoptimizing %s by returning from %s with result %#" PRIx64 " in ",
@@ -1076,13 +1071,14 @@ void Instrumentation::PopMethodForUnwind(Thread* self, bool is_deoptimization) c
   }
 }
 
-void Instrumentation::VisitRoots(RootCallback* callback, void* arg) {
+void Instrumentation::VisitRoots(RootVisitor* visitor) {
   WriterMutexLock mu(Thread::Current(), deoptimized_methods_lock_);
   if (IsDeoptimizedMethodsEmpty()) {
     return;
   }
+  BufferedRootVisitor<kDefaultBufferedRootCount> roots(visitor, RootInfo(kRootVMInternal));
   for (auto pair : deoptimized_methods_) {
-    pair.second.VisitRoot(callback, arg, RootInfo(kRootVMInternal));
+    roots.VisitRoot(pair.second);
   }
 }
 

@@ -21,7 +21,7 @@
 
 #include "art_field.h"
 #include "class.h"
-#include "class_linker.h"
+#include "class_linker-inl.h"
 #include "dex_cache.h"
 #include "dex_file.h"
 #include "dex_file-inl.h"
@@ -36,7 +36,7 @@ namespace art {
 namespace mirror {
 
 inline uint32_t ArtMethod::ClassSize() {
-  uint32_t vtable_entries = Object::kVTableLength + 8;
+  uint32_t vtable_entries = Object::kVTableLength;
   return Class::ComputeClassSize(true, vtable_entries, 0, 0, 0, 0, 0);
 }
 
@@ -48,7 +48,7 @@ inline Class* ArtMethod::GetJavaLangReflectArtMethod() {
 
 inline Class* ArtMethod::GetDeclaringClass() {
   Class* result = GetFieldObject<Class>(OFFSET_OF_OBJECT_MEMBER(ArtMethod, declaring_class_));
-  DCHECK(result != NULL) << this;
+  DCHECK(result != nullptr) << this;
   DCHECK(result->IsIdxLoaded() || result->IsErroneous()) << this;
   return result;
 }
@@ -228,10 +228,6 @@ inline const uint8_t* ArtMethod::GetVmapTable(const void* code_pointer, size_t p
     return nullptr;
   }
   return reinterpret_cast<const uint8_t*>(code_pointer) - offset;
-}
-
-inline StackMap ArtMethod::GetStackMap(uint32_t native_pc_offset) {
-  return GetOptimizedCodeInfo().GetStackMapForNativePcOffset(native_pc_offset);
 }
 
 inline CodeInfo ArtMethod::GetOptimizedCodeInfo() {

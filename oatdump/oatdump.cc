@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "arch/instruction_set_features.h"
+#include "art_field-inl.h"
 #include "base/unix_file/fd_file.h"
 #include "class_linker.h"
 #include "class_linker-inl.h"
@@ -40,7 +41,6 @@
 #include "image.h"
 #include "indenter.h"
 #include "mapping_table.h"
-#include "mirror/art_field-inl.h"
 #include "mirror/art_method-inl.h"
 #include "mirror/array-inl.h"
 #include "mirror/class-inl.h"
@@ -92,8 +92,7 @@ class OatSymbolizer FINAL : public CodeOutput {
 
     elf_output_ = OS::CreateEmptyFile(output_name_.c_str());
 
-    builder_.reset(new ElfBuilder<Elf32_Word, Elf32_Sword, Elf32_Addr, Elf32_Dyn,
-                                  Elf32_Sym, Elf32_Ehdr, Elf32_Phdr, Elf32_Shdr>(
+    builder_.reset(new ElfBuilder<ElfTypes32>(
         this,
         elf_output_,
         oat_file_->GetOatHeader().GetInstructionSet(),
@@ -145,7 +144,7 @@ class OatSymbolizer FINAL : public CodeOutput {
     std::vector<const OatFile::OatDexFile*> oat_dex_files = oat_file_->GetOatDexFiles();
     for (size_t i = 0; i < oat_dex_files.size(); i++) {
       const OatFile::OatDexFile* oat_dex_file = oat_dex_files[i];
-      CHECK(oat_dex_file != NULL);
+      CHECK(oat_dex_file != nullptr);
       WalkOatDexFile(oat_dex_file, callback);
     }
   }
@@ -270,8 +269,7 @@ class OatSymbolizer FINAL : public CodeOutput {
         pretty_name = "[Dedup]" + pretty_name;
       }
 
-      ElfSymtabBuilder<Elf32_Word, Elf32_Sword, Elf32_Addr,
-      Elf32_Sym, Elf32_Shdr>* symtab = builder_->GetSymtabBuilder();
+      ElfSymtabBuilder<ElfTypes32>* symtab = builder_->GetSymtabBuilder();
 
       symtab->AddSymbol(pretty_name, &builder_->GetTextBuilder(),
           oat_method.GetCodeOffset() - oat_file_->GetOatHeader().GetExecutableOffset(),
@@ -300,8 +298,7 @@ class OatSymbolizer FINAL : public CodeOutput {
   }
 
   const OatFile* oat_file_;
-  std::unique_ptr<ElfBuilder<Elf32_Word, Elf32_Sword, Elf32_Addr, Elf32_Dyn,
-                              Elf32_Sym, Elf32_Ehdr, Elf32_Phdr, Elf32_Shdr> > builder_;
+  std::unique_ptr<ElfBuilder<ElfTypes32> > builder_;
   File* elf_output_;
   std::unordered_map<uint32_t, uint32_t> state_;
   const std::string output_name_;
@@ -1039,62 +1036,11 @@ class OatDumper {
     }
   }
 
-  void DumpRegisterMapping(std::ostream& os,
-                           size_t dex_register_num,
-                           DexRegisterLocation::Kind kind,
-                           int32_t value,
-                           const std::string& prefix = "v",
-                           const std::string& suffix = "") {
-    os << "      " << prefix << dex_register_num << ": "
-       << DexRegisterLocation::PrettyDescriptor(kind)
-       << " (" << value << ")" << suffix << '\n';
-  }
-
-  void DumpStackMapHeader(std::ostream& os, const CodeInfo& code_info, size_t stack_map_num) {
-    StackMap stack_map = code_info.GetStackMapAt(stack_map_num);
-    os << "    StackMap " << stack_map_num
-       << std::hex
-       << " (dex_pc=0x" << stack_map.GetDexPc()
-       << ", native_pc_offset=0x" << stack_map.GetNativePcOffset()
-       << ", register_mask=0x" << stack_map.GetRegisterMask()
-       << std::dec
-       << ", stack_mask=0b";
-    MemoryRegion stack_mask = stack_map.GetStackMask();
-    for (size_t i = 0, e = stack_mask.size_in_bits(); i < e; ++i) {
-      os << stack_mask.LoadBit(e - i - 1);
-    }
-    os << ")\n";
-  };
-
   // Display a CodeInfo object emitted by the optimizing compiler.
   void DumpCodeInfo(std::ostream& os,
                     const CodeInfo& code_info,
                     const DexFile::CodeItem& code_item) {
-    uint16_t number_of_dex_registers = code_item.registers_size_;
-    uint32_t code_info_size = code_info.GetOverallSize();
-    size_t number_of_stack_maps = code_info.GetNumberOfStackMaps();
-    os << "  Optimized CodeInfo (size=" << code_info_size
-       << ", number_of_dex_registers=" << number_of_dex_registers
-       << ", number_of_stack_maps=" << number_of_stack_maps << ")\n";
-
-    // Display stack maps along with Dex register maps.
-    for (size_t i = 0; i < number_of_stack_maps; ++i) {
-      StackMap stack_map = code_info.GetStackMapAt(i);
-      DumpStackMapHeader(os, code_info, i);
-      if (stack_map.HasDexRegisterMap()) {
-        DexRegisterMap dex_register_map =
-            code_info.GetDexRegisterMapOf(stack_map, number_of_dex_registers);
-        // TODO: Display the bit mask of live Dex registers.
-        for (size_t j = 0; j < number_of_dex_registers; ++j) {
-          if (dex_register_map.IsDexRegisterLive(j)) {
-            DexRegisterLocation location =
-                dex_register_map.GetLocationKindAndValue(j, number_of_dex_registers);
-            DumpRegisterMapping(os, j, location.GetInternalKind(), location.GetValue());
-          }
-        }
-      }
-    }
-    // TODO: Dump the stack map's inline information.
+    code_info.Dump(os, code_item.registers_size_);
   }
 
   // Display a vmap table.
@@ -1504,7 +1450,9 @@ class ImageDumper {
     std::string error_msg;
     const OatFile* oat_file = class_linker->FindOpenedOatFileFromOatLocation(oat_location);
     if (oat_file == nullptr) {
-      oat_file = OatFile::Open(oat_location, oat_location, nullptr, nullptr, false, &error_msg);
+      oat_file = OatFile::Open(oat_location, oat_location,
+                               nullptr, nullptr, false, nullptr,
+                               &error_msg);
       if (oat_file == nullptr) {
         os << "NOT FOUND: " << error_msg << "\n";
         return false;
@@ -1598,9 +1546,6 @@ class ImageDumper {
     } else if (type->IsClassClass()) {
       mirror::Class* klass = value->AsClass();
       os << StringPrintf("%p   Class: %s\n", klass, PrettyDescriptor(klass).c_str());
-    } else if (type->IsArtFieldClass()) {
-      mirror::ArtField* field = value->AsArtField();
-      os << StringPrintf("%p   Field: %s\n", field, PrettyField(field).c_str());
     } else if (type->IsArtMethodClass()) {
       mirror::ArtMethod* method = value->AsArtMethod();
       os << StringPrintf("%p   Method: %s\n", method, PrettyMethod(method).c_str());
@@ -1609,7 +1554,7 @@ class ImageDumper {
     }
   }
 
-  static void PrintField(std::ostream& os, mirror::ArtField* field, mirror::Object* obj)
+  static void PrintField(std::ostream& os, ArtField* field, mirror::Object* obj)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     os << StringPrintf("%s: ", field->GetName());
     switch (field->GetTypeAsPrimitiveType()) {
@@ -1646,7 +1591,7 @@ class ImageDumper {
           os << StringPrintf("null   %s\n", PrettyDescriptor(field->GetTypeDescriptor()).c_str());
         } else {
           // Grab the field type without causing resolution.
-          mirror::Class* field_type = field->GetType(false);
+          mirror::Class* field_type = field->GetType<false>();
           if (field_type != nullptr) {
             PrettyObjectValue(os, field_type, value);
           } else {
@@ -1668,12 +1613,9 @@ class ImageDumper {
     if (super != nullptr) {
       DumpFields(os, obj, super);
     }
-    mirror::ObjectArray<mirror::ArtField>* fields = klass->GetIFields();
-    if (fields != nullptr) {
-      for (int32_t i = 0; i < fields->GetLength(); i++) {
-        mirror::ArtField* field = fields->Get(i);
-        PrintField(os, field, obj);
-      }
+    ArtField* fields = klass->GetIFields();
+    for (size_t i = 0, count = klass->NumInstanceFields(); i < count; i++) {
+      PrintField(os, &fields[i], obj);
     }
   }
 
@@ -1735,9 +1677,6 @@ class ImageDumper {
       mirror::Class* klass = obj->AsClass();
       os << StringPrintf("%p: java.lang.Class \"%s\" (", obj, PrettyDescriptor(klass).c_str())
          << klass->GetStatus() << ")\n";
-    } else if (obj->IsArtField()) {
-      os << StringPrintf("%p: java.lang.reflect.ArtField %s\n", obj,
-                         PrettyField(obj->AsArtField()).c_str());
     } else if (obj->IsArtMethod()) {
       os << StringPrintf("%p: java.lang.reflect.ArtMethod %s\n", obj,
                          PrettyMethod(obj->AsArtMethod()).c_str());
@@ -1774,14 +1713,15 @@ class ImageDumper {
         PrettyObjectValue(indent_os, value_class, value);
       }
     } else if (obj->IsClass()) {
-      mirror::ObjectArray<mirror::ArtField>* sfields = obj->AsClass()->GetSFields();
-      if (sfields != nullptr) {
+      mirror::Class* klass = obj->AsClass();
+      ArtField* sfields = klass->GetSFields();
+      const size_t num_fields = klass->NumStaticFields();
+      if (num_fields != 0) {
         indent_os << "STATICS:\n";
         Indenter indent2_filter(indent_os.rdbuf(), kIndentChar, kIndentBy1Count);
         std::ostream indent2_os(&indent2_filter);
-        for (int32_t i = 0; i < sfields->GetLength(); i++) {
-          mirror::ArtField* field = sfields->Get(i);
-          PrintField(indent2_os, field, field->GetDeclaringClass());
+        for (size_t i = 0; i < num_fields; i++) {
+          PrintField(indent2_os, &sfields[i], sfields[i].GetDeclaringClass());
         }
       }
     } else if (obj->IsArtMethod()) {
@@ -2207,16 +2147,12 @@ static int DumpOatWithRuntime(Runtime* runtime, OatFile* oat_file, OatDumperOpti
   }
 
   // Need a class loader.
-  soa.Env()->AllocObject(WellKnownClasses::dalvik_system_PathClassLoader);
-  ScopedLocalRef<jobject> class_loader_local(soa.Env(),
-      soa.Env()->AllocObject(WellKnownClasses::dalvik_system_PathClassLoader));
-  jobject class_loader = soa.Env()->NewGlobalRef(class_loader_local.get());
   // Fake that we're a compiler.
   std::vector<const DexFile*> class_path;
   for (auto& dex_file : dex_files) {
     class_path.push_back(dex_file.get());
   }
-  runtime->SetCompileTimeClassPath(class_loader, class_path);
+  jobject class_loader = class_linker->CreatePathClassLoader(self, class_path);
 
   // Use the class loader while dumping.
   StackHandleScope<1> scope(self);
@@ -2244,7 +2180,7 @@ static int DumpOat(Runtime* runtime, const char* oat_filename, OatDumperOptions*
                    std::ostream* os) {
   std::string error_msg;
   OatFile* oat_file = OatFile::Open(oat_filename, oat_filename, nullptr, nullptr, false,
-                                    &error_msg);
+                                    nullptr, &error_msg);
   if (oat_file == nullptr) {
     fprintf(stderr, "Failed to open oat file from '%s': %s\n", oat_filename, error_msg.c_str());
     return EXIT_FAILURE;
@@ -2260,7 +2196,7 @@ static int DumpOat(Runtime* runtime, const char* oat_filename, OatDumperOptions*
 static int SymbolizeOat(const char* oat_filename, std::string& output_name) {
   std::string error_msg;
   OatFile* oat_file = OatFile::Open(oat_filename, oat_filename, nullptr, nullptr, false,
-                                    &error_msg);
+                                    nullptr, &error_msg);
   if (oat_file == nullptr) {
     fprintf(stderr, "Failed to open oat file from '%s': %s\n", oat_filename, error_msg.c_str());
     return EXIT_FAILURE;

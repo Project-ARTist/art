@@ -17,9 +17,16 @@
 #include "oat_file.h"
 
 #include <dlfcn.h>
-#include <sstream>
 #include <string.h>
 #include <unistd.h>
+
+#include <cstdlib>
+#include <sstream>
+
+// dlopen_ext support from bionic.
+#ifdef HAVE_ANDROID_OS
+#include "android/dlext.h"
+#endif
 
 #include "base/bit_vector.h"
 #include "base/stl_util.h"
@@ -38,12 +45,45 @@
 
 namespace art {
 
+// Whether OatFile::Open will try DlOpen() first. Fallback is our own ELF loader.
+static constexpr bool kUseDlopen = false;
+
+// Whether OatFile::Open will try DlOpen() on the host. On the host we're not linking against
+// bionic, so cannot take advantage of the support for changed semantics (loading the same soname
+// multiple times). However, if/when we switch the above, we likely want to switch this, too,
+// to get test coverage of the code paths.
+static constexpr bool kUseDlopenOnHost = false;
+
+// For debugging, Open will print DlOpen error message if set to true.
+static constexpr bool kPrintDlOpenErrorMessage = false;
+
+std::string OatFile::ResolveRelativeEncodedDexLocation(
+      const char* abs_dex_location, const std::string& rel_dex_location) {
+  if (abs_dex_location != nullptr && rel_dex_location[0] != '/') {
+    // Strip :classes<N>.dex used for secondary multidex files.
+    std::string base = DexFile::GetBaseLocation(rel_dex_location);
+    std::string multidex_suffix = DexFile::GetMultiDexSuffix(rel_dex_location);
+
+    // Check if the base is a suffix of the provided abs_dex_location.
+    std::string target_suffix = "/" + base;
+    std::string abs_location(abs_dex_location);
+    if (abs_location.size() > target_suffix.size()) {
+      size_t pos = abs_location.size() - target_suffix.size();
+      if (abs_location.compare(pos, std::string::npos, target_suffix) == 0) {
+        return abs_location + multidex_suffix;
+      }
+    }
+  }
+  return rel_dex_location;
+}
+
 void OatFile::CheckLocation(const std::string& location) {
   CHECK(!location.empty());
 }
 
 OatFile* OatFile::OpenWithElfFile(ElfFile* elf_file,
                                   const std::string& location,
+                                  const char* abs_dex_location,
                                   std::string* error_msg) {
   std::unique_ptr<OatFile> oat_file(new OatFile(location, false));
   oat_file->elf_file_.reset(elf_file);
@@ -53,7 +93,7 @@ OatFile* OatFile::OpenWithElfFile(ElfFile* elf_file,
   oat_file->begin_ = elf_file->Begin() + offset;
   oat_file->end_ = elf_file->Begin() + size + offset;
   // Ignore the optional .bss section when opening non-executable.
-  return oat_file->Setup(error_msg) ? oat_file.release() : nullptr;
+  return oat_file->Setup(abs_dex_location, error_msg) ? oat_file.release() : nullptr;
 }
 
 OatFile* OatFile::Open(const std::string& filename,
@@ -61,10 +101,28 @@ OatFile* OatFile::Open(const std::string& filename,
                        uint8_t* requested_base,
                        uint8_t* oat_file_begin,
                        bool executable,
+                       const char* abs_dex_location,
                        std::string* error_msg) {
   CHECK(!filename.empty()) << location;
   CheckLocation(location);
   std::unique_ptr<OatFile> ret;
+
+  // Use dlopen only when flagged to do so, and when it's OK to load things executable.
+  // TODO: Also try when not executable? The issue here could be re-mapping as writable (as
+  //       !executable is a sign that we may want to patch), which may not be allowed for
+  //       various reasons.
+  if (kUseDlopen && (kIsTargetBuild || kUseDlopenOnHost) && executable) {
+    // Try to use dlopen. This may fail for various reasons, outlined below. We try dlopen, as
+    // this will register the oat file with the linker and allows libunwind to find our info.
+    ret.reset(OpenDlopen(filename, location, requested_base, abs_dex_location, error_msg));
+    if (ret.get() != nullptr) {
+      return ret.release();
+    }
+    if (kPrintDlOpenErrorMessage) {
+      LOG(ERROR) << "Failed to dlopen: " << *error_msg;
+    }
+  }
+
   // If we aren't trying to execute, we just use our own ElfFile loader for a couple reasons:
   //
   // On target, dlopen may fail when compiling due to selinux restrictions on installd.
@@ -74,13 +132,17 @@ OatFile* OatFile::Open(const std::string& filename,
   // another generated dex file with the same name. http://b/10614658
   //
   // On host, dlopen is expected to fail when cross compiling, so fall back to OpenElfFile.
+  //
+  //
+  // Another independent reason is the absolute placement of boot.oat. dlopen on the host usually
+  // does honor the virtual address encoded in the ELF file only for ET_EXEC files, not ET_DYN.
   std::unique_ptr<File> file(OS::OpenFileForReading(filename.c_str()));
-  if (file.get() == NULL) {
+  if (file == nullptr) {
     *error_msg = StringPrintf("Failed to open oat filename for reading: %s", strerror(errno));
     return nullptr;
   }
   ret.reset(OpenElfFile(file.get(), location, requested_base, oat_file_begin, false, executable,
-                        error_msg));
+                        abs_dex_location, error_msg));
 
   // It would be nice to unlink here. But we might have opened the file created by the
   // ScopedLock, which we better not delete to avoid races. TODO: Investigate how to fix the API
@@ -88,14 +150,31 @@ OatFile* OatFile::Open(const std::string& filename,
   return ret.release();
 }
 
-OatFile* OatFile::OpenWritable(File* file, const std::string& location, std::string* error_msg) {
+OatFile* OatFile::OpenWritable(File* file, const std::string& location,
+                               const char* abs_dex_location,
+                               std::string* error_msg) {
   CheckLocation(location);
-  return OpenElfFile(file, location, nullptr, nullptr, true, false, error_msg);
+  return OpenElfFile(file, location, nullptr, nullptr, true, false, abs_dex_location, error_msg);
 }
 
-OatFile* OatFile::OpenReadable(File* file, const std::string& location, std::string* error_msg) {
+OatFile* OatFile::OpenReadable(File* file, const std::string& location,
+                               const char* abs_dex_location,
+                               std::string* error_msg) {
   CheckLocation(location);
-  return OpenElfFile(file, location, nullptr, nullptr, false, false, error_msg);
+  return OpenElfFile(file, location, nullptr, nullptr, false, false, abs_dex_location, error_msg);
+}
+
+OatFile* OatFile::OpenDlopen(const std::string& elf_filename,
+                             const std::string& location,
+                             uint8_t* requested_base,
+                             const char* abs_dex_location,
+                             std::string* error_msg) {
+  std::unique_ptr<OatFile> oat_file(new OatFile(location, true));
+  bool success = oat_file->Dlopen(elf_filename, requested_base, abs_dex_location, error_msg);
+  if (!success) {
+    return nullptr;
+  }
+  return oat_file.release();
 }
 
 OatFile* OatFile::OpenElfFile(File* file,
@@ -104,10 +183,11 @@ OatFile* OatFile::OpenElfFile(File* file,
                               uint8_t* oat_file_begin,
                               bool writable,
                               bool executable,
+                              const char* abs_dex_location,
                               std::string* error_msg) {
   std::unique_ptr<OatFile> oat_file(new OatFile(location, executable));
   bool success = oat_file->ElfFileOpen(file, requested_base, oat_file_begin, writable, executable,
-                                       error_msg);
+                                       abs_dex_location, error_msg);
   if (!success) {
     CHECK(!error_msg->empty());
     return nullptr;
@@ -116,26 +196,86 @@ OatFile* OatFile::OpenElfFile(File* file,
 }
 
 OatFile::OatFile(const std::string& location, bool is_executable)
-    : location_(location), begin_(NULL), end_(NULL), bss_begin_(nullptr), bss_end_(nullptr),
-      is_executable_(is_executable), dlopen_handle_(NULL),
+    : location_(location), begin_(nullptr), end_(nullptr), bss_begin_(nullptr), bss_end_(nullptr),
+      is_executable_(is_executable), dlopen_handle_(nullptr),
       secondary_lookup_lock_("OatFile secondary lookup lock", kOatFileSecondaryLookupLock) {
   CHECK(!location_.empty());
 }
 
 OatFile::~OatFile() {
   STLDeleteElements(&oat_dex_files_storage_);
-  if (dlopen_handle_ != NULL) {
+  if (dlopen_handle_ != nullptr) {
     dlclose(dlopen_handle_);
   }
 }
 
+bool OatFile::Dlopen(const std::string& elf_filename, uint8_t* requested_base,
+                     const char* abs_dex_location, std::string* error_msg) {
+  std::unique_ptr<char> absolute_path(realpath(elf_filename.c_str(), nullptr));
+  if (absolute_path == nullptr) {
+    *error_msg = StringPrintf("Failed to find absolute path for '%s'", elf_filename.c_str());
+    return false;
+  }
+#ifdef HAVE_ANDROID_OS
+  android_dlextinfo extinfo;
+  extinfo.flags = ANDROID_DLEXT_FORCE_LOAD;
+  dlopen_handle_ = android_dlopen_ext(absolute_path.get(), RTLD_NOW, &extinfo);
+#else
+  dlopen_handle_ = dlopen(absolute_path.get(), RTLD_NOW);
+#endif
+  if (dlopen_handle_ == nullptr) {
+    *error_msg = StringPrintf("Failed to dlopen '%s': %s", elf_filename.c_str(), dlerror());
+    return false;
+  }
+  begin_ = reinterpret_cast<uint8_t*>(dlsym(dlopen_handle_, "oatdata"));
+  if (begin_ == nullptr) {
+    *error_msg = StringPrintf("Failed to find oatdata symbol in '%s': %s", elf_filename.c_str(),
+                              dlerror());
+    return false;
+  }
+  if (requested_base != nullptr && begin_ != requested_base) {
+    PrintFileToLog("/proc/self/maps", LogSeverity::WARNING);
+    *error_msg = StringPrintf("Failed to find oatdata symbol at expected address: "
+                              "oatdata=%p != expected=%p, %s. See process maps in the log.",
+                              begin_, requested_base, elf_filename.c_str());
+    return false;
+  }
+  end_ = reinterpret_cast<uint8_t*>(dlsym(dlopen_handle_, "oatlastword"));
+  if (end_ == nullptr) {
+    *error_msg = StringPrintf("Failed to find oatlastword symbol in '%s': %s", elf_filename.c_str(),
+                              dlerror());
+    return false;
+  }
+  // Readjust to be non-inclusive upper bound.
+  end_ += sizeof(uint32_t);
+
+  bss_begin_ = reinterpret_cast<uint8_t*>(dlsym(dlopen_handle_, "oatbss"));
+  if (bss_begin_ == nullptr) {
+    // No .bss section. Clear dlerror().
+    bss_end_ = nullptr;
+    dlerror();
+  } else {
+    bss_end_ = reinterpret_cast<uint8_t*>(dlsym(dlopen_handle_, "oatbsslastword"));
+    if (bss_end_ == nullptr) {
+      *error_msg = StringPrintf("Failed to find oatbasslastword symbol in '%s'",
+                                elf_filename.c_str());
+      return false;
+    }
+    // Readjust to be non-inclusive upper bound.
+    bss_end_ += sizeof(uint32_t);
+  }
+
+  return Setup(abs_dex_location, error_msg);
+}
+
 bool OatFile::ElfFileOpen(File* file, uint8_t* requested_base, uint8_t* oat_file_begin,
                           bool writable, bool executable,
+                          const char* abs_dex_location,
                           std::string* error_msg) {
   // TODO: rename requested_base to oat_data_begin
   elf_file_.reset(ElfFile::Open(file, writable, /*program_header_only*/true, error_msg,
                                 oat_file_begin));
-  if (elf_file_.get() == nullptr) {
+  if (elf_file_ == nullptr) {
     DCHECK(!error_msg->empty());
     return false;
   }
@@ -145,11 +285,11 @@ bool OatFile::ElfFileOpen(File* file, uint8_t* requested_base, uint8_t* oat_file
     return false;
   }
   begin_ = elf_file_->FindDynamicSymbolAddress("oatdata");
-  if (begin_ == NULL) {
+  if (begin_ == nullptr) {
     *error_msg = StringPrintf("Failed to find oatdata symbol in '%s'", file->GetPath().c_str());
     return false;
   }
-  if (requested_base != NULL && begin_ != requested_base) {
+  if (requested_base != nullptr && begin_ != requested_base) {
     PrintFileToLog("/proc/self/maps", LogSeverity::WARNING);
     *error_msg = StringPrintf("Failed to find oatdata symbol at expected address: "
                               "oatdata=%p != expected=%p. See process maps in the log.",
@@ -157,7 +297,7 @@ bool OatFile::ElfFileOpen(File* file, uint8_t* requested_base, uint8_t* oat_file
     return false;
   }
   end_ = elf_file_->FindDynamicSymbolAddress("oatlastword");
-  if (end_ == NULL) {
+  if (end_ == nullptr) {
     *error_msg = StringPrintf("Failed to find oatlastword symbol in '%s'", file->GetPath().c_str());
     return false;
   }
@@ -180,10 +320,10 @@ bool OatFile::ElfFileOpen(File* file, uint8_t* requested_base, uint8_t* oat_file
     bss_end_ += sizeof(uint32_t);
   }
 
-  return Setup(error_msg);
+  return Setup(abs_dex_location, error_msg);
 }
 
-bool OatFile::Setup(std::string* error_msg) {
+bool OatFile::Setup(const char* abs_dex_location, std::string* error_msg) {
   if (!GetOatHeader().IsValid()) {
     std::string cause = GetOatHeader().GetValidationErrorMessage();
     *error_msg = StringPrintf("Invalid oat header for '%s': %s", GetLocation().c_str(),
@@ -230,7 +370,9 @@ bool OatFile::Setup(std::string* error_msg) {
       return false;
     }
 
-    std::string dex_file_location(dex_file_location_data, dex_file_location_size);
+    std::string dex_file_location = ResolveRelativeEncodedDexLocation(
+        abs_dex_location,
+        std::string(dex_file_location_data, dex_file_location_size));
 
     uint32_t dex_file_checksum = *reinterpret_cast<const uint32_t*>(oat);
     oat += sizeof(dex_file_checksum);
@@ -312,12 +454,12 @@ const OatHeader& OatFile::GetOatHeader() const {
 }
 
 const uint8_t* OatFile::Begin() const {
-  CHECK(begin_ != NULL);
+  CHECK(begin_ != nullptr);
   return begin_;
 }
 
 const uint8_t* OatFile::End() const {
-  CHECK(end_ != NULL);
+  CHECK(end_ != nullptr);
   return end_;
 }
 
@@ -355,7 +497,7 @@ const OatFile::OatDexFile* OatFile::GetOatDexFile(const char* dex_location,
     MutexLock mu(Thread::Current(), secondary_lookup_lock_);
     auto secondary_lb = secondary_oat_dex_files_.lower_bound(key);
     if (secondary_lb != secondary_oat_dex_files_.end() && key == secondary_lb->first) {
-      oat_dex_file = secondary_lb->second;  // May be nullptr.
+      oat_dex_file = secondary_lb->second;  // May be null.
     } else {
       // We haven't seen this dex_location before, we must check the canonical location.
       std::string dex_canonical_location = DexFile::GetDexCanonicalLocation(dex_location);
@@ -364,8 +506,8 @@ const OatFile::OatDexFile* OatFile::GetOatDexFile(const char* dex_location,
         auto canonical_it = oat_dex_files_.find(canonical_key);
         if (canonical_it != oat_dex_files_.end()) {
           oat_dex_file = canonical_it->second;
-        }  // else keep nullptr.
-      }  // else keep nullptr.
+        }  // else keep null.
+      }  // else keep null.
 
       // Copy the key to the string_cache_ and store the result in secondary map.
       string_cache_.emplace_back(key.data(), key.length());
@@ -382,7 +524,7 @@ const OatFile::OatDexFile* OatFile::GetOatDexFile(const char* dex_location,
   if (warn_if_not_found) {
     std::string dex_canonical_location = DexFile::GetDexCanonicalLocation(dex_location);
     std::string checksum("<unspecified>");
-    if (dex_location_checksum != NULL) {
+    if (dex_location_checksum != nullptr) {
       checksum = StringPrintf("0x%08x", *dex_location_checksum);
     }
     LOG(WARNING) << "Failed to find OatDexFile for DexFile " << dex_location
@@ -398,7 +540,7 @@ const OatFile::OatDexFile* OatFile::GetOatDexFile(const char* dex_location,
     }
   }
 
-  return NULL;
+  return nullptr;
 }
 
 OatFile::OatDexFile::OatDexFile(const OatFile* oat_file,
@@ -422,7 +564,7 @@ size_t OatFile::OatDexFile::FileSize() const {
 
 std::unique_ptr<const DexFile> OatFile::OatDexFile::OpenDexFile(std::string* error_msg) const {
   return DexFile::Open(dex_file_pointer_, FileSize(), dex_file_location_,
-                       dex_file_location_checksum_, GetOatFile(), error_msg);
+                       dex_file_location_checksum_, this, error_msg);
 }
 
 uint32_t OatFile::OatDexFile::GetOatClassOffset(uint16_t class_def_index) const {
@@ -464,12 +606,12 @@ OatFile::OatClass OatFile::OatDexFile::GetOatClass(uint16_t class_def_index) con
     CHECK_LE(methods_pointer, oat_file_->End()) << oat_file_->GetLocation();
   }
 
-  return OatClass(oat_file_,
-                  status,
-                  type,
-                  bitmap_size,
-                  reinterpret_cast<const uint32_t*>(bitmap_pointer),
-                  reinterpret_cast<const OatMethodOffsets*>(methods_pointer));
+  return OatFile::OatClass(oat_file_,
+                           status,
+                           type,
+                           bitmap_size,
+                           reinterpret_cast<const uint32_t*>(bitmap_pointer),
+                           reinterpret_cast<const OatMethodOffsets*>(methods_pointer));
 }
 
 OatFile::OatClass::OatClass(const OatFile* oat_file,
@@ -552,13 +694,99 @@ const OatFile::OatMethod OatFile::OatClass::GetOatMethod(uint32_t method_index) 
 }
 
 void OatFile::OatMethod::LinkMethod(mirror::ArtMethod* method) const {
-  CHECK(method != NULL);
+  CHECK(method != nullptr);
   method->SetEntryPointFromQuickCompiledCode(GetQuickCode());
 }
 
 bool OatFile::IsPic() const {
   return GetOatHeader().IsPic();
   // TODO: Check against oat_patches. b/18144996
+}
+
+static constexpr char kDexClassPathEncodingSeparator = '*';
+
+std::string OatFile::EncodeDexFileDependencies(const std::vector<const DexFile*>& dex_files) {
+  std::ostringstream out;
+
+  for (const DexFile* dex_file : dex_files) {
+    out << dex_file->GetLocation().c_str();
+    out << kDexClassPathEncodingSeparator;
+    out << dex_file->GetLocationChecksum();
+    out << kDexClassPathEncodingSeparator;
+  }
+
+  return out.str();
+}
+
+bool OatFile::CheckStaticDexFileDependencies(const char* dex_dependencies, std::string* msg) {
+  if (dex_dependencies == nullptr || dex_dependencies[0] == 0) {
+    // No dependencies.
+    return true;
+  }
+
+  // Assumption: this is not performance-critical. So it's OK to do this with a std::string and
+  //             Split() instead of manual parsing of the combined char*.
+  std::vector<std::string> split;
+  Split(dex_dependencies, kDexClassPathEncodingSeparator, &split);
+  if (split.size() % 2 != 0) {
+    // Expected pairs of location and checksum.
+    *msg = StringPrintf("Odd number of elements in dependency list %s", dex_dependencies);
+    return false;
+  }
+
+  for (auto it = split.begin(), end = split.end(); it != end; it += 2) {
+    std::string& location = *it;
+    std::string& checksum = *(it + 1);
+    int64_t converted = strtoll(checksum.c_str(), nullptr, 10);
+    if (converted == 0) {
+      // Conversion error.
+      *msg = StringPrintf("Conversion error for %s", checksum.c_str());
+      return false;
+    }
+
+    uint32_t dex_checksum;
+    std::string error_msg;
+    if (DexFile::GetChecksum(DexFile::GetDexCanonicalLocation(location.c_str()).c_str(),
+                             &dex_checksum,
+                             &error_msg)) {
+      if (converted != dex_checksum) {
+        *msg = StringPrintf("Checksums don't match for %s: %" PRId64 " vs %u",
+                            location.c_str(), converted, dex_checksum);
+        return false;
+      }
+    } else {
+      // Problem retrieving checksum.
+      // TODO: odex files?
+      *msg = StringPrintf("Could not retrieve checksum for %s: %s", location.c_str(),
+                          error_msg.c_str());
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool OatFile::GetDexLocationsFromDependencies(const char* dex_dependencies,
+                                              std::vector<std::string>* locations) {
+  DCHECK(locations != nullptr);
+  if (dex_dependencies == nullptr || dex_dependencies[0] == 0) {
+    return true;
+  }
+
+  // Assumption: this is not performance-critical. So it's OK to do this with a std::string and
+  //             Split() instead of manual parsing of the combined char*.
+  std::vector<std::string> split;
+  Split(dex_dependencies, kDexClassPathEncodingSeparator, &split);
+  if (split.size() % 2 != 0) {
+    // Expected pairs of location and checksum.
+    return false;
+  }
+
+  for (auto it = split.begin(), end = split.end(); it != end; it += 2) {
+    locations->push_back(*it);
+  }
+
+  return true;
 }
 
 }  // namespace art

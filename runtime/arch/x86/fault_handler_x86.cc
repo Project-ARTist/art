@@ -191,6 +191,7 @@ static uint32_t GetInstructionSize(const uint8_t* pc) {
         break;
 
       case 0x81:        // group 1, word immediate.
+      case 0xc7:        // mov
         modrm = *pc++;
         has_modrm = true;
         immediate_size = operand_size_prefix ? 2 : 4;
@@ -239,7 +240,7 @@ void FaultManager::HandleNestedSignal(int, siginfo_t*, void* context) {
   // this code the same for both 32 and 64 bit.
 
   Thread* self = Thread::Current();
-  CHECK(self != nullptr);       // This will cause a SIGABRT if self is nullptr.
+  CHECK(self != nullptr);  // This will cause a SIGABRT if self is null.
 
   struct ucontext* uc = reinterpret_cast<struct ucontext*>(context);
   uc->CTX_JMP_BUF = reinterpret_cast<uintptr_t>(*self->GetNestedSignalState());
@@ -274,6 +275,12 @@ void FaultManager::GetMethodAndReturnPcAndSp(siginfo_t* siginfo, void* context,
 
   uint8_t* pc = reinterpret_cast<uint8_t*>(uc->CTX_EIP);
   VLOG(signals) << HexDump(pc, 32, true, "PC ");
+
+  if (pc == nullptr) {
+    // Somebody jumped to 0x0. Definitely not ours, and will definitely segfault below.
+    *out_method = nullptr;
+    return;
+  }
 
   uint32_t instr_size = GetInstructionSize(pc);
   if (instr_size == 0) {

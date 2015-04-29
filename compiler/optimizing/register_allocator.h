@@ -86,8 +86,12 @@ class RegisterAllocator {
   // Add `interval` in the given sorted list.
   static void AddSorted(GrowableArray<LiveInterval*>* array, LiveInterval* interval);
 
-  // Split `interval` at the position `at`. The new interval starts at `at`.
-  LiveInterval* Split(LiveInterval* interval, size_t at);
+  // Split `interval` at the position `position`. The new interval starts at `position`.
+  LiveInterval* Split(LiveInterval* interval, size_t position);
+
+  // Split `interval` at a position between `from` and `to`. The method will try
+  // to find an optimal split position.
+  LiveInterval* SplitBetween(LiveInterval* interval, size_t from, size_t to);
 
   // Returns whether `reg` is blocked by the code generator.
   bool IsBlocked(int reg) const;
@@ -143,6 +147,13 @@ class RegisterAllocator {
   bool TrySplitNonPairOrUnalignedPairIntervalAt(size_t position,
                                                 size_t first_register_use,
                                                 size_t* next_use);
+
+  // If `interval` has another half, remove it from the list of `intervals`.
+  // `index` holds the index at which `interval` is in `intervals`.
+  // Returns whether there is another half.
+  bool PotentiallyRemoveOtherHalf(LiveInterval* interval,
+                                  GrowableArray<LiveInterval*>* intervals,
+                                  size_t index);
 
   ArenaAllocator* const allocator_;
   CodeGenerator* const codegen_;

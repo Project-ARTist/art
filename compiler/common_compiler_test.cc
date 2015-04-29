@@ -24,6 +24,7 @@
 #include "dex/quick/dex_file_to_method_inliner_map.h"
 #include "dex/verification_results.h"
 #include "driver/compiler_driver.h"
+#include "driver/compiler_options.h"
 #include "interpreter/interpreter.h"
 #include "mirror/art_method.h"
 #include "mirror/dex_cache.h"
@@ -139,6 +140,27 @@ void CommonCompilerTest::MakeExecutable(mirror::ClassLoader* class_loader, const
   }
 }
 
+// Get the set of image classes given to the compiler-driver in SetUp. Note: the compiler
+// driver assumes ownership of the set, so the test should properly release the set.
+std::unordered_set<std::string>* CommonCompilerTest::GetImageClasses() {
+  // Empty set: by default no classes are retained in the image.
+  return new std::unordered_set<std::string>();
+}
+
+// Get the set of compiled classes given to the compiler-driver in SetUp. Note: the compiler
+// driver assumes ownership of the set, so the test should properly release the set.
+std::unordered_set<std::string>* CommonCompilerTest::GetCompiledClasses() {
+  // Null, no selection of compiled-classes.
+  return nullptr;
+}
+
+// Get the set of compiled methods given to the compiler-driver in SetUp. Note: the compiler
+// driver assumes ownership of the set, so the test should properly release the set.
+std::unordered_set<std::string>* CommonCompilerTest::GetCompiledMethods() {
+  // Null, no selection of compiled-methods.
+  return nullptr;
+}
+
 void CommonCompilerTest::SetUp() {
   CommonRuntimeTest::SetUp();
   {
@@ -164,7 +186,10 @@ void CommonCompilerTest::SetUp() {
                                               method_inliner_map_.get(),
                                               compiler_kind, instruction_set,
                                               instruction_set_features_.get(),
-                                              true, new std::set<std::string>, nullptr,
+                                              true,
+                                              GetImageClasses(),
+                                              GetCompiledClasses(),
+                                              GetCompiledMethods(),
                                               2, true, true, "", timer_.get(), -1, ""));
   }
   // We typically don't generate an image in unit tests, disable this optimization by default.
@@ -178,8 +203,8 @@ void CommonCompilerTest::SetUpRuntimeOptions(RuntimeOptions* options) {
   verification_results_.reset(new VerificationResults(compiler_options_.get()));
   method_inliner_map_.reset(new DexFileToMethodInlinerMap);
   callbacks_.reset(new QuickCompilerCallbacks(verification_results_.get(),
-                                              method_inliner_map_.get()));
-  options->push_back(std::make_pair("compilercallbacks", callbacks_.get()));
+                                              method_inliner_map_.get(),
+                                              CompilerCallbacks::CallbackMode::kCompileApp));
 }
 
 void CommonCompilerTest::TearDown() {
@@ -238,7 +263,7 @@ void CommonCompilerTest::CompileVirtualMethod(Handle<mirror::ClassLoader> class_
   mirror::Class* klass = class_linker_->FindClass(self, class_descriptor.c_str(), class_loader);
   CHECK(klass != nullptr) << "Class not found " << class_name;
   mirror::ArtMethod* method = klass->FindVirtualMethod(method_name, signature);
-  CHECK(method != NULL) << "Virtual method not found: "
+  CHECK(method != nullptr) << "Virtual method not found: "
       << class_name << "." << method_name << signature;
   CompileMethod(method);
 }

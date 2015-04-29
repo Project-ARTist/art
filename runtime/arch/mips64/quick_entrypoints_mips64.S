@@ -77,7 +77,7 @@
     ld      $v0, %got(_ZN3art7Runtime9instance_E)($gp)
     ld      $v0, 0($v0)
     THIS_LOAD_REQUIRES_READ_BARRIER
-    ld      $v0, RUNTIME_SAVE_ALL_CALLEE_SAVE_FRAME_OFFSET($v0)
+    lwu     $v0, RUNTIME_SAVE_ALL_CALLEE_SAVE_FRAME_OFFSET($v0)
     sw      $v0, 0($sp)                                # Place Method* at bottom of stack.
     sd      $sp, THREAD_TOP_QUICK_FRAME_OFFSET(rSELF)  # Place sp in Thread::Current()->top_quick_frame.
 .endm
@@ -120,7 +120,7 @@
     ld      $v0, %got(_ZN3art7Runtime9instance_E)($gp)
     ld      $v0, 0($v0)
     THIS_LOAD_REQUIRES_READ_BARRIER
-    ld      $v0, RUNTIME_REFS_ONLY_CALLEE_SAVE_FRAME_OFFSET($v0)
+    lwu     $v0, RUNTIME_REFS_ONLY_CALLEE_SAVE_FRAME_OFFSET($v0)
     sw      $v0, 0($sp)                                # Place Method* at bottom of stack.
     sd      $sp, THREAD_TOP_QUICK_FRAME_OFFSET(rSELF)  # Place sp in Thread::Current()->top_quick_frame.
 .endm
@@ -237,7 +237,7 @@
     ld      $v0, %got(_ZN3art7Runtime9instance_E)($gp)
     ld      $v0, 0($v0)
     THIS_LOAD_REQUIRES_READ_BARRIER
-    ld      $v0, RUNTIME_REFS_ONLY_CALLEE_SAVE_FRAME_OFFSET($v0)
+    lwu     $v0, RUNTIME_REFS_ONLY_CALLEE_SAVE_FRAME_OFFSET($v0)
     sw      $v0, 0($sp)                                # Place Method* at bottom of stack.
     sd      $sp, THREAD_TOP_QUICK_FRAME_OFFSET(rSELF)  # Place sp in Thread::Current()->top_quick_frame.
 .endm
@@ -248,7 +248,7 @@
     ld      $v0, %got(_ZN3art7Runtime9instance_E)($gp)
     ld      $v0, 0($v0)
     THIS_LOAD_REQUIRES_READ_BARRIER
-    ld      $v0, RUNTIME_REFS_AND_ARGS_CALLEE_SAVE_FRAME_OFFSET($v0)
+    lwu     $v0, RUNTIME_REFS_AND_ARGS_CALLEE_SAVE_FRAME_OFFSET($v0)
     sw      $v0, 0($sp)                                # Place Method* at bottom of stack.
     sd      $sp, THREAD_TOP_QUICK_FRAME_OFFSET(rSELF)  # Place sp in Thread::Current()->top_quick_frame.
 .endm
@@ -503,7 +503,7 @@ END art_quick_throw_no_such_method
      * The helper will attempt to locate the target and return a 128-bit result in $v0/$v1 consisting
      * of the target Method* in $v0 and method->code_ in $v1.
      *
-     * If unsuccessful, the helper will return NULL/NULL. There will be a pending exception in the
+     * If unsuccessful, the helper will return null/null. There will be a pending exception in the
      * thread and we branch to another stub to deliver it.
      *
      * On success this wrapper will restore arguments and *jump* to the target, leaving the ra
@@ -656,7 +656,7 @@ call_fn:
     # call method (a0 and a1 have been untouched)
     lwu    $a1, 0($a1)           # make a1 = this ptr
     sw     $a1, 4($sp)           # copy this ptr (skip 4 bytes for method*)
-    sw     $zero, 0($sp)         # store NULL for method* at bottom of frame
+    sw     $zero, 0($sp)         # store null for method* at bottom of frame
     ld     $t9, MIRROR_ART_METHOD_QUICK_CODE_OFFSET_64($a0)  # get pointer to the code
     jalr   $t9                   # call the method
     nop
@@ -758,7 +758,7 @@ ENTRY art_quick_invoke_static_stub
 
 call_sfn:
     # call method (a0 has been untouched)
-    sw     $zero, 0($sp)         # store NULL for method* at bottom of frame
+    sw     $zero, 0($sp)         # store null for method* at bottom of frame
     ld     $t9, MIRROR_ART_METHOD_QUICK_CODE_OFFSET_64($a0)  # get pointer to the code
     jalr   $t9                   # call the method
     nop
@@ -943,45 +943,6 @@ ENTRY art_quick_aput_obj
     jalr $zero, $t9                 # artThrowArrayStoreException(Class*, Class*, Thread*)
     move   $a2, rSELF               # pass Thread::Current
 END art_quick_aput_obj
-
-    /*
-     * Entry from managed code when uninitialized static storage, this stub will run the class
-     * initializer and deliver the exception on error. On success the static storage base is
-     * returned.
-     */
-    .extern artInitializeStaticStorageFromCode
-ENTRY art_quick_initialize_static_storage
-    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME           # save callee saves in case of GC
-    # artInitializeStaticStorageFromCode(uint32_t type_idx, Method* referrer, Thread*)
-    jal     artInitializeStaticStorageFromCode
-    move    $a2, rSELF                          # pass Thread::Current
-    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
-END art_quick_initialize_static_storage
-
-    /*
-     * Entry from managed code when dex cache misses for a type_idx.
-     */
-    .extern artInitializeTypeFromCode
-ENTRY art_quick_initialize_type
-    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME          # save callee saves in case of GC
-    # artInitializeTypeFromCode(uint32_t type_idx, Method* referrer, Thread*)
-    jal     artInitializeTypeFromCode
-    move    $a2, rSELF                         # pass Thread::Current
-    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
-END art_quick_initialize_type
-
-    /*
-     * Entry from managed code when type_idx needs to be checked for access and dex cache may also
-     * miss.
-     */
-    .extern artInitializeTypeAndVerifyAccessFromCode
-ENTRY art_quick_initialize_type_and_verify_access
-    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME          # save callee saves in case of GC
-    # artInitializeTypeFromCode(uint32_t type_idx, Method* referrer, Thread*)
-    jal     artInitializeTypeAndVerifyAccessFromCode
-    move    $a2, rSELF                         # pass Thread::Current
-    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
-END art_quick_initialize_type_and_verify_access
 
     /*
      * Called by managed code to resolve a static field and load a boolean primitive value.
@@ -1272,20 +1233,16 @@ ENTRY art_quick_set_obj_instance
     RETURN_IF_ZERO
 END art_quick_set_obj_instance
 
-    /*
-     * Entry from managed code to resolve a string, this stub will allocate a String and deliver an
-     * exception on error. On success the String is returned. R0 holds the referring method,
-     * R1 holds the string index. The fast path check for hit in strings cache has already been
-     * performed.
-     */
-    .extern artResolveStringFromCode
-ENTRY art_quick_resolve_string
+// Macro to facilitate adding new allocation entrypoints.
+.macro ONE_ARG_DOWNCALL name, entrypoint, return
+    .extern \entrypoint
+ENTRY \name
     SETUP_REFS_ONLY_CALLEE_SAVE_FRAME  # save callee saves in case of GC
-    # artResolveStringFromCode(Method* referrer, uint32_t string_idx, Thread*, $sp)
-    jal     artResolveStringFromCode
-    move    $a2, rSELF                 # pass Thread::Current
-    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
-END art_quick_resolve_string
+    jal     \entrypoint
+    move    $a1, rSELF                 # pass Thread::Current
+    \return
+END \name
+.endm
 
 // Macro to facilitate adding new allocation entrypoints.
 .macro TWO_ARG_DOWNCALL name, entrypoint, return
@@ -1308,8 +1265,43 @@ ENTRY \name
 END \name
 .endm
 
+.macro FOUR_ARG_DOWNCALL name, entrypoint, return
+    .extern \entrypoint
+ENTRY \name
+    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME  # save callee saves in case of GC
+    jal     \entrypoint
+    move    $a4, rSELF                 # pass Thread::Current
+    \return
+END \name
+.endm
+
 // Generate the allocation entrypoints for each allocator.
 GENERATE_ALL_ALLOC_ENTRYPOINTS
+
+    /*
+     * Entry from managed code to resolve a string, this stub will allocate a String and deliver an
+     * exception on error. On success the String is returned. A0 holds the string index. The fast
+     * path check for hit in strings cache has already been performed.
+     */
+ONE_ARG_DOWNCALL art_quick_resolve_string, artResolveStringFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+
+    /*
+     * Entry from managed code when uninitialized static storage, this stub will run the class
+     * initializer and deliver the exception on error. On success the static storage base is
+     * returned.
+     */
+ONE_ARG_DOWNCALL art_quick_initialize_static_storage, artInitializeStaticStorageFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+
+    /*
+     * Entry from managed code when dex cache misses for a type_idx.
+     */
+ONE_ARG_DOWNCALL art_quick_initialize_type, artInitializeTypeFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+
+    /*
+     * Entry from managed code when type_idx needs to be checked for access and dex cache may also
+     * miss.
+     */
+ONE_ARG_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
 
     /*
      * Called by managed code when the value in rSUSPEND has been decremented to 0.
@@ -1504,11 +1496,11 @@ art_quick_instrumentation_exit:
     move     $a1, $t0          # pass $sp
     jal      artInstrumentationMethodExitFromCode  # (Thread*, SP, gpr_res, fpr_res)
     move     $a0, rSELF        # pass Thread::Current
-    move     $t0, $v0          # set aside returned link register
+    move     $t9, $v0          # set aside returned link register
     move     $ra, $v1          # set link register for deoptimization
     ld       $v0, 0($sp)       # restore return values
     l.d      $f0, 8($sp)
-    jalr     $zero, $t0        # return
+    jalr     $zero, $t9        # return
     daddiu   $sp, $sp, 16+FRAME_SIZE_REFS_ONLY_CALLEE_SAVE  # 16 bytes of saved values + ref_only callee save frame
     .cfi_adjust_cfa_offset -(16+FRAME_SIZE_REFS_ONLY_CALLEE_SAVE)
 END art_quick_instrumentation_exit

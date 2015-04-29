@@ -149,6 +149,8 @@ class HGraphVisualizerPrinter : public HGraphVisitor {
       codegen_.DumpCoreRegister(output_, location.low());
       output_ << " and ";
       codegen_.DumpCoreRegister(output_, location.high());
+    } else if (location.IsUnallocated()) {
+      output_ << "<U>";
     } else {
       DCHECK(location.IsDoubleStackSlot());
       output_ << "2x" << location.GetStackIndex() << "(sp)";
@@ -188,6 +190,10 @@ class HGraphVisualizerPrinter : public HGraphVisitor {
 
   void VisitPhi(HPhi* phi) OVERRIDE {
     output_ << " " << phi->GetRegNumber();
+  }
+
+  void VisitMemoryBarrier(HMemoryBarrier* barrier) OVERRIDE {
+    output_ << " " << barrier->GetBarrierKind();
   }
 
   bool IsPass(const char* name) {
@@ -335,13 +341,11 @@ class HGraphVisualizerPrinter : public HGraphVisitor {
 
 HGraphVisualizer::HGraphVisualizer(std::ostream* output,
                                    HGraph* graph,
-                                   const CodeGenerator& codegen,
-                                   const char* method_name)
-  : output_(output), graph_(graph), codegen_(codegen) {
-  if (output == nullptr) {
-    return;
-  }
+                                   const CodeGenerator& codegen)
+  : output_(output), graph_(graph), codegen_(codegen) {}
 
+void HGraphVisualizer::PrintHeader(const char* method_name) const {
+  DCHECK(output_ != nullptr);
   HGraphVisualizerPrinter printer(graph_, *output_, "", true, codegen_);
   printer.StartTag("compilation");
   printer.PrintProperty("name", method_name);

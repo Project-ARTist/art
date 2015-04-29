@@ -38,11 +38,11 @@ namespace art {
 namespace JDWP {
 
 std::string DescribeField(const FieldId& field_id) {
-  return StringPrintf("%#x (%s)", field_id, Dbg::GetFieldName(field_id).c_str());
+  return StringPrintf("%#" PRIx64 " (%s)", field_id, Dbg::GetFieldName(field_id).c_str());
 }
 
 std::string DescribeMethod(const MethodId& method_id) {
-  return StringPrintf("%#x (%s)", method_id, Dbg::GetMethodName(method_id).c_str());
+  return StringPrintf("%#" PRIx64 " (%s)", method_id, Dbg::GetMethodName(method_id).c_str());
 }
 
 std::string DescribeRefTypeId(const RefTypeId& ref_type_id) {
@@ -101,8 +101,8 @@ static JdwpError RequestInvoke(JdwpState*, Request* request, ExpandBuf* pReply,
 
   VLOG(jdwp) << StringPrintf("    --> thread_id=%#" PRIx64 " object_id=%#" PRIx64,
                              thread_id, object_id);
-  VLOG(jdwp) << StringPrintf("        class_id=%#" PRIx64 " method_id=%x %s.%s", class_id,
-                             method_id, Dbg::GetClassName(class_id).c_str(),
+  VLOG(jdwp) << StringPrintf("        class_id=%#" PRIx64 " method_id=%#" PRIx64 " %s.%s",
+                             class_id, method_id, Dbg::GetClassName(class_id).c_str(),
                              Dbg::GetMethodName(method_id).c_str());
   VLOG(jdwp) << StringPrintf("        %d args:", arg_count);
 
@@ -133,7 +133,7 @@ static JdwpError RequestInvoke(JdwpState*, Request* request, ExpandBuf* pReply,
 
   if (is_constructor) {
     // If we invoked a constructor (which actually returns void), return the receiver,
-    // unless we threw, in which case we return NULL.
+    // unless we threw, in which case we return null.
     resultTag = JT_OBJECT;
     resultValue = (exceptObjId == 0) ? object_id : 0;
   }
@@ -256,8 +256,6 @@ static JdwpError VM_TopLevelThreadGroups(JdwpState*, Request*, ExpandBuf* pReply
 
 /*
  * Respond with the sizes of the basic debugger types.
- *
- * All IDs are 8 bytes.
  */
 static JdwpError VM_IDSizes(JdwpState*, Request*, ExpandBuf* pReply)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
@@ -271,7 +269,7 @@ static JdwpError VM_IDSizes(JdwpState*, Request*, ExpandBuf* pReply)
 
 static JdwpError VM_Dispose(JdwpState*, Request*, ExpandBuf*)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  Dbg::Disposed();
+  Dbg::Dispose();
   return ERR_NONE;
 }
 
@@ -295,7 +293,6 @@ static JdwpError VM_Suspend(JdwpState*, Request*, ExpandBuf*)
  */
 static JdwpError VM_Resume(JdwpState*, Request*, ExpandBuf*)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  Dbg::ProcessDelayedFullUndeoptimizations();
   Dbg::ResumeVM();
   return ERR_NONE;
 }
@@ -316,11 +313,12 @@ static JdwpError VM_Exit(JdwpState* state, Request* request, ExpandBuf*)
 static JdwpError VM_CreateString(JdwpState*, Request* request, ExpandBuf* pReply)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
   std::string str(request->ReadUtf8String());
-  ObjectId stringId = Dbg::CreateString(str);
-  if (stringId == 0) {
-    return ERR_OUT_OF_MEMORY;
+  ObjectId string_id;
+  JdwpError status = Dbg::CreateString(str, &string_id);
+  if (status != ERR_NONE) {
+    return status;
   }
-  expandBufAddObjectId(pReply, stringId);
+  expandBufAddObjectId(pReply, string_id);
   return ERR_NONE;
 }
 
@@ -712,9 +710,6 @@ static JdwpError CT_NewInstance(JdwpState* state, Request* request, ExpandBuf* p
   if (status != ERR_NONE) {
     return status;
   }
-  if (object_id == 0) {
-    return ERR_OUT_OF_MEMORY;
-  }
   return RequestInvoke(state, request, pReply, thread_id, object_id, class_id, method_id, true);
 }
 
@@ -730,9 +725,6 @@ static JdwpError AT_newInstance(JdwpState*, Request* request, ExpandBuf* pReply)
   JdwpError status = Dbg::CreateArrayObject(arrayTypeId, length, &object_id);
   if (status != ERR_NONE) {
     return status;
-  }
-  if (object_id == 0) {
-    return ERR_OUT_OF_MEMORY;
   }
   expandBufAdd1(pReply, JT_ARRAY);
   expandBufAddObjectId(pReply, object_id);
@@ -988,8 +980,6 @@ static JdwpError TR_Resume(JdwpState*, Request* request, ExpandBuf*)
     LOG(INFO) << "  Warning: ignoring request to resume self";
     return ERR_NONE;
   }
-
-  Dbg::ProcessDelayedFullUndeoptimizations();
 
   Dbg::ResumeThread(thread_id);
   return ERR_NONE;
@@ -1660,6 +1650,7 @@ size_t JdwpState::ProcessRequest(Request* request, ExpandBuf* pReply) {
       if (result == ERR_NONE) {
         request->CheckConsumed();
       }
+      self->AssertNoPendingException();
       break;
     }
   }

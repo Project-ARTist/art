@@ -67,7 +67,7 @@ MACRO0(SETUP_SAVE_ALL_CALLEE_SAVE_FRAME)
     movq %xmm15, 32(%rsp)
     // R10 := ArtMethod* for save all callee save frame method.
     THIS_LOAD_REQUIRES_READ_BARRIER
-    movq RUNTIME_SAVE_ALL_CALLEE_SAVE_FRAME_OFFSET(%r10), %r10
+    movl RUNTIME_SAVE_ALL_CALLEE_SAVE_FRAME_OFFSET(%r10), %r10d
     // Store ArtMethod* to bottom of stack.
     movq %r10, 0(%rsp)
     // Store rsp as the top quick frame.
@@ -110,7 +110,7 @@ MACRO0(SETUP_REFS_ONLY_CALLEE_SAVE_FRAME)
     movq %xmm15, 32(%rsp)
     // R10 := ArtMethod* for refs only callee save frame method.
     THIS_LOAD_REQUIRES_READ_BARRIER
-    movq RUNTIME_REFS_ONLY_CALLEE_SAVE_FRAME_OFFSET(%r10), %r10
+    movl RUNTIME_REFS_ONLY_CALLEE_SAVE_FRAME_OFFSET(%r10), %r10d
     // Store ArtMethod* to bottom of stack.
     movq %r10, 0(%rsp)
     // Store rsp as the stop quick frame.
@@ -170,7 +170,7 @@ MACRO0(SETUP_REFS_AND_ARGS_CALLEE_SAVE_FRAME)
     CFI_ADJUST_CFA_OFFSET(80 + 4 * 8)
     // R10 := ArtMethod* for ref and args callee save frame method.
     THIS_LOAD_REQUIRES_READ_BARRIER
-    movq RUNTIME_REFS_AND_ARGS_CALLEE_SAVE_FRAME_OFFSET(%r10), %r10
+    movl RUNTIME_REFS_AND_ARGS_CALLEE_SAVE_FRAME_OFFSET(%r10), %r10d
     // Save FPRs.
     movq %xmm0, 16(%rsp)
     movq %xmm1, 24(%rsp)
@@ -348,7 +348,7 @@ TWO_ARG_RUNTIME_EXCEPTION art_quick_throw_array_bounds, artThrowArrayBoundsFromC
      * The helper will attempt to locate the target and return a 128-bit result in rax/rdx consisting
      * of the target Method* in rax and method->code_ in rdx.
      *
-     * If unsuccessful, the helper will return NULL/????. There will be a pending exception in the
+     * If unsuccessful, the helper will return null/????. There will be a pending exception in the
      * thread and we branch to another stub to deliver it.
      *
      * On success this wrapper will restore arguments and *jump* to the target, leaving the return
@@ -506,7 +506,7 @@ DEFINE_FUNCTION art_quick_invoke_stub
 #if (STACK_REFERENCE_SIZE != 4)
 #error "STACK_REFERENCE_SIZE(X86_64) size not as expected."
 #endif
-    movl LITERAL(0), (%rsp)       // Store NULL for method*
+    movl LITERAL(0), (%rsp)       // Store null for method*
 
     movl %r10d, %ecx              // Place size of args in rcx.
     movq %rdi, %rax               // rax := method to be called
@@ -554,7 +554,7 @@ END_FUNCTION art_quick_invoke_stub
      * On entry:
      *   [sp] = return address
      *   rdi = method pointer
-     *   rsi = argument array or NULL if no arguments.
+     *   rsi = argument array or null if no arguments.
      *   rdx = size of argument array in bytes
      *   rcx = (managed) thread pointer
      *   r8 = JValue* result
@@ -600,7 +600,7 @@ DEFINE_FUNCTION art_quick_invoke_static_stub
 #if (STACK_REFERENCE_SIZE != 4)
 #error "STACK_REFERENCE_SIZE(X86_64) size not as expected."
 #endif
-    movl LITERAL(0), (%rsp)        // Store NULL for method*
+    movl LITERAL(0), (%rsp)        // Store null for method*
 
     movl %r10d, %ecx               // Place size of args in rcx.
     movq %rdi, %rax                // rax := method to be called
@@ -738,6 +738,17 @@ MACRO3(THREE_ARG_DOWNCALL, c_name, cxx_name, return_macro)
     END_FUNCTION VAR(c_name, 0)
 END_MACRO
 
+MACRO3(FOUR_ARG_DOWNCALL, c_name, cxx_name, return_macro)
+    DEFINE_FUNCTION VAR(c_name, 0)
+    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME   // save ref containing registers for GC
+    // Outgoing argument set up
+    movq %gs:THREAD_SELF_OFFSET, %r8    // pass Thread::Current()
+    call VAR(cxx_name, 1)               // cxx_name(arg1, arg2, arg3, arg4, Thread*)
+    RESTORE_REFS_ONLY_CALLEE_SAVE_FRAME // restore frame up to return address
+    CALL_MACRO(return_macro, 2)         // return or deliver exception
+    END_FUNCTION VAR(c_name, 0)
+END_MACRO
+
 MACRO3(ONE_ARG_REF_DOWNCALL, c_name, cxx_name, return_macro)
     DEFINE_FUNCTION VAR(c_name, 0)
     movl 8(%rsp), %esi                  // pass referrer
@@ -822,6 +833,12 @@ END_MACRO
   THREE_ARG_DOWNCALL art_quick_check_and_alloc_array ## c_suffix, artCheckAndAllocArrayFromCode ## cxx_suffix, RETURN_IF_RESULT_IS_NON_ZERO
 #define GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY_WITH_ACCESS_CHECK(c_suffix, cxx_suffix) \
   THREE_ARG_DOWNCALL art_quick_check_and_alloc_array_with_access_check ## c_suffix, artCheckAndAllocArrayFromCodeWithAccessCheck ## cxx_suffix, RETURN_IF_RESULT_IS_NON_ZERO
+#define GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_BYTES(c_suffix, cxx_suffix) \
+  FOUR_ARG_DOWNCALL art_quick_alloc_string_from_bytes ## c_suffix, artAllocStringFromBytesFromCode ## cxx_suffix, RETURN_IF_RESULT_IS_NON_ZERO
+#define GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_CHARS(c_suffix, cxx_suffix) \
+  THREE_ARG_DOWNCALL art_quick_alloc_string_from_chars ## c_suffix, artAllocStringFromCharsFromCode ## cxx_suffix, RETURN_IF_RESULT_IS_NON_ZERO
+#define GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(c_suffix, cxx_suffix) \
+  ONE_ARG_DOWNCALL art_quick_alloc_string_from_string ## c_suffix, artAllocStringFromStringFromCode ## cxx_suffix, RETURN_IF_RESULT_IS_NON_ZERO
 
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_dlmalloc, DlMalloc)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_dlmalloc, DlMalloc)
@@ -832,6 +849,9 @@ GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_dlmalloc, DlMalloc)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_WITH_ACCESS_CHECK(_dlmalloc, DlMalloc)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY(_dlmalloc, DlMalloc)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY_WITH_ACCESS_CHECK(_dlmalloc, DlMalloc)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_BYTES(_dlmalloc, DlMalloc)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_CHARS(_dlmalloc, DlMalloc)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_dlmalloc, DlMalloc)
 
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_dlmalloc_instrumented, DlMallocInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_dlmalloc_instrumented, DlMallocInstrumented)
@@ -842,6 +862,9 @@ GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_dlmalloc_instrumented, DlMalloc
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_WITH_ACCESS_CHECK(_dlmalloc_instrumented, DlMallocInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY(_dlmalloc_instrumented, DlMallocInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY_WITH_ACCESS_CHECK(_dlmalloc_instrumented, DlMallocInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_BYTES(_dlmalloc_instrumented, DlMallocInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_CHARS(_dlmalloc_instrumented, DlMallocInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_dlmalloc_instrumented, DlMallocInstrumented)
 
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_rosalloc, RosAlloc)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_rosalloc, RosAlloc)
@@ -852,6 +875,9 @@ GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_rosalloc, RosAlloc)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_WITH_ACCESS_CHECK(_rosalloc, RosAlloc)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY(_rosalloc, RosAlloc)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY_WITH_ACCESS_CHECK(_rosalloc, RosAlloc)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_BYTES(_rosalloc, RosAlloc)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_CHARS(_rosalloc, RosAlloc)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_rosalloc, RosAlloc)
 
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_rosalloc_instrumented, RosAllocInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_rosalloc_instrumented, RosAllocInstrumented)
@@ -862,6 +888,9 @@ GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_rosalloc_instrumented, RosAlloc
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_WITH_ACCESS_CHECK(_rosalloc_instrumented, RosAllocInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY(_rosalloc_instrumented, RosAllocInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY_WITH_ACCESS_CHECK(_rosalloc_instrumented, RosAllocInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_BYTES(_rosalloc_instrumented, RosAllocInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_CHARS(_rosalloc_instrumented, RosAllocInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_rosalloc_instrumented, RosAllocInstrumented)
 
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_bump_pointer, BumpPointer)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_bump_pointer, BumpPointer)
@@ -872,6 +901,9 @@ GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_bump_pointer, BumpPointer)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_WITH_ACCESS_CHECK(_bump_pointer, BumpPointer)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY(_bump_pointer, BumpPointer)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY_WITH_ACCESS_CHECK(_bump_pointer, BumpPointer)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_BYTES(_bump_pointer, BumpPointer)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_CHARS(_bump_pointer, BumpPointer)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_bump_pointer, BumpPointer)
 
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_bump_pointer_instrumented, BumpPointerInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_bump_pointer_instrumented, BumpPointerInstrumented)
@@ -882,8 +914,48 @@ GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_bump_pointer_instrumented, Bump
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_WITH_ACCESS_CHECK(_bump_pointer_instrumented, BumpPointerInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY(_bump_pointer_instrumented, BumpPointerInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY_WITH_ACCESS_CHECK(_bump_pointer_instrumented, BumpPointerInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_BYTES(_bump_pointer_instrumented, BumpPointerInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_CHARS(_bump_pointer_instrumented, BumpPointerInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_bump_pointer_instrumented, BumpPointerInstrumented)
 
-GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_tlab, TLAB)
+DEFINE_FUNCTION art_quick_alloc_object_tlab
+    // Fast path tlab allocation.
+    // RDI: uint32_t type_idx, RSI: ArtMethod*
+    // RDX, RCX, R8, R9: free. RAX: return val.
+    movl MIRROR_ART_METHOD_DEX_CACHE_TYPES_OFFSET(%rsi), %edx  // Load dex cache resolved types array
+                                                               // Load the class
+    movl MIRROR_OBJECT_ARRAY_DATA_OFFSET(%rdx, %rdi, MIRROR_OBJECT_ARRAY_COMPONENT_SIZE), %edx
+    testl %edx, %edx                                           // Check null class
+    jz   .Lart_quick_alloc_object_tlab_slow_path
+                                                               // Check class status.
+    cmpl LITERAL(MIRROR_CLASS_STATUS_INITIALIZED), MIRROR_CLASS_STATUS_OFFSET(%rdx)
+    jne  .Lart_quick_alloc_object_tlab_slow_path
+                                                               // Check access flags has kAccClassIsFinalizable
+    testl LITERAL(ACCESS_FLAGS_CLASS_IS_FINALIZABLE), MIRROR_CLASS_ACCESS_FLAGS_OFFSET(%rdx)
+    jnz  .Lart_quick_alloc_object_tlab_slow_path
+    movl MIRROR_CLASS_OBJECT_SIZE_OFFSET(%rdx), %ecx           // Load the object size.
+    addl LITERAL(OBJECT_ALIGNMENT_MASK), %ecx                  // Align the size by 8. (addr + 7) & ~7.
+    andl LITERAL(OBJECT_ALIGNMENT_MASK_TOGGLED), %ecx
+    movq %gs:THREAD_SELF_OFFSET, %r8                           // r8 = thread
+    movq THREAD_LOCAL_POS_OFFSET(%r8), %rax                    // Load thread_local_pos.
+    addq %rax, %rcx                                            // Add the object size.
+    cmpq THREAD_LOCAL_END_OFFSET(%r8), %rcx                    // Check if it fits.
+    ja   .Lart_quick_alloc_object_tlab_slow_path
+    movq %rcx, THREAD_LOCAL_POS_OFFSET(%r8)                    // Update thread_local_pos.
+    addq LITERAL(1), THREAD_LOCAL_OBJECTS_OFFSET(%r8)          // Increment thread_local_objects.
+                                                               // Store the class pointer in the header.
+                                                               // No fence needed for x86.
+    movl %edx, MIRROR_OBJECT_CLASS_OFFSET(%rax)
+    ret                                                        // Fast path succeeded.
+.Lart_quick_alloc_object_tlab_slow_path:
+    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME    // save ref containing registers for GC
+    // Outgoing argument set up
+    movq %gs:THREAD_SELF_OFFSET, %rdx    // pass Thread::Current()
+    call SYMBOL(artAllocObjectFromCodeTLAB)      // cxx_name(arg0, arg1, Thread*)
+    RESTORE_REFS_ONLY_CALLEE_SAVE_FRAME  // restore frame up to return address
+    RETURN_IF_RESULT_IS_NON_ZERO         // return or deliver exception
+END_FUNCTION art_quick_alloc_object_tlab
+
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_tlab, TLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_INITIALIZED(_tlab, TLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_WITH_ACCESS_CHECK(_tlab, TLAB)
@@ -892,6 +964,9 @@ GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_tlab, TLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_WITH_ACCESS_CHECK(_tlab, TLAB)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY(_tlab, TLAB)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY_WITH_ACCESS_CHECK(_tlab, TLAB)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_BYTES(_tlab, TLAB)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_CHARS(_tlab, TLAB)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_tlab, TLAB)
 
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_tlab_instrumented, TLABInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_tlab_instrumented, TLABInstrumented)
@@ -902,6 +977,9 @@ GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_tlab_instrumented, TLABInstrume
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_WITH_ACCESS_CHECK(_tlab_instrumented, TLABInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY(_tlab_instrumented, TLABInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY_WITH_ACCESS_CHECK(_tlab_instrumented, TLABInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_BYTES(_tlab_instrumented, TLABInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_CHARS(_tlab_instrumented, TLABInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_tlab_instrumented, TLABInstrumented)
 
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_region, Region)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_region, Region)
@@ -912,6 +990,9 @@ GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_region, Region)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_WITH_ACCESS_CHECK(_region, Region)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY(_region, Region)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY_WITH_ACCESS_CHECK(_region, Region)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_BYTES(_region, Region)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_CHARS(_region, Region)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_region, Region)
 
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_region_instrumented, RegionInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_region_instrumented, RegionInstrumented)
@@ -922,6 +1003,9 @@ GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_region_instrumented, RegionInst
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_WITH_ACCESS_CHECK(_region_instrumented, RegionInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY(_region_instrumented, RegionInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY_WITH_ACCESS_CHECK(_region_instrumented, RegionInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_BYTES(_region_instrumented, RegionInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_CHARS(_region_instrumented, RegionInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_region_instrumented, RegionInstrumented)
 
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_region_tlab, RegionTLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_region_tlab, RegionTLAB)
@@ -932,6 +1016,9 @@ GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_region_tlab, RegionTLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_WITH_ACCESS_CHECK(_region_tlab, RegionTLAB)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY(_region_tlab, RegionTLAB)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY_WITH_ACCESS_CHECK(_region_tlab, RegionTLAB)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_BYTES(_region_tlab, RegionTLAB)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_CHARS(_region_tlab, RegionTLAB)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_region_tlab, RegionTLAB)
 
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT(_region_tlab_instrumented, RegionTLABInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_region_tlab_instrumented, RegionTLABInstrumented)
@@ -942,11 +1029,14 @@ GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_region_tlab_instrumented, Regio
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_WITH_ACCESS_CHECK(_region_tlab_instrumented, RegionTLABInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY(_region_tlab_instrumented, RegionTLABInstrumented)
 GENERATE_ALLOC_ENTRYPOINTS_CHECK_AND_ALLOC_ARRAY_WITH_ACCESS_CHECK(_region_tlab_instrumented, RegionTLABInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_BYTES(_region_tlab_instrumented, RegionTLABInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_CHARS(_region_tlab_instrumented, RegionTLABInstrumented)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_region_tlab_instrumented, RegionTLABInstrumented)
 
-TWO_ARG_DOWNCALL art_quick_resolve_string, artResolveStringFromCode, RETURN_IF_RESULT_IS_NON_ZERO
-TWO_ARG_DOWNCALL art_quick_initialize_static_storage, artInitializeStaticStorageFromCode, RETURN_IF_RESULT_IS_NON_ZERO
-TWO_ARG_DOWNCALL art_quick_initialize_type, artInitializeTypeFromCode, RETURN_IF_RESULT_IS_NON_ZERO
-TWO_ARG_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode, RETURN_IF_RESULT_IS_NON_ZERO
+ONE_ARG_DOWNCALL art_quick_resolve_string, artResolveStringFromCode, RETURN_IF_RESULT_IS_NON_ZERO
+ONE_ARG_DOWNCALL art_quick_initialize_static_storage, artInitializeStaticStorageFromCode, RETURN_IF_RESULT_IS_NON_ZERO
+ONE_ARG_DOWNCALL art_quick_initialize_type, artInitializeTypeFromCode, RETURN_IF_RESULT_IS_NON_ZERO
+ONE_ARG_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode, RETURN_IF_RESULT_IS_NON_ZERO
 
 TWO_ARG_REF_DOWNCALL art_quick_handle_fill_data, artHandleFillArrayDataFromCode, RETURN_IF_EAX_ZERO
 
@@ -1265,7 +1355,7 @@ DEFINE_FUNCTION art_quick_resolution_trampoline
     movq %rax, %r10               // Remember returned code pointer in R10.
     movq (%rsp), %rdi             // Load called method into RDI.
     RESTORE_REFS_AND_ARGS_CALLEE_SAVE_FRAME
-    testq %r10, %r10              // If code pointer is NULL goto deliver pending exception.
+    testq %r10, %r10              // If code pointer is null goto deliver pending exception.
     jz 1f
     jmp *%r10                     // Tail call into method.
 1:
@@ -1563,14 +1653,17 @@ END_FUNCTION art_quick_instrumentation_exit
      * will long jump to the upcall with a special exception of -1.
      */
 DEFINE_FUNCTION art_quick_deoptimize
-    pushq %rsi                     // Fake that we were called. Use hidden arg.
+    pushq %rsi                     // Entry point for a jump. Fake that we were called.
+                                   // Use hidden arg.
+.globl SYMBOL(art_quick_deoptimize_from_compiled_slow_path)  // Entry point for real calls
+                                                             // from compiled slow paths.
+SYMBOL(art_quick_deoptimize_from_compiled_slow_path):
     SETUP_SAVE_ALL_CALLEE_SAVE_FRAME
                                    // Stack should be aligned now.
     movq %gs:THREAD_SELF_OFFSET, %rdi         // Pass Thread.
     call SYMBOL(artDeoptimize) // artDeoptimize(Thread*)
     int3                           // Unreachable.
 END_FUNCTION art_quick_deoptimize
-
 
     /*
      * String's compareTo.
@@ -1582,13 +1675,9 @@ END_FUNCTION art_quick_deoptimize
 DEFINE_FUNCTION art_quick_string_compareto
     movl MIRROR_STRING_COUNT_OFFSET(%edi), %r8d
     movl MIRROR_STRING_COUNT_OFFSET(%esi), %r9d
-    movl MIRROR_STRING_VALUE_OFFSET(%edi), %r10d
-    movl MIRROR_STRING_VALUE_OFFSET(%esi), %r11d
-    movl MIRROR_STRING_OFFSET_OFFSET(%edi), %eax
-    movl MIRROR_STRING_OFFSET_OFFSET(%esi), %ecx
     /* Build pointers to the start of string data */
-    leal MIRROR_CHAR_ARRAY_DATA_OFFSET(%r10d, %eax, 2), %esi
-    leal MIRROR_CHAR_ARRAY_DATA_OFFSET(%r11d, %ecx, 2), %edi
+    leal MIRROR_STRING_VALUE_OFFSET(%edi), %edi
+    leal MIRROR_STRING_VALUE_OFFSET(%esi), %esi
     /* Calculate min length and count diff */
     movl  %r8d, %ecx
     movl  %r8d, %eax
@@ -1598,8 +1687,8 @@ DEFINE_FUNCTION art_quick_string_compareto
      * At this point we have:
      *   eax: value to return if first part of strings are equal
      *   ecx: minimum among the lengths of the two strings
-     *   esi: pointer to this string data
-     *   edi: pointer to comp string data
+     *   esi: pointer to comp string data
+     *   edi: pointer to this string data
      */
     jecxz .Lkeep_length
     repe cmpsw                    // find nonmatching chars in [%esi] and [%edi], up to length %ecx
@@ -1608,8 +1697,8 @@ DEFINE_FUNCTION art_quick_string_compareto
     ret
     .balign 16
 .Lnot_equal:
-    movzwl  -2(%esi), %eax        // get last compared char from this string
-    movzwl  -2(%edi), %ecx        // get last compared char from comp string
+    movzwl  -2(%edi), %eax        // get last compared char from this string
+    movzwl  -2(%esi), %ecx        // get last compared char from comp string
     subl  %ecx, %eax              // return the difference
     ret
 END_FUNCTION art_quick_string_compareto

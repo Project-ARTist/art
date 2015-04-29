@@ -32,12 +32,13 @@ class InstructionSetFeatures;
 class PACKED(4) OatHeader {
  public:
   static constexpr uint8_t kOatMagic[] = { 'o', 'a', 't', '\n' };
-  static constexpr uint8_t kOatVersion[] = { '0', '5', '8', '\0' };
+  static constexpr uint8_t kOatVersion[] = { '0', '6', '1', '\0' };
 
   static constexpr const char* kImageLocationKey = "image-location";
   static constexpr const char* kDex2OatCmdLineKey = "dex2oat-cmdline";
   static constexpr const char* kDex2OatHostKey = "dex2oat-host";
   static constexpr const char* kPicKey = "pic";
+  static constexpr const char* kClassPathKey = "classpath";
 
   static OatHeader* Create(InstructionSet instruction_set,
                            const InstructionSetFeatures* instruction_set_features,
@@ -156,6 +157,8 @@ class PACKED(4) OatMethodOffsets {
 
   ~OatMethodOffsets();
 
+  OatMethodOffsets& operator=(const OatMethodOffsets&) = default;
+
   uint32_t code_offset_;
 };
 
@@ -168,6 +171,8 @@ class PACKED(4) OatQuickMethodHeader {
                        uint32_t code_size = 0U);
 
   ~OatQuickMethodHeader();
+
+  OatQuickMethodHeader& operator=(const OatQuickMethodHeader&) = default;
 
   // The offset in bytes from the start of the mapping table to the end of the header.
   uint32_t mapping_table_offset_;

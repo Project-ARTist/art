@@ -60,13 +60,14 @@ $(ART_TEST_TARGET_GTEST_MainStripped_DEX): $(ART_TEST_TARGET_GTEST_Main_DEX)
 	$(call dexpreopt-remove-classes.dex,$@)
 
 # Dex file dependencies for each gtest.
-ART_GTEST_class_linker_test_DEX_DEPS := Interfaces MyClass Nested Statics StaticsFromCode
-ART_GTEST_compiler_driver_test_DEX_DEPS := AbstractMethod
+ART_GTEST_class_linker_test_DEX_DEPS := Interfaces MultiDex MyClass Nested Statics StaticsFromCode
+ART_GTEST_compiler_driver_test_DEX_DEPS := AbstractMethod StaticLeafMethods
 ART_GTEST_dex_file_test_DEX_DEPS := GetMethodSignature Main Nested
 ART_GTEST_exception_test_DEX_DEPS := ExceptionHandle
 ART_GTEST_jni_compiler_test_DEX_DEPS := MyClassNatives
 ART_GTEST_jni_internal_test_DEX_DEPS := AllFields StaticLeafMethods
 ART_GTEST_oat_file_assistant_test_DEX_DEPS := Main MainStripped MultiDex Nested
+ART_GTEST_oat_file_test_DEX_DEPS := Main MultiDex
 ART_GTEST_object_test_DEX_DEPS := ProtoCompare ProtoCompare2 StaticsFromCode XandY
 ART_GTEST_proxy_test_DEX_DEPS := Interfaces
 ART_GTEST_reflection_test_DEX_DEPS := Main NonStaticLeafMethods StaticLeafMethods
@@ -159,6 +160,7 @@ RUNTIME_GTEST_COMMON_SRC_FILES := \
   runtime/intern_table_test.cc \
   runtime/interpreter/safe_math_test.cc \
   runtime/java_vm_ext_test.cc \
+  runtime/jit/jit_code_cache_test.cc \
   runtime/leb128_test.cc \
   runtime/mem_map_test.cc \
   runtime/memory_region_test.cc \
@@ -166,8 +168,10 @@ RUNTIME_GTEST_COMMON_SRC_FILES := \
   runtime/mirror/object_test.cc \
   runtime/monitor_pool_test.cc \
   runtime/monitor_test.cc \
+  runtime/oat_file_test.cc \
   runtime/oat_file_assistant_test.cc \
   runtime/parsed_options_test.cc \
+  runtime/prebuilt_tools_test.cc \
   runtime/reference_table_test.cc \
   runtime/thread_pool_test.cc \
   runtime/transaction_test.cc \
@@ -186,10 +190,18 @@ COMPILER_GTEST_COMMON_SRC_FILES := \
   compiler/dex/local_value_numbering_test.cc \
   compiler/dex/mir_graph_test.cc \
   compiler/dex/mir_optimization_test.cc \
+  compiler/dex/quick/quick_cfi_test.cc \
+  compiler/dex/type_inference_test.cc \
+  compiler/dwarf/dwarf_test.cc \
   compiler/driver/compiler_driver_test.cc \
   compiler/elf_writer_test.cc \
   compiler/image_test.cc \
+  compiler/jni/jni_cfi_test.cc \
   compiler/jni/jni_compiler_test.cc \
+  compiler/linker/arm64/relative_patcher_arm64_test.cc \
+  compiler/linker/arm/relative_patcher_thumb2_test.cc \
+  compiler/linker/x86/relative_patcher_x86_test.cc \
+  compiler/linker/x86_64/relative_patcher_x86_64_test.cc \
   compiler/oat_test.cc \
   compiler/optimizing/bounds_check_elimination_test.cc \
   compiler/optimizing/codegen_test.cc \
@@ -205,6 +217,7 @@ COMPILER_GTEST_COMMON_SRC_FILES := \
   compiler/optimizing/live_interval_test.cc \
   compiler/optimizing/live_ranges_test.cc \
   compiler/optimizing/nodes_test.cc \
+  compiler/optimizing/optimizing_cfi_test.cc \
   compiler/optimizing/parallel_move_test.cc \
   compiler/optimizing/pretty_printer_test.cc \
   compiler/optimizing/register_allocator_test.cc \
@@ -215,6 +228,7 @@ COMPILER_GTEST_COMMON_SRC_FILES := \
   compiler/utils/arena_allocator_test.cc \
   compiler/utils/dedupe_set_test.cc \
   compiler/utils/swap_space_test.cc \
+  compiler/utils/test_dex_file_builder_test.cc \
   compiler/utils/arm/managed_register_arm_test.cc \
   compiler/utils/arm64/managed_register_arm64_test.cc \
   compiler/utils/x86/managed_register_x86_test.cc \
@@ -230,6 +244,7 @@ COMPILER_GTEST_TARGET_SRC_FILES := \
 
 COMPILER_GTEST_HOST_SRC_FILES := \
   $(COMPILER_GTEST_COMMON_SRC_FILES) \
+  compiler/dex/quick/x86/quick_assemble_x86_test.cc \
   compiler/utils/arm/assembler_arm32_test.cc \
   compiler/utils/arm/assembler_thumb2_test.cc \
   compiler/utils/assembler_thumb_test.cc \
@@ -250,6 +265,7 @@ LOCAL_ADDITIONAL_DEPENDENCIES := art/build/Android.common_build.mk
 LOCAL_ADDITIONAL_DEPENDENCIES += art/build/Android.gtest.mk
 $(eval $(call set-target-local-clang-vars))
 $(eval $(call set-target-local-cflags-vars,debug))
+LOCAL_CLANG_CFLAGS += -Wno-used-but-marked-unused -Wno-deprecated -Wno-missing-noreturn # gtest issue
 include $(BUILD_SHARED_LIBRARY)
 
 include $(CLEAR_VARS)
@@ -264,6 +280,7 @@ LOCAL_STATIC_LIBRARIES := libgtest_host
 LOCAL_LDLIBS += -ldl -lpthread
 LOCAL_MULTILIB := both
 LOCAL_CLANG := $(ART_HOST_CLANG)
+LOCAL_CLANG_CFLAGS += -Wno-used-but-marked-unused -Wno-deprecated -Wno-missing-noreturn  # gtest issue
 LOCAL_ADDITIONAL_DEPENDENCIES := art/build/Android.common_build.mk
 LOCAL_ADDITIONAL_DEPENDENCIES += art/build/Android.gtest.mk
 include $(BUILD_HOST_SHARED_LIBRARY)
@@ -396,7 +413,7 @@ define define-art-gtest
   LOCAL_CPP_EXTENSION := $$(ART_CPP_EXTENSION)
   LOCAL_SRC_FILES := $$(art_gtest_filename)
   LOCAL_C_INCLUDES += $$(ART_C_INCLUDES) art/runtime $$(art_gtest_extra_c_includes)
-  LOCAL_SHARED_LIBRARIES += libartd $$(art_gtest_extra_shared_libraries) libart-gtest
+  LOCAL_SHARED_LIBRARIES += libartd $$(art_gtest_extra_shared_libraries) libart-gtest libart-disassembler
   LOCAL_WHOLE_STATIC_LIBRARIES += libsigchain
 
   LOCAL_ADDITIONAL_DEPENDENCIES := art/build/Android.common_build.mk
@@ -416,6 +433,7 @@ define define-art-gtest
     LOCAL_MODULE_PATH_32 := $$(ART_TARGET_NATIVETEST_OUT)/$$(ART_TARGET_ARCH_32)
     LOCAL_MODULE_PATH_64 := $$(ART_TARGET_NATIVETEST_OUT)/$$(ART_TARGET_ARCH_64)
     LOCAL_MULTILIB := both
+    LOCAL_CLANG_CFLAGS += -Wno-used-but-marked-unused -Wno-deprecated -Wno-missing-noreturn  # gtest issue
     include $$(BUILD_EXECUTABLE)
     library_path :=
     2nd_library_path :=
@@ -454,6 +472,7 @@ test-art-target-gtest-$$(art_gtest_name): $$(ART_TEST_TARGET_GTEST_$$(art_gtest_
     LOCAL_MULTILIB := both
     LOCAL_MODULE_STEM_32 := $$(art_gtest_name)32
     LOCAL_MODULE_STEM_64 := $$(art_gtest_name)64
+    LOCAL_CLANG_CFLAGS += -Wno-used-but-marked-unused -Wno-deprecated -Wno-missing-noreturn  # gtest issue
     include $$(BUILD_HOST_EXECUTABLE)
 
     ART_TEST_HOST_GTEST_$$(art_gtest_name)_RULES :=

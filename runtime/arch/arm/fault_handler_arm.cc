@@ -56,7 +56,7 @@ void FaultManager::HandleNestedSignal(int sig ATTRIBUTE_UNUSED, siginfo_t* info 
   struct ucontext *uc = reinterpret_cast<struct ucontext*>(context);
   struct sigcontext *sc = reinterpret_cast<struct sigcontext*>(&uc->uc_mcontext);
   Thread* self = Thread::Current();
-  CHECK(self != nullptr);       // This will cause a SIGABRT if self is nullptr.
+  CHECK(self != nullptr);  // This will cause a SIGABRT if self is null.
 
   sc->arm_r0 = reinterpret_cast<uintptr_t>(*self->GetNestedSignalState());
   sc->arm_r1 = 1;
@@ -95,6 +95,13 @@ void FaultManager::GetMethodAndReturnPcAndSp(siginfo_t* siginfo ATTRIBUTE_UNUSED
   // Need to work out the size of the instruction that caused the exception.
   uint8_t* ptr = reinterpret_cast<uint8_t*>(sc->arm_pc);
   VLOG(signals) << "pc: " << std::hex << static_cast<void*>(ptr);
+
+  if (ptr == nullptr) {
+    // Somebody jumped to 0x0. Definitely not ours, and will definitely segfault below.
+    *out_method = nullptr;
+    return;
+  }
+
   uint32_t instr_size = GetInstructionSize(ptr);
 
   *out_return_pc = (sc->arm_pc + instr_size) | 1;

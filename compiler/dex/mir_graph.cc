@@ -81,15 +81,15 @@ const char* MIRGraph::extended_mir_op_names_[kMirOpLast - kMirOpFirst] = {
 };
 
 MIRGraph::MIRGraph(CompilationUnit* cu, ArenaAllocator* arena)
-    : reg_location_(NULL),
+    : reg_location_(nullptr),
       block_id_map_(std::less<unsigned int>(), arena->Adapter()),
       cu_(cu),
       ssa_base_vregs_(arena->Adapter(kArenaAllocSSAToDalvikMap)),
       ssa_subscripts_(arena->Adapter(kArenaAllocSSAToDalvikMap)),
-      vreg_to_ssa_map_(NULL),
-      ssa_last_defs_(NULL),
-      is_constant_v_(NULL),
-      constant_values_(NULL),
+      vreg_to_ssa_map_(nullptr),
+      ssa_last_defs_(nullptr),
+      is_constant_v_(nullptr),
+      constant_values_(nullptr),
       use_counts_(arena->Adapter()),
       raw_use_counts_(arena->Adapter()),
       num_reachable_blocks_(0),
@@ -106,24 +106,24 @@ MIRGraph::MIRGraph(CompilationUnit* cu, ArenaAllocator* arena)
       topological_order_indexes_(arena->Adapter(kArenaAllocTopologicalSortOrder)),
       topological_order_loop_head_stack_(arena->Adapter(kArenaAllocTopologicalSortOrder)),
       max_nested_loops_(0u),
-      i_dom_list_(NULL),
+      i_dom_list_(nullptr),
       temp_scoped_alloc_(),
       block_list_(arena->Adapter(kArenaAllocBBList)),
-      try_block_addr_(NULL),
-      entry_block_(NULL),
-      exit_block_(NULL),
-      current_code_item_(NULL),
+      try_block_addr_(nullptr),
+      entry_block_(nullptr),
+      exit_block_(nullptr),
+      current_code_item_(nullptr),
       m_units_(arena->Adapter()),
       method_stack_(arena->Adapter()),
       current_method_(kInvalidEntry),
       current_offset_(kInvalidEntry),
       def_count_(0),
-      opcode_count_(NULL),
+      opcode_count_(nullptr),
       num_ssa_regs_(0),
       extended_basic_blocks_(arena->Adapter()),
       method_sreg_(0),
       attributes_(METHOD_IS_LEAF),  // Start with leaf assumption, change on encountering invoke.
-      checkstats_(NULL),
+      checkstats_(nullptr),
       arena_(arena),
       backward_branches_(0),
       forward_branches_(0),
@@ -185,13 +185,13 @@ BasicBlock* MIRGraph::SplitBlock(DexOffset code_offset,
                                  BasicBlock* orig_block, BasicBlock** immed_pred_block_p) {
   DCHECK_GT(code_offset, orig_block->start_offset);
   MIR* insn = orig_block->first_mir_insn;
-  MIR* prev = NULL;  // Will be set to instruction before split.
+  MIR* prev = nullptr;  // Will be set to instruction before split.
   while (insn) {
     if (insn->offset == code_offset) break;
     prev = insn;
     insn = insn->next;
   }
-  if (insn == NULL) {
+  if (insn == nullptr) {
     LOG(FATAL) << "Break split failed";
   }
   // Now insn is at the instruction where we want to split, namely
@@ -291,8 +291,12 @@ BasicBlock* MIRGraph::SplitBlock(DexOffset code_offset,
 BasicBlock* MIRGraph::FindBlock(DexOffset code_offset, bool create,
                                 BasicBlock** immed_pred_block_p,
                                 ScopedArenaVector<uint16_t>* dex_pc_to_block_map) {
-  if (code_offset >= current_code_item_->insns_size_in_code_units_) {
-    return nullptr;
+  if (UNLIKELY(code_offset >= current_code_item_->insns_size_in_code_units_)) {
+    // There can be a fall-through out of the method code. We shall record such a block
+    // here (assuming create==true) and check that it's dead at the end of InlineMethod().
+    // Though we're only aware of the cases where code_offset is exactly the same as
+    // insns_size_in_code_units_, treat greater code_offset the same just in case.
+    code_offset = current_code_item_->insns_size_in_code_units_;
   }
 
   int block_id = (*dex_pc_to_block_map)[code_offset];
@@ -483,6 +487,7 @@ BasicBlock* MIRGraph::ProcessCanBranch(BasicBlock* cur_block, MIR* insn, DexOffs
   BasicBlock* taken_block = FindBlock(target, /* create */ true,
                                       /* immed_pred_block_p */ &cur_block,
                                       dex_pc_to_block_map);
+  DCHECK(taken_block != nullptr);
   cur_block->taken = taken_block->id;
   taken_block->predecessors.push_back(cur_block->id);
 
@@ -494,6 +499,7 @@ BasicBlock* MIRGraph::ProcessCanBranch(BasicBlock* cur_block, MIR* insn, DexOffs
                                              /* immed_pred_block_p */
                                              &cur_block,
                                              dex_pc_to_block_map);
+    DCHECK(fallthrough_block != nullptr);
     cur_block->fall_through = fallthrough_block->id;
     fallthrough_block->predecessors.push_back(cur_block->id);
   } else if (code_ptr < code_end) {
@@ -508,7 +514,8 @@ BasicBlock* MIRGraph::ProcessCanSwitch(BasicBlock* cur_block, MIR* insn, DexOffs
                                        ScopedArenaVector<uint16_t>* dex_pc_to_block_map) {
   UNUSED(flags);
   const uint16_t* switch_data =
-      reinterpret_cast<const uint16_t*>(GetCurrentInsns() + cur_offset + insn->dalvikInsn.vB);
+      reinterpret_cast<const uint16_t*>(GetCurrentInsns() + cur_offset +
+          static_cast<int32_t>(insn->dalvikInsn.vB));
   int size;
   const int* keyTable;
   const int* target_table;
@@ -530,7 +537,7 @@ BasicBlock* MIRGraph::ProcessCanSwitch(BasicBlock* cur_block, MIR* insn, DexOffs
     size = switch_data[1];
     first_key = switch_data[2] | (switch_data[3] << 16);
     target_table = reinterpret_cast<const int*>(&switch_data[4]);
-    keyTable = NULL;        // Make the compiler happy.
+    keyTable = nullptr;        // Make the compiler happy.
   /*
    * Sparse switch data format:
    *  ushort ident = 0x0200   magic value
@@ -561,6 +568,7 @@ BasicBlock* MIRGraph::ProcessCanSwitch(BasicBlock* cur_block, MIR* insn, DexOffs
     BasicBlock* case_block = FindBlock(cur_offset + target_table[i],  /* create */ true,
                                        /* immed_pred_block_p */ &cur_block,
                                        dex_pc_to_block_map);
+    DCHECK(case_block != nullptr);
     SuccessorBlockInfo* successor_block_info =
         static_cast<SuccessorBlockInfo*>(arena_->Alloc(sizeof(SuccessorBlockInfo),
                                                        kArenaAllocSuccessor));
@@ -576,6 +584,7 @@ BasicBlock* MIRGraph::ProcessCanSwitch(BasicBlock* cur_block, MIR* insn, DexOffs
   BasicBlock* fallthrough_block = FindBlock(cur_offset +  width, /* create */ true,
                                             /* immed_pred_block_p */ nullptr,
                                             dex_pc_to_block_map);
+  DCHECK(fallthrough_block != nullptr);
   cur_block->fall_through = fallthrough_block->id;
   fallthrough_block->predecessors.push_back(cur_block->id);
   return cur_block;
@@ -688,16 +697,17 @@ BasicBlock* MIRGraph::ProcessCanThrow(BasicBlock* cur_block, MIR* insn, DexOffse
 
 /* Parse a Dex method and insert it into the MIRGraph at the current insert point. */
 void MIRGraph::InlineMethod(const DexFile::CodeItem* code_item, uint32_t access_flags,
-                           InvokeType invoke_type, uint16_t class_def_idx,
+                           InvokeType invoke_type ATTRIBUTE_UNUSED, uint16_t class_def_idx,
                            uint32_t method_idx, jobject class_loader, const DexFile& dex_file) {
   current_code_item_ = code_item;
   method_stack_.push_back(std::make_pair(current_method_, current_offset_));
   current_method_ = m_units_.size();
   current_offset_ = 0;
   // TODO: will need to snapshot stack image and use that as the mir context identification.
-  m_units_.push_back(new DexCompilationUnit(cu_, class_loader, Runtime::Current()->GetClassLinker(),
-                     dex_file, current_code_item_, class_def_idx, method_idx, access_flags,
-                     cu_->compiler_driver->GetVerifiedMethod(&dex_file, method_idx)));
+  m_units_.push_back(new (arena_) DexCompilationUnit(
+      cu_, class_loader, Runtime::Current()->GetClassLinker(), dex_file,
+      current_code_item_, class_def_idx, method_idx, access_flags,
+      cu_->compiler_driver->GetVerifiedMethod(&dex_file, method_idx)));
   const uint16_t* code_ptr = current_code_item_->insns_;
   const uint16_t* code_end =
       current_code_item_->insns_ + current_code_item_->insns_size_in_code_units_;
@@ -708,8 +718,8 @@ void MIRGraph::InlineMethod(const DexFile::CodeItem* code_item, uint32_t access_
   // FindBlock lookup cache.
   ScopedArenaAllocator allocator(&cu_->arena_stack);
   ScopedArenaVector<uint16_t> dex_pc_to_block_map(allocator.Adapter());
-  dex_pc_to_block_map.resize(dex_pc_to_block_map.size() +
-                             current_code_item_->insns_size_in_code_units_);
+  dex_pc_to_block_map.resize(current_code_item_->insns_size_in_code_units_ +
+                             1 /* Fall-through on last insn; dead or punt to interpreter. */);
 
   // TODO: replace with explicit resize routine.  Using automatic extension side effect for now.
   try_block_addr_->SetBit(current_code_item_->insns_size_in_code_units_);
@@ -717,8 +727,8 @@ void MIRGraph::InlineMethod(const DexFile::CodeItem* code_item, uint32_t access_
 
   // If this is the first method, set up default entry and exit blocks.
   if (current_method_ == 0) {
-    DCHECK(entry_block_ == NULL);
-    DCHECK(exit_block_ == NULL);
+    DCHECK(entry_block_ == nullptr);
+    DCHECK(exit_block_ == nullptr);
     DCHECK_EQ(GetNumBlocks(), 0U);
     // Use id 0 to represent a null block.
     BasicBlock* null_block = CreateNewBB(kNullBlock);
@@ -726,13 +736,6 @@ void MIRGraph::InlineMethod(const DexFile::CodeItem* code_item, uint32_t access_
     null_block->hidden = true;
     entry_block_ = CreateNewBB(kEntryBlock);
     exit_block_ = CreateNewBB(kExitBlock);
-    // TODO: deprecate all "cu->" fields; move what's left to wherever CompilationUnit is allocated.
-    cu_->dex_file = &dex_file;
-    cu_->class_def_idx = class_def_idx;
-    cu_->method_idx = method_idx;
-    cu_->access_flags = access_flags;
-    cu_->invoke_type = invoke_type;
-    cu_->shorty = dex_file.GetMethodShorty(dex_file.GetMethodId(method_idx));
   } else {
     UNIMPLEMENTED(FATAL) << "Nested inlining not implemented.";
     /*
@@ -761,7 +764,7 @@ void MIRGraph::InlineMethod(const DexFile::CodeItem* code_item, uint32_t access_
     insn->m_unit_index = current_method_;
     int width = ParseInsn(code_ptr, &insn->dalvikInsn);
     Instruction::Code opcode = insn->dalvikInsn.opcode;
-    if (opcode_count_ != NULL) {
+    if (opcode_count_ != nullptr) {
       opcode_count_[static_cast<int>(opcode)]++;
     }
 
@@ -882,10 +885,24 @@ void MIRGraph::InlineMethod(const DexFile::CodeItem* code_item, uint32_t access_
   if (cu_->verbose) {
     DumpMIRGraph();
   }
+
+  // Check if there's been a fall-through out of the method code.
+  BasicBlockId out_bb_id = dex_pc_to_block_map[current_code_item_->insns_size_in_code_units_];
+  if (UNLIKELY(out_bb_id != NullBasicBlockId)) {
+    // Eagerly calculate DFS order to determine if the block is dead.
+    DCHECK(!DfsOrdersUpToDate());
+    ComputeDFSOrders();
+    BasicBlock* out_bb = GetBasicBlock(out_bb_id);
+    DCHECK(out_bb != nullptr);
+    if (out_bb->block_type != kDead) {
+      LOG(WARNING) << "Live fall-through out of method in " << PrettyMethod(method_idx, dex_file);
+      SetPuntToInterpreter(true);
+    }
+  }
 }
 
 void MIRGraph::ShowOpcodeStats() {
-  DCHECK(opcode_count_ != NULL);
+  DCHECK(opcode_count_ != nullptr);
   LOG(INFO) << "Opcode Count";
   for (int i = 0; i < kNumPackedOpcodes; i++) {
     if (opcode_count_[i] != 0) {
@@ -953,7 +970,7 @@ void MIRGraph::DumpCFG(const char* dir_prefix, bool all_blocks, const char *suff
     return;
   }
   file = fopen(fpath.c_str(), "w");
-  if (file == NULL) {
+  if (file == nullptr) {
     PLOG(ERROR) << "Could not open " << fpath << " for DumpCFG.";
     return;
   }
@@ -967,7 +984,7 @@ void MIRGraph::DumpCFG(const char* dir_prefix, bool all_blocks, const char *suff
   for (idx = 0; idx < num_blocks; idx++) {
     int block_idx = all_blocks ? idx : dfs_order_[idx];
     BasicBlock* bb = GetBasicBlock(block_idx);
-    if (bb == NULL) continue;
+    if (bb == nullptr) continue;
     if (bb->block_type == kDead) continue;
     if (bb->hidden) continue;
     if (bb->block_type == kEntryBlock) {
@@ -1507,8 +1524,8 @@ char* MIRGraph::GetDalvikDisassembly(const MIR* mir) {
     }
     nop = true;
   }
-  int defs = (ssa_rep != NULL) ? ssa_rep->num_defs : 0;
-  int uses = (ssa_rep != NULL) ? ssa_rep->num_uses : 0;
+  int defs = (ssa_rep != nullptr) ? ssa_rep->num_defs : 0;
+  int uses = (ssa_rep != nullptr) ? ssa_rep->num_uses : 0;
 
   if (MIR::DecodedInstruction::IsPseudoMirOp(opcode)) {
     // Note that this does not check the MIR's opcode in all cases. In cases where it
@@ -1536,7 +1553,7 @@ char* MIRGraph::GetDalvikDisassembly(const MIR* mir) {
     for (int i = 0; i < uses; i++) {
       str.append(" ");
       str.append(GetSSANameWithConst(ssa_rep->uses[i], show_singles));
-      if (!show_singles && (reg_location_ != NULL) && reg_location_[i].wide) {
+      if (!show_singles && (reg_location_ != nullptr) && reg_location_[i].wide) {
         // For the listing, skip the high sreg.
         i++;
       }
@@ -1616,8 +1633,8 @@ void MIRGraph::ReplaceSpecialChars(std::string& str) {
 }
 
 std::string MIRGraph::GetSSAName(int ssa_reg) {
-  // TODO: This value is needed for LLVM and debugging. Currently, we compute this and then copy to
-  //       the arena. We should be smarter and just place straight into the arena, or compute the
+  // TODO: This value is needed for debugging. Currently, we compute this and then copy to the
+  //       arena. We should be smarter and just place straight into the arena, or compute the
   //       value more lazily.
   int vreg = SRegToVReg(ssa_reg);
   if (vreg >= static_cast<int>(GetFirstTempVR())) {
@@ -1629,7 +1646,7 @@ std::string MIRGraph::GetSSAName(int ssa_reg) {
 
 // Similar to GetSSAName, but if ssa name represents an immediate show that as well.
 std::string MIRGraph::GetSSANameWithConst(int ssa_reg, bool singles_only) {
-  if (reg_location_ == NULL) {
+  if (reg_location_ == nullptr) {
     // Pre-SSA - just use the standard name.
     return GetSSAName(ssa_reg);
   }
@@ -1722,7 +1739,7 @@ CallInfo* MIRGraph::NewMemCallInfo(BasicBlock* bb, MIR* mir, InvokeType type, bo
   CallInfo* info = static_cast<CallInfo*>(arena_->Alloc(sizeof(CallInfo),
                                                         kArenaAllocMisc));
   MIR* move_result_mir = FindMoveResult(bb, mir);
-  if (move_result_mir == NULL) {
+  if (move_result_mir == nullptr) {
     info->result.location = kLocInvalid;
   } else {
     info->result = GetRawDest(move_result_mir);
@@ -2300,7 +2317,7 @@ bool MIR::DecodedInstruction::GetConstant(int64_t* ptr_value, bool* wide) const 
 
 void BasicBlock::ResetOptimizationFlags(uint16_t reset_flags) {
   // Reset flags for all MIRs in bb.
-  for (MIR* mir = first_mir_insn; mir != NULL; mir = mir->next) {
+  for (MIR* mir = first_mir_insn; mir != nullptr; mir = mir->next) {
     mir->optimization_flags &= (~reset_flags);
   }
 }
@@ -2459,11 +2476,9 @@ BasicBlock* MIRGraph::CreateNewBB(BBType block_type) {
   return res;
 }
 
-void MIRGraph::CalculateBasicBlockInformation() {
-  auto* quick_compiler = down_cast<QuickCompiler*>(cu_->compiler_driver->GetCompiler());
-  DCHECK(quick_compiler != nullptr);
+void MIRGraph::CalculateBasicBlockInformation(const PassManager* const post_opt_pass_manager) {
   /* Create the pass driver and launch it */
-  PassDriverMEPostOpt driver(quick_compiler->GetPostOptPassManager(), cu_);
+  PassDriverMEPostOpt driver(post_opt_pass_manager, cu_);
   driver.Launch();
 }
 

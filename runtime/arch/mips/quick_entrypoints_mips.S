@@ -446,7 +446,7 @@ END art_quick_throw_no_such_method
      * The helper will attempt to locate the target and return a 64-bit result in $v0/$v1 consisting
      * of the target Method* in $v0 and method->code_ in $v1.
      *
-     * If unsuccessful, the helper will return NULL/NULL. There will be a pending exception in the
+     * If unsuccessful, the helper will return null/null. There will be a pending exception in the
      * thread and we branch to another stub to deliver it.
      *
      * On success this wrapper will restore arguments and *jump* to the target, leaving the lr
@@ -484,7 +484,7 @@ INVOKE_TRAMPOLINE art_quick_invoke_virtual_trampoline_with_access_check, artInvo
      * Invocation stub for quick code.
      * On entry:
      *   a0 = method pointer
-     *   a1 = argument array or NULL for no argument methods
+     *   a1 = argument array or null for no argument methods
      *   a2 = size of argument array in bytes
      *   a3 = (managed) thread pointer
      *   [sp + 16] = JValue* result
@@ -520,7 +520,7 @@ ENTRY art_quick_invoke_stub
     lw    $a3, 12($sp)          # copy arg value for a3
     lw    $t9, MIRROR_ART_METHOD_QUICK_CODE_OFFSET_32($a0)  # get pointer to the code
     jalr  $t9                   # call the method
-    sw    $zero, 0($sp)         # store NULL for method* at bottom of frame
+    sw    $zero, 0($sp)         # store null for method* at bottom of frame
     move  $sp, $fp              # restore the stack
     lw    $s0, 0($sp)
     .cfi_restore 16
@@ -983,6 +983,16 @@ ENTRY art_quick_set_obj_instance
 END art_quick_set_obj_instance
 
 // Macro to facilitate adding new allocation entrypoints.
+.macro ONE_ARG_DOWNCALL name, entrypoint, return
+    .extern \entrypoint
+ENTRY \name
+    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME # save callee saves in case of GC
+    jal     \entrypoint
+    move    $a1, rSELF                # pass Thread::Current
+    \return
+END \name
+.endm
+
 .macro TWO_ARG_DOWNCALL name, entrypoint, return
     .extern \entrypoint
 ENTRY \name
@@ -1003,34 +1013,43 @@ ENTRY \name
 END \name
 .endm
 
+.macro FOUR_ARG_DOWNCALL name, entrypoint, return
+    .extern \entrypoint
+ENTRY \name
+    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME # save callee saves in case of GC
+    jal     \entrypoint
+    sw      rSELF, 16($sp)            # pass Thread::Current
+    \return
+END \name
+.endm
+
 // Generate the allocation entrypoints for each allocator.
 GENERATE_ALL_ALLOC_ENTRYPOINTS
 
     /*
      * Entry from managed code to resolve a string, this stub will allocate a String and deliver an
-     * exception on error. On success the String is returned. R0 holds the referring method,
-     * R1 holds the string index. The fast path check for hit in strings cache has already been
-     * performed.
+     * exception on error. On success the String is returned. A0 holds the string index. The fast
+     * path check for hit in strings cache has already been performed.
      */
-TWO_ARG_DOWNCALL art_quick_resolve_string, artResolveStringFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_DOWNCALL art_quick_resolve_string, artResolveStringFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
 
     /*
      * Entry from managed code when uninitialized static storage, this stub will run the class
      * initializer and deliver the exception on error. On success the static storage base is
      * returned.
      */
-TWO_ARG_DOWNCALL art_quick_initialize_static_storage, artInitializeStaticStorageFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_DOWNCALL art_quick_initialize_static_storage, artInitializeStaticStorageFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
 
     /*
      * Entry from managed code when dex cache misses for a type_idx.
      */
-TWO_ARG_DOWNCALL art_quick_initialize_type, artInitializeTypeFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_DOWNCALL art_quick_initialize_type, artInitializeTypeFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
 
     /*
      * Entry from managed code when type_idx needs to be checked for access and dex cache may also
      * miss.
      */
-TWO_ARG_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
 
     /*
      * Called by managed code when the value in rSUSPEND has been decremented to 0.
@@ -1094,7 +1113,7 @@ ENTRY art_quick_resolution_trampoline
     lw      $a0, ARG_SLOT_SIZE($sp)       # load resolved method to $a0
     RESTORE_REFS_AND_ARGS_CALLEE_SAVE_FRAME
     move    $t9, $v0               # code pointer must be in $t9 to generate the global pointer
-    jalr    $zero, $v0             # tail call to method
+    jalr    $zero, $t9             # tail call to method
     nop
 1:
     RESTORE_REFS_AND_ARGS_CALLEE_SAVE_FRAME
@@ -1203,29 +1222,28 @@ art_quick_instrumentation_exit:
     .cpload  $t9
     move     $ra, $zero     # link register is to here, so clobber with 0 for later checks
 
+    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME
     addiu    $sp, $sp, -16  # allocate temp storage on the stack
     .cfi_adjust_cfa_offset 16
-    sw       $v0, 12($sp)
-    .cfi_rel_offset 2, 32
-    sw       $v1, 8($sp)
-    .cfi_rel_offset 3, 36
-    s.d      $f0, 0($sp)
-    SETUP_REFS_ONLY_CALLEE_SAVE_FRAME
+    sw       $v0, ARG_SLOT_SIZE+12($sp)
+    .cfi_rel_offset 2, ARG_SLOT_SIZE+12
+    sw       $v1, ARG_SLOT_SIZE+8($sp)
+    .cfi_rel_offset 3, ARG_SLOT_SIZE+8
+    s.d      $f0, ARG_SLOT_SIZE($sp)
     s.d      $f0, 16($sp)   # pass fpr result
     move     $a2, $v0       # pass gpr result
     move     $a3, $v1
-    addiu    $a1, $sp, ARG_SLOT_SIZE   # pass $sp (remove arg slots)
+    addiu    $a1, $sp, ARG_SLOT_SIZE+16   # pass $sp (remove arg slots and temp storage)
     jal      artInstrumentationMethodExitFromCode  # (Thread*, SP, gpr_res, fpr_res)
     move     $a0, rSELF     # pass Thread::Current
-    move     $t0, $v0       # set aside returned link register
+    move     $t9, $v0       # set aside returned link register
     move     $ra, $v1       # set link register for deoptimization
-    addiu    $sp, $sp, ARG_SLOT_SIZE+FRAME_SIZE_REFS_ONLY_CALLEE_SAVE  # args slot + refs_only callee save frame
-    lw       $v0, 12($sp)   # restore return values
-    lw       $v1, 8($sp)
-    l.d      $f0, 0($sp)
-    jalr     $zero, $t0     # return
-    addiu    $sp, $sp, 16   # remove temp storage from stack
-    .cfi_adjust_cfa_offset -16
+    lw       $v0, ARG_SLOT_SIZE+12($sp)   # restore return values
+    lw       $v1, ARG_SLOT_SIZE+8($sp)
+    l.d      $f0, ARG_SLOT_SIZE($sp)
+    jalr     $zero, $t9     # return
+    addiu    $sp, $sp, ARG_SLOT_SIZE+FRAME_SIZE_REFS_ONLY_CALLEE_SAVE+16  # restore stack 
+    .cfi_adjust_cfa_offset -(ARG_SLOT_SIZE+FRAME_SIZE_REFS_ONLY_CALLEE_SAVE+16)
 END art_quick_instrumentation_exit
 
     /*

@@ -22,7 +22,6 @@
 
 #include "debug_stack.h"
 #include "macros.h"
-#include "mem_map.h"
 #include "mutex.h"
 #include "utils.h"
 
@@ -33,6 +32,7 @@ class ArenaPool;
 class ArenaAllocator;
 class ArenaStack;
 class ScopedArenaAllocator;
+class MemMap;
 class MemStats;
 
 template <typename T>
@@ -165,8 +165,8 @@ class MallocArena FINAL : public Arena {
 
 class MemMapArena FINAL : public Arena {
  public:
-  explicit MemMapArena(size_t size = Arena::kDefaultSize);
-  virtual ~MemMapArena() { }
+  explicit MemMapArena(size_t size, bool low_4gb);
+  virtual ~MemMapArena();
   void Release() OVERRIDE;
 
  private:
@@ -175,7 +175,7 @@ class MemMapArena FINAL : public Arena {
 
 class ArenaPool {
  public:
-  explicit ArenaPool(bool use_malloc = true);
+  explicit ArenaPool(bool use_malloc = true, bool low_4gb = false);
   ~ArenaPool();
   Arena* AllocArena(size_t size) LOCKS_EXCLUDED(lock_);
   void FreeArenaChain(Arena* first) LOCKS_EXCLUDED(lock_);
@@ -188,6 +188,7 @@ class ArenaPool {
   const bool use_malloc_;
   mutable Mutex lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
   Arena* free_arenas_ GUARDED_BY(lock_);
+  const bool low_4gb_;
   DISALLOW_COPY_AND_ASSIGN(ArenaPool);
 };
 
@@ -227,6 +228,9 @@ class ArenaAllocator : private DebugStackRefCounter, private ArenaAllocatorStats
   void ObtainNewArenaForAllocation(size_t allocation_size);
   size_t BytesAllocated() const;
   MemStats GetMemStats() const;
+  // The BytesUsed method sums up bytes allocated from arenas in arena_head_ and nodes.
+  // TODO: Change BytesAllocated to this behavior?
+  size_t BytesUsed() const;
 
  private:
   static constexpr size_t kAlignment = 8;

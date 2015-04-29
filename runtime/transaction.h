@@ -39,13 +39,16 @@ class InternTable;
 
 class Transaction FINAL {
  public:
+  static constexpr const char* kAbortExceptionDescriptor = "dalvik.system.TransactionAbortError";
+  static constexpr const char* kAbortExceptionSignature = "Ldalvik/system/TransactionAbortError;";
+
   Transaction();
   ~Transaction();
 
   void Abort(const std::string& abort_message)
       LOCKS_EXCLUDED(log_lock_)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void ThrowInternalError(Thread* self, bool rethrow)
+  void ThrowAbortError(Thread* self, bool rethrow)
       LOCKS_EXCLUDED(log_lock_)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   bool IsAborted() LOCKS_EXCLUDED(log_lock_);
@@ -97,7 +100,7 @@ class Transaction FINAL {
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
       LOCKS_EXCLUDED(log_lock_);
 
-  void VisitRoots(RootCallback* callback, void* arg)
+  void VisitRoots(RootVisitor* visitor)
       LOCKS_EXCLUDED(log_lock_)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
@@ -113,7 +116,7 @@ class Transaction FINAL {
     void LogReferenceValue(MemberOffset offset, mirror::Object* obj, bool is_volatile);
 
     void Undo(mirror::Object* obj) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-    void VisitRoots(RootCallback* callback, void* arg);
+    void VisitRoots(RootVisitor* visitor) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
     size_t Size() const {
       return field_values_.size();
@@ -181,7 +184,7 @@ class Transaction FINAL {
     void Undo(InternTable* intern_table)
         SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
         EXCLUSIVE_LOCKS_REQUIRED(Locks::intern_table_lock_);
-    void VisitRoots(RootCallback* callback, void* arg);
+    void VisitRoots(RootVisitor* visitor) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
    private:
     mirror::String* str_;
@@ -204,13 +207,13 @@ class Transaction FINAL {
       EXCLUSIVE_LOCKS_REQUIRED(log_lock_)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  void VisitObjectLogs(RootCallback* callback, void* arg)
+  void VisitObjectLogs(RootVisitor* visitor)
       EXCLUSIVE_LOCKS_REQUIRED(log_lock_)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void VisitArrayLogs(RootCallback* callback, void* arg)
+  void VisitArrayLogs(RootVisitor* visitor)
       EXCLUSIVE_LOCKS_REQUIRED(log_lock_)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void VisitStringLogs(RootCallback* callback, void* arg)
+  void VisitStringLogs(RootVisitor* visitor)
       EXCLUSIVE_LOCKS_REQUIRED(log_lock_)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 

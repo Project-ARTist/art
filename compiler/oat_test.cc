@@ -17,11 +17,14 @@
 #include "arch/instruction_set_features.h"
 #include "class_linker.h"
 #include "common_compiler_test.h"
+#include "compiled_method.h"
 #include "compiler.h"
 #include "dex/pass_manager.h"
 #include "dex/quick/dex_file_to_method_inliner_map.h"
 #include "dex/quick_compiler_callbacks.h"
 #include "dex/verification_results.h"
+#include "driver/compiler_driver.h"
+#include "driver/compiler_options.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "mirror/art_method-inl.h"
 #include "mirror/class-inl.h"
@@ -85,15 +88,13 @@ TEST_F(OatTest, WriteRead) {
   compiler_options_.reset(new CompilerOptions);
   verification_results_.reset(new VerificationResults(compiler_options_.get()));
   method_inliner_map_.reset(new DexFileToMethodInlinerMap);
-  callbacks_.reset(new QuickCompilerCallbacks(verification_results_.get(),
-                                              method_inliner_map_.get()));
   timer_.reset(new CumulativeLogger("Compilation times"));
   compiler_driver_.reset(new CompilerDriver(compiler_options_.get(),
                                             verification_results_.get(),
                                             method_inliner_map_.get(),
                                             compiler_kind, insn_set,
-                                            insn_features.get(), false, nullptr, nullptr, 2, true,
-                                            true, "", timer_.get(), -1, ""));
+                                            insn_features.get(), false, nullptr, nullptr, nullptr,
+                                            2, true, true, "", timer_.get(), -1, ""));
   jobject class_loader = nullptr;
   if (kCompile) {
     TimingLogger timings2("OatTest::WriteRead", false, false);
@@ -122,7 +123,7 @@ TEST_F(OatTest, WriteRead) {
     compiler_driver_->CompileAll(class_loader, class_linker->GetBootClassPath(), &timings);
   }
   std::unique_ptr<OatFile> oat_file(OatFile::Open(tmp.GetFilename(), tmp.GetFilename(), nullptr,
-                                                  nullptr, false, &error_msg));
+                                                  nullptr, false, nullptr, &error_msg));
   ASSERT_TRUE(oat_file.get() != nullptr) << error_msg;
   const OatHeader& oat_header = oat_file->GetOatHeader();
   ASSERT_TRUE(oat_header.IsValid());
@@ -175,7 +176,7 @@ TEST_F(OatTest, OatHeaderSizeCheck) {
   EXPECT_EQ(72U, sizeof(OatHeader));
   EXPECT_EQ(4U, sizeof(OatMethodOffsets));
   EXPECT_EQ(28U, sizeof(OatQuickMethodHeader));
-  EXPECT_EQ(91 * GetInstructionSetPointerSize(kRuntimeISA), sizeof(QuickEntryPoints));
+  EXPECT_EQ(111 * GetInstructionSetPointerSize(kRuntimeISA), sizeof(QuickEntryPoints));
 }
 
 TEST_F(OatTest, OatHeaderIsValid) {

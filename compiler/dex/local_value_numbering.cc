@@ -166,9 +166,9 @@ class LocalValueNumbering::AliasingArrayVersions {
     return gvn->LookupValue(kAliasingArrayOp, type, location, memory_version);
   }
 
-  static uint16_t LookupMergeValue(GlobalValueNumbering* gvn ATTRIBUTE_UNUSED,
+  static uint16_t LookupMergeValue(GlobalValueNumbering* gvn,
                                    const LocalValueNumbering* lvn,
-                                   uint16_t type ATTRIBUTE_UNUSED, uint16_t location) {
+                                   uint16_t type, uint16_t location) {
     // If the location is non-aliasing in lvn, use the non-aliasing value.
     uint16_t array = gvn->GetArrayLocationBase(location);
     if (lvn->IsNonAliasingArray(array, type)) {
@@ -182,8 +182,6 @@ class LocalValueNumbering::AliasingArrayVersions {
   static bool HasNewBaseVersion(GlobalValueNumbering* gvn ATTRIBUTE_UNUSED,
                                 const LocalValueNumbering* lvn,
                                 uint16_t type ATTRIBUTE_UNUSED) {
-    UNUSED(gvn);
-    UNUSED(type);
     return lvn->global_memory_version_ == lvn->merge_new_memory_version_;
   }
 
@@ -1154,28 +1152,20 @@ uint16_t LocalValueNumbering::HandlePhi(MIR* mir) {
     // Running LVN without a full GVN?
     return kNoValue;
   }
-  int32_t* uses = mir->ssa_rep->uses;
-  // Try to find out if this is merging wide regs.
-  if (mir->ssa_rep->defs[0] != 0 &&
-      sreg_wide_value_map_.count(mir->ssa_rep->defs[0] - 1) != 0u) {
+  // Determine if this Phi is merging wide regs.
+  RegLocation raw_dest = gvn_->GetMirGraph()->GetRawDest(mir);
+  if (raw_dest.high_word) {
     // This is the high part of a wide reg. Ignore the Phi.
     return kNoValue;
   }
-  BasicBlockId* incoming = mir->meta.phi_incoming;
-  int16_t pos = 0;
-  // Check if we're merging a wide value based on the first merged LVN.
-  const LocalValueNumbering* first_lvn = gvn_->merge_lvns_[0];
-  DCHECK_LT(pos, mir->ssa_rep->num_uses);
-  while (incoming[pos] != first_lvn->Id()) {
-    ++pos;
-    DCHECK_LT(pos, mir->ssa_rep->num_uses);
-  }
-  int first_s_reg = uses[pos];
-  bool wide = (first_lvn->sreg_wide_value_map_.count(first_s_reg) != 0u);
+  bool wide = raw_dest.wide;
   // Iterate over *merge_lvns_ and skip incoming sregs for BBs without associated LVN.
   merge_names_.clear();
   uint16_t value_name = kNoValue;
   bool same_values = true;
+  BasicBlockId* incoming = mir->meta.phi_incoming;
+  int32_t* uses = mir->ssa_rep->uses;
+  int16_t pos = 0;
   for (const LocalValueNumbering* lvn : gvn_->merge_lvns_) {
     DCHECK_LT(pos, mir->ssa_rep->num_uses);
     while (incoming[pos] != lvn->Id()) {
@@ -1520,7 +1510,6 @@ uint16_t LocalValueNumbering::GetValueNumber(MIR* mir) {
     case Instruction::GOTO:
     case Instruction::GOTO_16:
     case Instruction::GOTO_32:
-    case Instruction::CHECK_CAST:
     case Instruction::THROW:
     case Instruction::FILL_ARRAY_DATA:
     case Instruction::PACKED_SWITCH:
@@ -1612,9 +1601,32 @@ uint16_t LocalValueNumbering::GetValueNumber(MIR* mir) {
       HandleInvokeOrClInitOrAcquireOp(mir);
       break;
 
+    case Instruction::INSTANCE_OF: {
+        uint16_t operand = GetOperandValue(mir->ssa_rep->uses[0]);
+        uint16_t type = mir->dalvikInsn.vC;
+        res = gvn_->LookupValue(Instruction::INSTANCE_OF, operand, type, kNoValue);
+        SetOperandValue(mir->ssa_rep->defs[0], res);
+      }
+      break;
+    case Instruction::CHECK_CAST:
+      if (gvn_->CanModify()) {
+        // Check if there was an instance-of operation on the same value and if we are
+        // in a block where its result is true. If so, we can eliminate the check-cast.
+        uint16_t operand = GetOperandValue(mir->ssa_rep->uses[0]);
+        uint16_t type = mir->dalvikInsn.vB;
+        uint16_t cond = gvn_->FindValue(Instruction::INSTANCE_OF, operand, type, kNoValue);
+        if (cond != kNoValue && gvn_->IsTrueInBlock(cond, Id())) {
+          if (gvn_->GetCompilationUnit()->verbose) {
+            LOG(INFO) << "Removing check-cast at 0x" << std::hex << mir->offset;
+          }
+          // Don't use kMirOpNop. Keep the check-cast as it defines the type of the register.
+          mir->optimization_flags |= MIR_IGNORE_CHECK_CAST;
+        }
+      }
+      break;
+
     case Instruction::MOVE_RESULT:
     case Instruction::MOVE_RESULT_OBJECT:
-    case Instruction::INSTANCE_OF:
       // 1 result, treat as unique each time, use result s_reg - will be unique.
       res = GetOperandValue(mir->ssa_rep->defs[0]);
       SetOperandValue(mir->ssa_rep->defs[0], res);
@@ -1972,6 +1984,9 @@ uint16_t LocalValueNumbering::GetEndingVregValueNumberImpl(int v_reg, bool wide)
   DCHECK(bb != nullptr);
   int s_reg = bb->data_flow_info->vreg_to_ssa_map_exit[v_reg];
   if (s_reg == INVALID_SREG) {
+    return kNoValue;
+  }
+  if (gvn_->GetMirGraph()->GetRegLocation(s_reg).wide != wide) {
     return kNoValue;
   }
   if (wide) {

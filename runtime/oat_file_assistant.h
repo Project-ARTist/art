@@ -43,30 +43,52 @@ namespace art {
 // be restored and tested, or removed.
 class OatFileAssistant {
  public:
-  enum Status {
-    // kOutOfDate - An oat file is said to be out of date if the file does not
-    // exist, or is out of date with respect to the dex file or boot image.
-    kOutOfDate,
+  enum DexOptNeeded {
+    // kNoDexOptNeeded - The code for this dex location is up to date and can
+    // be used as is.
+    // Matches Java: dalvik.system.DexFile.NO_DEXOPT_NEEDED = 0
+    kNoDexOptNeeded = 0,
 
-    // kNeedsRelocation - An oat file is said to need relocation if the code
-    // is up to date, but not yet properly relocated for address space layout
-    // randomization (ASLR). In this case, the oat file is neither "out of
-    // date" nor "up to date".
-    kNeedsRelocation,
+    // kDex2OatNeeded - In order to make the code for this dex location up to
+    // date, dex2oat must be run on the dex file.
+    // Matches Java: dalvik.system.DexFile.DEX2OAT_NEEDED = 1
+    kDex2OatNeeded = 1,
 
-    // kUpToDate - An oat file is said to be up to date if it is not out of
+    // kPatchOatNeeded - In order to make the code for this dex location up to
+    // date, patchoat must be run on the odex file.
+    // Matches Java: dalvik.system.DexFile.PATCHOAT_NEEDED = 2
+    kPatchOatNeeded = 2,
+
+    // kSelfPatchOatNeeded - In order to make the code for this dex location
+    // up to date, patchoat must be run on the oat file.
+    // Matches Java: dalvik.system.DexFile.SELF_PATCHOAT_NEEDED = 3
+    kSelfPatchOatNeeded = 3,
+  };
+
+  enum OatStatus {
+    // kOatOutOfDate - An oat file is said to be out of date if the file does
+    // not exist, or is out of date with respect to the dex file or boot
+    // image.
+    kOatOutOfDate,
+
+    // kOatNeedsRelocation - An oat file is said to need relocation if the
+    // code is up to date, but not yet properly relocated for address space
+    // layout randomization (ASLR). In this case, the oat file is neither
+    // "out of date" nor "up to date".
+    kOatNeedsRelocation,
+
+    // kOatUpToDate - An oat file is said to be up to date if it is not out of
     // date and has been properly relocated for the purposes of ASLR.
-    kUpToDate,
+    kOatUpToDate,
   };
 
   // Constructs an OatFileAssistant object to assist the oat file
   // corresponding to the given dex location with the target instruction set.
   //
-  // The dex_location must not be NULL and should remain available and
+  // The dex_location must not be null and should remain available and
   // unchanged for the duration of the lifetime of the OatFileAssistant object.
   // Typically the dex_location is the absolute path to the original,
   // un-optimized dex file.
-  //
   //
   // Note: Currently the dex_location must have an extension.
   // TODO: Relax this restriction?
@@ -121,19 +143,20 @@ class OatFileAssistant {
   // file.
   bool Lock(std::string* error_msg);
 
-  // Returns the overall compilation status for the given dex location.
-  Status GetStatus();
+  // Return what action needs to be taken to produce up-to-date code for this
+  // dex location.
+  DexOptNeeded GetDexOptNeeded();
 
   // Attempts to generate or relocate the oat file as needed to make it up to
   // date.
   // Returns true on success.
   //
   // If there is a failure, the value of error_msg will be set to a string
-  // describing why there was failure. error_msg must not be nullptr.
+  // describing why there was failure. error_msg must not be null.
   bool MakeUpToDate(std::string* error_msg);
 
   // Returns an oat file that can be used for loading dex files.
-  // Returns nullptr if no suitable oat file was found.
+  // Returns null if no suitable oat file was found.
   //
   // After this call, no other methods of the OatFileAssistant should be
   // called, because access to the loaded oat file has been taken away from
@@ -151,11 +174,12 @@ class OatFileAssistant {
   static std::vector<std::unique_ptr<const DexFile>> LoadDexFiles(
       const OatFile& oat_file, const char* dex_location);
 
-  // If the dex file has been pre-compiled on the host, the compiled oat file
-  // will have the extension .odex, and is referred to as the odex file.
-  // It is called odex for legacy reasons; the file is really an oat file. The
-  // odex file will typically have a patch delta of 0 and need to be relocated
-  // before use for the purposes of ASLR.
+  // If the dex file has been installed with a compiled oat file alongside
+  // it, the compiled oat file will have the extension .odex, and is referred
+  // to as the odex file. It is called odex for legacy reasons; the file is
+  // really an oat file. The odex file will often, but not always, have a
+  // patch delta of 0 and need to be relocated before use for the purposes of
+  // ASLR. The odex file is treated as if it were read-only.
   // These methods return the location and status of the odex file for the dex
   // location.
   // Notes:
@@ -163,7 +187,7 @@ class OatFileAssistant {
   //    determined.
   const std::string* OdexFileName();
   bool OdexFileExists();
-  Status OdexFileStatus();
+  OatStatus OdexFileStatus();
   bool OdexFileIsOutOfDate();
   bool OdexFileNeedsRelocation();
   bool OdexFileIsUpToDate();
@@ -175,20 +199,18 @@ class OatFileAssistant {
   // the dex location.
   //
   // Notes:
-  //  * To get the overall status of the compiled code for this dex_location,
-  //    use the GetStatus() method, not the OatFileStatus() method.
   //  * OatFileName may return null if the oat file name could not be
   //    determined.
   const std::string* OatFileName();
   bool OatFileExists();
-  Status OatFileStatus();
+  OatStatus OatFileStatus();
   bool OatFileIsOutOfDate();
   bool OatFileNeedsRelocation();
   bool OatFileIsUpToDate();
 
   // These methods return the status for a given opened oat file with respect
   // to the dex location.
-  Status GivenOatFileStatus(const OatFile& file);
+  OatStatus GivenOatFileStatus(const OatFile& file);
   bool GivenOatFileIsOutOfDate(const OatFile& file);
   bool GivenOatFileNeedsRelocation(const OatFile& file);
   bool GivenOatFileIsUpToDate(const OatFile& file);
@@ -215,15 +237,15 @@ class OatFileAssistant {
   // Copy the current profile to the old profile location.
   void CopyProfileFile();
 
-  // Generates the oat file by relocation from the odex file.
+  // Generates the oat file by relocation from the named input file.
   // This does not check the current status before attempting to relocate the
   // oat file.
   // Returns true on success.
   // This will fail if dex2oat is not enabled in the current runtime.
   //
   // If there is a failure, the value of error_msg will be set to a string
-  // describing why there was failure. error_msg must not be nullptr.
-  bool RelocateOatFile(std::string* error_msg);
+  // describing why there was failure. error_msg must not be null.
+  bool RelocateOatFile(const std::string* input_file, std::string* error_msg);
 
   // Generate the oat file from the dex file.
   // This does not check the current status before attempting to generate the
@@ -232,7 +254,7 @@ class OatFileAssistant {
   // This will fail if dex2oat is not enabled in the current runtime.
   //
   // If there is a failure, the value of error_msg will be set to a string
-  // describing why there was failure. error_msg must not be nullptr.
+  // describing why there was failure. error_msg must not be null.
   bool GenerateOatFile(std::string* error_msg);
 
   // Executes dex2oat using the current runtime configuration overridden with
@@ -241,7 +263,7 @@ class OatFileAssistant {
   // Returns true on success.
   //
   // If there is a failure, the value of error_msg will be set to a string
-  // describing why there was failure. error_msg must not be nullptr.
+  // describing why there was failure. error_msg must not be null.
   //
   // TODO: The OatFileAssistant probably isn't the right place to have this
   // function.
@@ -288,12 +310,12 @@ class OatFileAssistant {
 
   // Gets the dex checksum required for an up-to-date oat file.
   // Returns dex_checksum if a required checksum was located. Returns
-  // nullptr if the required checksum was not found.
+  // null if the required checksum was not found.
   // The caller shouldn't clean up or free the returned pointer.
   const uint32_t* GetRequiredDexChecksum();
 
   // Returns the loaded odex file.
-  // Loads the file if needed. Returns nullptr if the file failed to load.
+  // Loads the file if needed. Returns null if the file failed to load.
   // The caller shouldn't clean up or free the returned pointer.
   const OatFile* GetOdexFile();
 
@@ -302,7 +324,7 @@ class OatFileAssistant {
   void ClearOdexFileCache();
 
   // Returns the loaded oat file.
-  // Loads the file if needed. Returns nullptr if the file failed to load.
+  // Loads the file if needed. Returns null if the file failed to load.
   // The caller shouldn't clean up or free the returned pointer.
   const OatFile* GetOatFile();
 
@@ -311,19 +333,19 @@ class OatFileAssistant {
   void ClearOatFileCache();
 
   // Returns the loaded image info.
-  // Loads the image info if needed. Returns nullptr if the image info failed
+  // Loads the image info if needed. Returns null if the image info failed
   // to load.
   // The caller shouldn't clean up or free the returned pointer.
   const ImageInfo* GetImageInfo();
 
   // Returns the loaded profile.
-  // Loads the profile if needed. Returns nullptr if the profile failed
+  // Loads the profile if needed. Returns null if the profile failed
   // to load.
   // The caller shouldn't clean up or free the returned pointer.
   ProfileFile* GetProfile();
 
   // Returns the loaded old profile.
-  // Loads the old profile if needed. Returns nullptr if the old profile
+  // Loads the old profile if needed. Returns null if the old profile
   // failed to load.
   // The caller shouldn't clean up or free the returned pointer.
   ProfileFile* GetOldProfile();
@@ -335,7 +357,7 @@ class OatFileAssistant {
   ScopedFlock flock_;
 
   // In a properly constructed OatFileAssistant object, dex_location_ should
-  // never be nullptr.
+  // never be null.
   const char* dex_location_ = nullptr;
 
   // In a properly constructed OatFileAssistant object, isa_ should be either
@@ -343,7 +365,7 @@ class OatFileAssistant {
   const InstructionSet isa_ = kNone;
 
   // The package name, used solely to find the profile file.
-  // This may be nullptr in a properly constructed object. In this case,
+  // This may be null in a properly constructed object. In this case,
   // profile_load_attempted_ and old_profile_load_attempted_ will be true, and
   // profile_load_succeeded_ and old_profile_load_succeeded_ will be false.
   const char* package_name_ = nullptr;

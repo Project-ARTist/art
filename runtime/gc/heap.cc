@@ -23,6 +23,7 @@
 #include <memory>
 #include <vector>
 
+#include "art_field-inl.h"
 #include "base/allocator.h"
 #include "base/dumpable.h"
 #include "base/histogram-inl.h"
@@ -58,7 +59,6 @@
 #include "heap-inl.h"
 #include "image.h"
 #include "intern_table.h"
-#include "mirror/art_field-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object.h"
 #include "mirror/object-inl.h"
@@ -195,7 +195,17 @@ Heap::Heap(size_t initial_size, size_t growth_limit, size_t min_free, size_t max
       last_time_homogeneous_space_compaction_by_oom_(NanoTime()),
       pending_collector_transition_(nullptr),
       pending_heap_trim_(nullptr),
-      use_homogeneous_space_compaction_for_oom_(use_homogeneous_space_compaction_for_oom) {
+      use_homogeneous_space_compaction_for_oom_(use_homogeneous_space_compaction_for_oom),
+      running_collection_is_blocking_(false),
+      blocking_gc_count_(0U),
+      blocking_gc_time_(0U),
+      last_update_time_gc_count_rate_histograms_(  // Round down by the window duration.
+          (NanoTime() / kGcCountRateHistogramWindowDuration) * kGcCountRateHistogramWindowDuration),
+      gc_count_last_window_(0U),
+      blocking_gc_count_last_window_(0U),
+      gc_count_rate_histogram_("gc count rate histogram", 1U, kGcCountRateMaxBucketCount),
+      blocking_gc_count_rate_histogram_("blocking gc count rate histogram", 1U,
+                                        kGcCountRateMaxBucketCount) {
   if (VLOG_IS_ON(heap) || VLOG_IS_ON(startup)) {
     LOG(INFO) << "Heap() entering";
   }
@@ -233,7 +243,7 @@ Heap::Heap(size_t initial_size, size_t growth_limit, size_t min_free, size_t max
       CHECK_GT(oat_file_end_addr, image_space->End());
       requested_alloc_space_begin = AlignUp(oat_file_end_addr, kPageSize);
     } else {
-      LOG(WARNING) << "Could not create image space with image file '" << image_file_name << "'. "
+      LOG(ERROR) << "Could not create image space with image file '" << image_file_name << "'. "
                    << "Attempting to fall back to imageless running. Error was: " << error_msg;
     }
   }
@@ -291,10 +301,18 @@ Heap::Heap(size_t initial_size, size_t growth_limit, size_t min_free, size_t max
     // Try to reserve virtual memory at a lower address if we have a separate non moving space.
     request_begin = reinterpret_cast<uint8_t*>(300 * MB);
   }
+  // Attempt to create 2 mem maps at or after the requested begin.
   if (foreground_collector_type_ != kCollectorTypeCC) {
-    // Attempt to create 2 mem maps at or after the requested begin.
-    main_mem_map_1.reset(MapAnonymousPreferredAddress(kMemMapSpaceName[0], request_begin, capacity_,
-                                                      &error_str));
+    if (separate_non_moving_space) {
+      main_mem_map_1.reset(MapAnonymousPreferredAddress(kMemMapSpaceName[0], request_begin,
+                                                        capacity_, &error_str));
+    } else {
+      // If no separate non-moving space, the main space must come
+      // right after the image space to avoid a gap.
+      main_mem_map_1.reset(MemMap::MapAnonymous(kMemMapSpaceName[0], request_begin, capacity_,
+                                                PROT_READ | PROT_WRITE, true, false,
+                                                &error_str));
+    }
     CHECK(main_mem_map_1.get() != nullptr) << error_str;
   }
   if (support_homogeneous_space_compaction ||
@@ -394,7 +412,7 @@ Heap::Heap(size_t initial_size, size_t growth_limit, size_t min_free, size_t max
   }
   // Allocate the card table.
   card_table_.reset(accounting::CardTable::Create(heap_begin, heap_capacity));
-  CHECK(card_table_.get() != NULL) << "Failed to create card table";
+  CHECK(card_table_.get() != nullptr) << "Failed to create card table";
 
   if (foreground_collector_type_ == kCollectorTypeCC && kUseTableLookupReadBarrier) {
     rb_table_.reset(new accounting::ReadBarrierTable());
@@ -474,7 +492,7 @@ Heap::Heap(size_t initial_size, size_t growth_limit, size_t min_free, size_t max
                                       non_moving_space_->GetMemMap());
     if (!no_gap) {
       MemMap::DumpMaps(LOG(ERROR));
-      LOG(FATAL) << "There's a gap between the image space and the main space";
+      LOG(FATAL) << "There's a gap between the image space and the non-moving space";
     }
   }
   if (running_on_valgrind_) {
@@ -496,7 +514,6 @@ MemMap* Heap::MapAnonymousPreferredAddress(const char* name, uint8_t* request_be
     // Retry a  second time with no specified request begin.
     request_begin = nullptr;
   }
-  return nullptr;
 }
 
 bool Heap::MayUseCollector(CollectorType type) const {
@@ -919,7 +936,6 @@ void Heap::DumpGcPerformanceInfo(std::ostream& os) {
     total_duration += collector->GetCumulativeTimings().GetTotalNs();
     total_paused_time += collector->GetTotalPausedTimeNs();
     collector->DumpPerformanceInfo(os);
-    collector->ResetMeasurements();
   }
   uint64_t allocation_time =
       static_cast<uint64_t>(total_allocation_time_.LoadRelaxed()) * kTimeAdjust;
@@ -933,8 +949,8 @@ void Heap::DumpGcPerformanceInfo(std::ostream& os) {
   }
   uint64_t total_objects_allocated = GetObjectsAllocatedEver();
   os << "Total number of allocations " << total_objects_allocated << "\n";
-  uint64_t total_bytes_allocated = GetBytesAllocatedEver();
-  os << "Total bytes allocated " << PrettySize(total_bytes_allocated) << "\n";
+  os << "Total bytes allocated " << PrettySize(GetBytesAllocatedEver()) << "\n";
+  os << "Total bytes freed " << PrettySize(GetBytesFreedEver()) << "\n";
   os << "Free memory " << PrettySize(GetFreeMemory()) << "\n";
   os << "Free memory until GC " << PrettySize(GetFreeMemoryUntilGC()) << "\n";
   os << "Free memory until OOME " << PrettySize(GetFreeMemoryUntilOOME()) << "\n";
@@ -949,8 +965,66 @@ void Heap::DumpGcPerformanceInfo(std::ostream& os) {
     os << "Zygote space size " << PrettySize(zygote_space_->Size()) << "\n";
   }
   os << "Total mutator paused time: " << PrettyDuration(total_paused_time) << "\n";
-  os << "Total time waiting for GC to complete: " << PrettyDuration(total_wait_time_);
+  os << "Total time waiting for GC to complete: " << PrettyDuration(total_wait_time_) << "\n";
+  os << "Total GC count: " << GetGcCount() << "\n";
+  os << "Total GC time: " << PrettyDuration(GetGcTime()) << "\n";
+  os << "Total blocking GC count: " << GetBlockingGcCount() << "\n";
+  os << "Total blocking GC time: " << PrettyDuration(GetBlockingGcTime()) << "\n";
+
+  {
+    MutexLock mu(Thread::Current(), *gc_complete_lock_);
+    if (gc_count_rate_histogram_.SampleSize() > 0U) {
+      os << "Histogram of GC count per " << NsToMs(kGcCountRateHistogramWindowDuration) << " ms: ";
+      gc_count_rate_histogram_.DumpBins(os);
+      os << "\n";
+    }
+    if (blocking_gc_count_rate_histogram_.SampleSize() > 0U) {
+      os << "Histogram of blocking GC count per "
+         << NsToMs(kGcCountRateHistogramWindowDuration) << " ms: ";
+      blocking_gc_count_rate_histogram_.DumpBins(os);
+      os << "\n";
+    }
+  }
+
   BaseMutex::DumpAll(os);
+}
+
+uint64_t Heap::GetGcCount() const {
+  uint64_t gc_count = 0U;
+  for (auto& collector : garbage_collectors_) {
+    gc_count += collector->GetCumulativeTimings().GetIterations();
+  }
+  return gc_count;
+}
+
+uint64_t Heap::GetGcTime() const {
+  uint64_t gc_time = 0U;
+  for (auto& collector : garbage_collectors_) {
+    gc_time += collector->GetCumulativeTimings().GetTotalNs();
+  }
+  return gc_time;
+}
+
+uint64_t Heap::GetBlockingGcCount() const {
+  return blocking_gc_count_;
+}
+
+uint64_t Heap::GetBlockingGcTime() const {
+  return blocking_gc_time_;
+}
+
+void Heap::DumpGcCountRateHistogram(std::ostream& os) const {
+  MutexLock mu(Thread::Current(), *gc_complete_lock_);
+  if (gc_count_rate_histogram_.SampleSize() > 0U) {
+    gc_count_rate_histogram_.DumpBins(os);
+  }
+}
+
+void Heap::DumpBlockingGcCountRateHistogram(std::ostream& os) const {
+  MutexLock mu(Thread::Current(), *gc_complete_lock_);
+  if (blocking_gc_count_rate_histogram_.SampleSize() > 0U) {
+    blocking_gc_count_rate_histogram_.DumpBins(os);
+  }
 }
 
 Heap::~Heap() {
@@ -978,7 +1052,7 @@ space::ContinuousSpace* Heap::FindContinuousSpaceFromObject(const mirror::Object
   if (!fail_ok) {
     LOG(FATAL) << "object " << reinterpret_cast<const void*>(obj) << " not inside any spaces!";
   }
-  return NULL;
+  return nullptr;
 }
 
 space::DiscontinuousSpace* Heap::FindDiscontinuousSpaceFromObject(const mirror::Object* obj,
@@ -991,12 +1065,12 @@ space::DiscontinuousSpace* Heap::FindDiscontinuousSpaceFromObject(const mirror::
   if (!fail_ok) {
     LOG(FATAL) << "object " << reinterpret_cast<const void*>(obj) << " not inside any spaces!";
   }
-  return NULL;
+  return nullptr;
 }
 
 space::Space* Heap::FindSpaceFromObject(const mirror::Object* obj, bool fail_ok) const {
   space::Space* result = FindContinuousSpaceFromObject(obj, true);
-  if (result != NULL) {
+  if (result != nullptr) {
     return result;
   }
   return FindDiscontinuousSpaceFromObject(obj, fail_ok);
@@ -1008,7 +1082,7 @@ space::ImageSpace* Heap::GetImageSpace() const {
       return space->AsImageSpace();
     }
   }
-  return NULL;
+  return nullptr;
 }
 
 void Heap::ThrowOutOfMemoryError(Thread* self, size_t byte_count, AllocatorType allocator_type) {
@@ -2048,12 +2122,15 @@ void Heap::UnBindBitmaps() {
 }
 
 void Heap::PreZygoteFork() {
-  CollectGarbageInternal(collector::kGcTypeFull, kGcCauseBackground, false);
+  if (!HasZygoteSpace()) {
+    // We still want to GC in case there is some unreachable non moving objects that could cause a
+    // suboptimal bin packing when we compact the zygote space.
+    CollectGarbageInternal(collector::kGcTypeFull, kGcCauseBackground, false);
+  }
   Thread* self = Thread::Current();
   MutexLock mu(self, zygote_creation_lock_);
   // Try to see if we have any Zygote spaces.
   if (HasZygoteSpace()) {
-    LOG(WARNING) << __FUNCTION__ << " called when we already have a zygote space.";
     return;
   }
   Runtime::Current()->GetInternTable()->SwapPostZygoteWithPreZygote();
@@ -2118,7 +2195,7 @@ void Heap::PreZygoteFork() {
     // Update the end and write out image.
     non_moving_space_->SetEnd(target_space.End());
     non_moving_space_->SetLimit(target_space.Limit());
-    VLOG(heap) << "Zygote space size " << non_moving_space_->Size() << " bytes";
+    VLOG(heap) << "Create zygote space with size=" << non_moving_space_->Size() << " bytes";
   }
   // Change the collector to the post zygote one.
   ChangeCollector(foreground_collector_type_);
@@ -2127,7 +2204,7 @@ void Heap::PreZygoteFork() {
   // Turn the current alloc space into a zygote space and obtain the new alloc space composed of
   // the remaining available space.
   // Remove the old space before creating the zygote space since creating the zygote space sets
-  // the old alloc space's bitmaps to nullptr.
+  // the old alloc space's bitmaps to null.
   RemoveSpace(old_alloc_space);
   if (collector::SemiSpace::kUseRememberedSet) {
     // Sanity bound check.
@@ -2264,7 +2341,6 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type, GcCaus
     }
     collector_type_running_ = collector_type_;
   }
-
   if (gc_cause == kGcCauseForAlloc && runtime->HasStatsEnabled()) {
     ++runtime->GetStats()->gc_for_alloc_count;
     ++self->GetStats()->gc_for_alloc_count;
@@ -2379,18 +2455,70 @@ void Heap::FinishGC(Thread* self, collector::GcType gc_type) {
   collector_type_running_ = kCollectorTypeNone;
   if (gc_type != collector::kGcTypeNone) {
     last_gc_type_ = gc_type;
+
+    // Update stats.
+    ++gc_count_last_window_;
+    if (running_collection_is_blocking_) {
+      // If the currently running collection was a blocking one,
+      // increment the counters and reset the flag.
+      ++blocking_gc_count_;
+      blocking_gc_time_ += GetCurrentGcIteration()->GetDurationNs();
+      ++blocking_gc_count_last_window_;
+    }
+    // Update the gc count rate histograms if due.
+    UpdateGcCountRateHistograms();
   }
+  // Reset.
+  running_collection_is_blocking_ = false;
   // Wake anyone who may have been waiting for the GC to complete.
   gc_complete_cond_->Broadcast(self);
 }
 
-static void RootMatchesObjectVisitor(mirror::Object** root, void* arg,
-                                     const RootInfo& /*root_info*/) {
-  mirror::Object* obj = reinterpret_cast<mirror::Object*>(arg);
-  if (*root == obj) {
-    LOG(INFO) << "Object " << obj << " is a root";
+void Heap::UpdateGcCountRateHistograms() {
+  // Invariant: if the time since the last update includes more than
+  // one windows, all the GC runs (if > 0) must have happened in first
+  // window because otherwise the update must have already taken place
+  // at an earlier GC run. So, we report the non-first windows with
+  // zero counts to the histograms.
+  DCHECK_EQ(last_update_time_gc_count_rate_histograms_ % kGcCountRateHistogramWindowDuration, 0U);
+  uint64_t now = NanoTime();
+  DCHECK_GE(now, last_update_time_gc_count_rate_histograms_);
+  uint64_t time_since_last_update = now - last_update_time_gc_count_rate_histograms_;
+  uint64_t num_of_windows = time_since_last_update / kGcCountRateHistogramWindowDuration;
+  if (time_since_last_update >= kGcCountRateHistogramWindowDuration) {
+    // Record the first window.
+    gc_count_rate_histogram_.AddValue(gc_count_last_window_ - 1);  // Exclude the current run.
+    blocking_gc_count_rate_histogram_.AddValue(running_collection_is_blocking_ ?
+        blocking_gc_count_last_window_ - 1 : blocking_gc_count_last_window_);
+    // Record the other windows (with zero counts).
+    for (uint64_t i = 0; i < num_of_windows - 1; ++i) {
+      gc_count_rate_histogram_.AddValue(0);
+      blocking_gc_count_rate_histogram_.AddValue(0);
+    }
+    // Update the last update time and reset the counters.
+    last_update_time_gc_count_rate_histograms_ =
+        (now / kGcCountRateHistogramWindowDuration) * kGcCountRateHistogramWindowDuration;
+    gc_count_last_window_ = 1;  // Include the current run.
+    blocking_gc_count_last_window_ = running_collection_is_blocking_ ? 1 : 0;
   }
+  DCHECK_EQ(last_update_time_gc_count_rate_histograms_ % kGcCountRateHistogramWindowDuration, 0U);
 }
+
+class RootMatchesObjectVisitor : public SingleRootVisitor {
+ public:
+  explicit RootMatchesObjectVisitor(const mirror::Object* obj) : obj_(obj) { }
+
+  void VisitRoot(mirror::Object* root, const RootInfo& info)
+      OVERRIDE SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    if (root == obj_) {
+      LOG(INFO) << "Object " << obj_ << " is a root " << info.ToString();
+    }
+  }
+
+ private:
+  const mirror::Object* const obj_;
+};
+
 
 class ScanVisitor {
  public:
@@ -2400,7 +2528,7 @@ class ScanVisitor {
 };
 
 // Verify a reference from an object.
-class VerifyReferenceVisitor {
+class VerifyReferenceVisitor : public SingleRootVisitor {
  public:
   explicit VerifyReferenceVisitor(Heap* heap, Atomic<size_t>* fail_count, bool verify_referent)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_, Locks::heap_bitmap_lock_)
@@ -2427,11 +2555,12 @@ class VerifyReferenceVisitor {
     return heap_->IsLiveObjectLocked(obj, true, false, true);
   }
 
-  static void VerifyRootCallback(mirror::Object** root, void* arg, const RootInfo& root_info)
+  void VisitRoot(mirror::Object* root, const RootInfo& root_info) OVERRIDE
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-    VerifyReferenceVisitor* visitor = reinterpret_cast<VerifyReferenceVisitor*>(arg);
-    if (!visitor->VerifyReference(nullptr, *root, MemberOffset(0))) {
-      LOG(ERROR) << "Root " << *root << " is dead with type " << PrettyTypeOf(*root)
+    if (root == nullptr) {
+      LOG(ERROR) << "Root is null with info " << root_info.GetType();
+    } else if (!VerifyReference(nullptr, root, MemberOffset(0))) {
+      LOG(ERROR) << "Root " << root << " is dead with type " << PrettyTypeOf(root)
           << " thread_id= " << root_info.GetThreadId() << " root_type= " << root_info.GetType();
     }
   }
@@ -2523,12 +2652,11 @@ class VerifyReferenceVisitor {
       }
 
       // Search to see if any of the roots reference our object.
-      void* arg = const_cast<void*>(reinterpret_cast<const void*>(obj));
-      Runtime::Current()->VisitRoots(&RootMatchesObjectVisitor, arg);
-
+      RootMatchesObjectVisitor visitor1(obj);
+      Runtime::Current()->VisitRoots(&visitor1);
       // Search to see if any of the roots reference our reference.
-      arg = const_cast<void*>(reinterpret_cast<const void*>(ref));
-      Runtime::Current()->VisitRoots(&RootMatchesObjectVisitor, arg);
+      RootMatchesObjectVisitor visitor2(ref);
+      Runtime::Current()->VisitRoots(&visitor2);
     }
     return false;
   }
@@ -2558,6 +2686,13 @@ class VerifyObjectVisitor {
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_, Locks::heap_bitmap_lock_) {
     VerifyObjectVisitor* visitor = reinterpret_cast<VerifyObjectVisitor*>(arg);
     visitor->operator()(obj);
+  }
+
+  void VerifyRoots() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
+      LOCKS_EXCLUDED(Locks::heap_bitmap_lock_) {
+    ReaderMutexLock mu(Thread::Current(), *Locks::heap_bitmap_lock_);
+    VerifyReferenceVisitor visitor(heap_, fail_count_, verify_referent_);
+    Runtime::Current()->VisitRoots(&visitor);
   }
 
   size_t GetFailureCount() const {
@@ -2626,7 +2761,7 @@ size_t Heap::VerifyHeapReferences(bool verify_referents) {
   // pointing to dead objects if they are not reachable.
   VisitObjectsPaused(VerifyObjectVisitor::VisitCallback, &visitor);
   // Verify the roots:
-  Runtime::Current()->VisitRoots(VerifyReferenceVisitor::VerifyRootCallback, &visitor);
+  visitor.VerifyRoots();
   if (visitor.GetFailureCount() > 0) {
     // Dump mod-union tables.
     for (const auto& table_pair : mod_union_tables_) {
@@ -2683,12 +2818,12 @@ class VerifyReferenceCardVisitor {
           // Print which field of the object is dead.
           if (!obj->IsObjectArray()) {
             mirror::Class* klass = is_static ? obj->AsClass() : obj->GetClass();
-            CHECK(klass != NULL);
-            mirror::ObjectArray<mirror::ArtField>* fields = is_static ? klass->GetSFields()
-                                                                      : klass->GetIFields();
-            CHECK(fields != NULL);
-            for (int32_t i = 0; i < fields->GetLength(); ++i) {
-              mirror::ArtField* cur = fields->Get(i);
+            CHECK(klass != nullptr);
+            auto* fields = is_static ? klass->GetSFields() : klass->GetIFields();
+            auto num_fields = is_static ? klass->NumStaticFields() : klass->NumInstanceFields();
+            CHECK_EQ(fields == nullptr, num_fields == 0u);
+            for (size_t i = 0; i < num_fields; ++i) {
+              ArtField* cur = &fields[i];
               if (cur->GetOffset().Int32Value() == offset.Int32Value()) {
                 LOG(ERROR) << (is_static ? "Static " : "") << "field in the live stack is "
                           << PrettyField(cur);
@@ -2978,6 +3113,14 @@ collector::GcType Heap::WaitForGcToCompleteLocked(GcCause cause, Thread* self) {
   collector::GcType last_gc_type = collector::kGcTypeNone;
   uint64_t wait_start = NanoTime();
   while (collector_type_running_ != kCollectorTypeNone) {
+    if (self != task_processor_->GetRunningThread()) {
+      // The current thread is about to wait for a currently running
+      // collection to finish. If the waiting thread is not the heap
+      // task daemon thread, the currently running collection is
+      // considered as a blocking GC.
+      running_collection_is_blocking_ = true;
+      VLOG(gc) << "Waiting for a blocking GC " << cause;
+    }
     ATRACE_BEGIN("GC: Wait For Completion");
     // We must wait, change thread state then sleep on gc_complete_cond_;
     gc_complete_cond_->Wait(self);
@@ -2989,6 +3132,13 @@ collector::GcType Heap::WaitForGcToCompleteLocked(GcCause cause, Thread* self) {
   if (wait_time > long_pause_log_threshold_) {
     LOG(INFO) << "WaitForGcToComplete blocked for " << PrettyDuration(wait_time)
         << " for cause " << cause;
+  }
+  if (self != task_processor_->GetRunningThread()) {
+    // The current thread is about to run a collection. If the thread
+    // is not the heap task daemon thread, it's considered as a
+    // blocking GC (i.e., blocking itself).
+    running_collection_is_blocking_ = true;
+    VLOG(gc) << "Starting a blocking GC " << cause;
   }
   return last_gc_type;
 }
@@ -3134,6 +3284,8 @@ void Heap::GrowForUtilization(collector::GarbageCollector* collector_ran,
 }
 
 void Heap::ClampGrowthLimit() {
+  // Use heap bitmap lock to guard against races with BindLiveToMarkBitmap.
+  WriterMutexLock mu(Thread::Current(), *Locks::heap_bitmap_lock_);
   capacity_ = growth_limit_;
   for (const auto& space : continuous_spaces_) {
     if (space->IsMallocSpace()) {

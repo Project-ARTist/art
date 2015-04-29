@@ -20,7 +20,6 @@
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "memory_region.h"
 #include "thread.h"
-#include "utils/dwarf_cfi.h"
 
 namespace art {
 namespace x86 {
@@ -144,6 +143,12 @@ void X86Assembler::movl(const Address& dst, Label* lbl) {
   EmitUint8(0xC7);
   EmitOperand(0, dst);
   EmitLabel(lbl, dst.length_ + 5);
+}
+
+void X86Assembler::bswapl(Register dst) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x0F);
+  EmitUint8(0xC8 + dst);
 }
 
 void X86Assembler::movzxb(Register dst, ByteRegister src) {
@@ -689,6 +694,28 @@ void X86Assembler::ucomisd(XmmRegister a, XmmRegister b) {
 }
 
 
+void X86Assembler::roundsd(XmmRegister dst, XmmRegister src, const Immediate& imm) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0x3A);
+  EmitUint8(0x0B);
+  EmitXmmRegisterOperand(dst, src);
+  EmitUint8(imm.value());
+}
+
+
+void X86Assembler::roundss(XmmRegister dst, XmmRegister src, const Immediate& imm) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0x3A);
+  EmitUint8(0x0A);
+  EmitXmmRegisterOperand(dst, src);
+  EmitUint8(imm.value());
+}
+
+
 void X86Assembler::sqrtsd(XmmRegister dst, XmmRegister src) {
   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
   EmitUint8(0xF2);
@@ -725,6 +752,32 @@ void X86Assembler::xorpd(XmmRegister dst, XmmRegister src) {
 }
 
 
+void X86Assembler::andps(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x0F);
+  EmitUint8(0x54);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::andpd(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0x54);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::orpd(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0x56);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
 void X86Assembler::xorps(XmmRegister dst, const Address& src) {
   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
   EmitUint8(0x0F);
@@ -733,11 +786,27 @@ void X86Assembler::xorps(XmmRegister dst, const Address& src) {
 }
 
 
+void X86Assembler::orps(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x0F);
+  EmitUint8(0x56);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
 void X86Assembler::xorps(XmmRegister dst, XmmRegister src) {
   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
   EmitUint8(0x0F);
   EmitUint8(0x57);
   EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::andps(XmmRegister dst, const Address& src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x0F);
+  EmitUint8(0x54);
+  EmitOperand(dst, src);
 }
 
 
@@ -811,6 +880,13 @@ void X86Assembler::fildl(const Address& src) {
   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
   EmitUint8(0xDF);
   EmitOperand(5, src);
+}
+
+
+void X86Assembler::filds(const Address& src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0xDB);
+  EmitOperand(0, src);
 }
 
 
@@ -1090,6 +1166,13 @@ void X86Assembler::subl(Register reg, const Address& address) {
 }
 
 
+void X86Assembler::subl(const Address& address, Register reg) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x29);
+  EmitOperand(reg, address);
+}
+
+
 void X86Assembler::cdq() {
   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
   EmitUint8(0x99);
@@ -1172,6 +1255,13 @@ void X86Assembler::sbbl(Register dst, const Address& address) {
   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
   EmitUint8(0x1B);
   EmitOperand(dst, address);
+}
+
+
+void X86Assembler::sbbl(const Address& address, Register src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x19);
+  EmitOperand(src, address);
 }
 
 
@@ -1383,6 +1473,15 @@ void X86Assembler::cmpxchgl(const Address& address, Register reg) {
   EmitOperand(reg, address);
 }
 
+
+void X86Assembler::cmpxchg8b(const Address& address) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x0F);
+  EmitUint8(0xC7);
+  EmitOperand(1, address);
+}
+
+
 void X86Assembler::mfence() {
   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
   EmitUint8(0x0F);
@@ -1547,14 +1646,8 @@ void X86Assembler::EmitGenericShift(int reg_or_opcode,
   EmitOperand(reg_or_opcode, Operand(operand));
 }
 
-void X86Assembler::InitializeFrameDescriptionEntry() {
-  WriteFDEHeader(&cfi_info_, false /* is_64bit */);
-}
-
-void X86Assembler::FinalizeFrameDescriptionEntry() {
-  WriteFDEAddressRange(&cfi_info_, buffer_.Size(), false /* is_64bit */);
-  PadCFI(&cfi_info_);
-  WriteCFILength(&cfi_info_, false /* is_64bit */);
+static dwarf::Reg DWARFReg(Register reg) {
+  return dwarf::Reg::X86Core(static_cast<int>(reg));
 }
 
 constexpr size_t kFramePointerSize = 4;
@@ -1562,54 +1655,33 @@ constexpr size_t kFramePointerSize = 4;
 void X86Assembler::BuildFrame(size_t frame_size, ManagedRegister method_reg,
                               const std::vector<ManagedRegister>& spill_regs,
                               const ManagedRegisterEntrySpills& entry_spills) {
-  cfi_cfa_offset_ = kFramePointerSize;  // Only return address on stack
-  cfi_pc_ = buffer_.Size();  // Nothing emitted yet
-  DCHECK_EQ(cfi_pc_, 0U);
-
-  uint32_t reg_offset = 1;
+  DCHECK_EQ(buffer_.Size(), 0U);  // Nothing emitted yet.
+  cfi_.SetCurrentCFAOffset(4);  // Return address on stack.
   CHECK_ALIGNED(frame_size, kStackAlignment);
   int gpr_count = 0;
   for (int i = spill_regs.size() - 1; i >= 0; --i) {
-    x86::X86ManagedRegister spill = spill_regs.at(i).AsX86();
-    DCHECK(spill.IsCpuRegister());
-    pushl(spill.AsCpuRegister());
+    Register spill = spill_regs.at(i).AsX86().AsCpuRegister();
+    pushl(spill);
     gpr_count++;
-
-    // DW_CFA_advance_loc
-    DW_CFA_advance_loc(&cfi_info_, buffer_.Size() - cfi_pc_);
-    cfi_pc_ = buffer_.Size();
-    // DW_CFA_def_cfa_offset
-    cfi_cfa_offset_ += kFramePointerSize;
-    DW_CFA_def_cfa_offset(&cfi_info_, cfi_cfa_offset_);
-    // DW_CFA_offset reg offset
-    reg_offset++;
-    DW_CFA_offset(&cfi_info_, spill_regs.at(i).AsX86().DWARFRegId(), reg_offset);
+    cfi_.AdjustCFAOffset(kFramePointerSize);
+    cfi_.RelOffset(DWARFReg(spill), 0);
   }
 
-  // return address then method on stack
+  // return address then method on stack.
   int32_t adjust = frame_size - (gpr_count * kFramePointerSize) -
                    sizeof(StackReference<mirror::ArtMethod>) /*method*/ -
                    kFramePointerSize /*return address*/;
   addl(ESP, Immediate(-adjust));
-  // DW_CFA_advance_loc
-  DW_CFA_advance_loc(&cfi_info_, buffer_.Size() - cfi_pc_);
-  cfi_pc_ = buffer_.Size();
-  // DW_CFA_def_cfa_offset
-  cfi_cfa_offset_ += adjust;
-  DW_CFA_def_cfa_offset(&cfi_info_, cfi_cfa_offset_);
-
+  cfi_.AdjustCFAOffset(adjust);
   pushl(method_reg.AsX86().AsCpuRegister());
-  // DW_CFA_advance_loc
-  DW_CFA_advance_loc(&cfi_info_, buffer_.Size() - cfi_pc_);
-  cfi_pc_ = buffer_.Size();
-  // DW_CFA_def_cfa_offset
-  cfi_cfa_offset_ += kFramePointerSize;
-  DW_CFA_def_cfa_offset(&cfi_info_, cfi_cfa_offset_);
+  cfi_.AdjustCFAOffset(kFramePointerSize);
+  DCHECK_EQ(static_cast<size_t>(cfi_.GetCurrentCFAOffset()), frame_size);
 
   for (size_t i = 0; i < entry_spills.size(); ++i) {
     ManagedRegisterSpill spill = entry_spills.at(i);
     if (spill.AsX86().IsCpuRegister()) {
-      movl(Address(ESP, frame_size + spill.getSpillOffset()), spill.AsX86().AsCpuRegister());
+      int offset = frame_size + spill.getSpillOffset();
+      movl(Address(ESP, offset), spill.AsX86().AsCpuRegister());
     } else {
       DCHECK(spill.AsX86().IsXmmRegister());
       if (spill.getSize() == 8) {
@@ -1625,30 +1697,33 @@ void X86Assembler::BuildFrame(size_t frame_size, ManagedRegister method_reg,
 void X86Assembler::RemoveFrame(size_t frame_size,
                             const std::vector<ManagedRegister>& spill_regs) {
   CHECK_ALIGNED(frame_size, kStackAlignment);
-  addl(ESP, Immediate(frame_size - (spill_regs.size() * kFramePointerSize) -
-                      sizeof(StackReference<mirror::ArtMethod>)));
+  cfi_.RememberState();
+  int adjust = frame_size - (spill_regs.size() * kFramePointerSize) -
+               sizeof(StackReference<mirror::ArtMethod>);
+  addl(ESP, Immediate(adjust));
+  cfi_.AdjustCFAOffset(-adjust);
   for (size_t i = 0; i < spill_regs.size(); ++i) {
-    x86::X86ManagedRegister spill = spill_regs.at(i).AsX86();
-    DCHECK(spill.IsCpuRegister());
-    popl(spill.AsCpuRegister());
+    Register spill = spill_regs.at(i).AsX86().AsCpuRegister();
+    popl(spill);
+    cfi_.AdjustCFAOffset(-static_cast<int>(kFramePointerSize));
+    cfi_.Restore(DWARFReg(spill));
   }
   ret();
+  // The CFI should be restored for any code that follows the exit block.
+  cfi_.RestoreState();
+  cfi_.DefCFAOffset(frame_size);
 }
 
 void X86Assembler::IncreaseFrameSize(size_t adjust) {
   CHECK_ALIGNED(adjust, kStackAlignment);
   addl(ESP, Immediate(-adjust));
-  // DW_CFA_advance_loc
-  DW_CFA_advance_loc(&cfi_info_, buffer_.Size() - cfi_pc_);
-  cfi_pc_ = buffer_.Size();
-  // DW_CFA_def_cfa_offset
-  cfi_cfa_offset_ += adjust;
-  DW_CFA_def_cfa_offset(&cfi_info_, cfi_cfa_offset_);
+  cfi_.AdjustCFAOffset(adjust);
 }
 
 void X86Assembler::DecreaseFrameSize(size_t adjust) {
   CHECK_ALIGNED(adjust, kStackAlignment);
   addl(ESP, Immediate(adjust));
+  cfi_.AdjustCFAOffset(-adjust);
 }
 
 void X86Assembler::Store(FrameOffset offs, ManagedRegister msrc, size_t size) {

@@ -37,6 +37,25 @@ static constexpr FloatRegister kParameterFloatRegisters[] =
 static constexpr size_t kParameterCoreRegistersLength = arraysize(kParameterCoreRegisters);
 static constexpr size_t kParameterFloatRegistersLength = arraysize(kParameterFloatRegisters);
 
+static constexpr Register kRuntimeParameterCoreRegisters[] = { RDI, RSI, RDX, RCX };
+static constexpr size_t kRuntimeParameterCoreRegistersLength =
+    arraysize(kRuntimeParameterCoreRegisters);
+static constexpr FloatRegister kRuntimeParameterFpuRegisters[] = { XMM0, XMM1 };
+static constexpr size_t kRuntimeParameterFpuRegistersLength =
+    arraysize(kRuntimeParameterFpuRegisters);
+
+class InvokeRuntimeCallingConvention : public CallingConvention<Register, FloatRegister> {
+ public:
+  InvokeRuntimeCallingConvention()
+      : CallingConvention(kRuntimeParameterCoreRegisters,
+                          kRuntimeParameterCoreRegistersLength,
+                          kRuntimeParameterFpuRegisters,
+                          kRuntimeParameterFpuRegistersLength) {}
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(InvokeRuntimeCallingConvention);
+};
+
 class InvokeDexCallingConvention : public CallingConvention<Register, FloatRegister> {
  public:
   InvokeDexCallingConvention() : CallingConvention(
@@ -49,22 +68,17 @@ class InvokeDexCallingConvention : public CallingConvention<Register, FloatRegis
   DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConvention);
 };
 
-class InvokeDexCallingConventionVisitor {
+class InvokeDexCallingConventionVisitorX86_64 : public InvokeDexCallingConventionVisitor {
  public:
-  InvokeDexCallingConventionVisitor() : gp_index_(0), fp_index_(0), stack_index_(0) {}
+  InvokeDexCallingConventionVisitorX86_64() {}
+  virtual ~InvokeDexCallingConventionVisitorX86_64() {}
 
-  Location GetNextLocation(Primitive::Type type);
+  Location GetNextLocation(Primitive::Type type) OVERRIDE;
 
  private:
   InvokeDexCallingConvention calling_convention;
-  // The current index for cpu registers.
-  uint32_t gp_index_;
-  // The current index for fpu registers.
-  uint32_t fp_index_;
-  // The current stack index.
-  uint32_t stack_index_;
 
-  DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConventionVisitor);
+  DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConventionVisitorX86_64);
 };
 
 class CodeGeneratorX86_64;
@@ -83,10 +97,10 @@ class SlowPathCodeX86_64 : public SlowPathCode {
   DISALLOW_COPY_AND_ASSIGN(SlowPathCodeX86_64);
 };
 
-class ParallelMoveResolverX86_64 : public ParallelMoveResolver {
+class ParallelMoveResolverX86_64 : public ParallelMoveResolverWithSwap {
  public:
   ParallelMoveResolverX86_64(ArenaAllocator* allocator, CodeGeneratorX86_64* codegen)
-      : ParallelMoveResolver(allocator), codegen_(codegen) {}
+      : ParallelMoveResolverWithSwap(allocator), codegen_(codegen) {}
 
   void EmitMove(size_t index) OVERRIDE;
   void EmitSwap(size_t index) OVERRIDE;
@@ -128,7 +142,7 @@ class LocationsBuilderX86_64 : public HGraphVisitor {
   void HandleFieldGet(HInstruction* instruction);
 
   CodeGeneratorX86_64* const codegen_;
-  InvokeDexCallingConventionVisitor parameter_visitor_;
+  InvokeDexCallingConventionVisitorX86_64 parameter_visitor_;
 
   DISALLOW_COPY_AND_ASSIGN(LocationsBuilderX86_64);
 };
@@ -154,6 +168,9 @@ class InstructionCodeGeneratorX86_64 : public HGraphVisitor {
   void GenerateClassInitializationCheck(SlowPathCodeX86_64* slow_path, CpuRegister class_reg);
   void HandleBitwiseOperation(HBinaryOperation* operation);
   void GenerateRemFP(HRem *rem);
+  void DivRemOneOrMinusOne(HBinaryOperation* instruction);
+  void DivByPowerOfTwo(HDiv* instruction);
+  void GenerateDivRemWithAnyConstant(HBinaryOperation* instruction);
   void GenerateDivRemIntegral(HBinaryOperation* instruction);
   void HandleShift(HBinaryOperation* operation);
   void GenerateMemoryBarrier(MemBarrierKind kind);
@@ -163,6 +180,10 @@ class InstructionCodeGeneratorX86_64 : public HGraphVisitor {
   void GenerateExplicitNullCheck(HNullCheck* instruction);
   void PushOntoFPStack(Location source, uint32_t temp_offset,
                        uint32_t stack_adjustment, bool is_float);
+  void GenerateTestAndBranch(HInstruction* instruction,
+                             Label* true_target,
+                             Label* false_target,
+                             Label* always_true_target);
 
   X86_64Assembler* const assembler_;
   CodeGeneratorX86_64* const codegen_;
@@ -172,7 +193,9 @@ class InstructionCodeGeneratorX86_64 : public HGraphVisitor {
 
 class CodeGeneratorX86_64 : public CodeGenerator {
  public:
-  CodeGeneratorX86_64(HGraph* graph, const CompilerOptions& compiler_options);
+  CodeGeneratorX86_64(HGraph* graph,
+                  const X86_64InstructionSetFeatures& isa_features,
+                  const CompilerOptions& compiler_options);
   virtual ~CodeGeneratorX86_64() {}
 
   void GenerateFrameEntry() OVERRIDE;
@@ -218,6 +241,7 @@ class CodeGeneratorX86_64 : public CodeGenerator {
   Location AllocateFreeRegister(Primitive::Type type) const OVERRIDE;
   void DumpCoreRegister(std::ostream& stream, int reg) const OVERRIDE;
   void DumpFloatingPointRegister(std::ostream& stream, int reg) const OVERRIDE;
+  void Finalize(CodeAllocator* allocator) OVERRIDE;
 
   InstructionSet GetInstructionSet() const OVERRIDE {
     return InstructionSet::kX86_64;
@@ -245,6 +269,19 @@ class CodeGeneratorX86_64 : public CodeGenerator {
 
   void GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, CpuRegister temp);
 
+  const X86_64InstructionSetFeatures& GetInstructionSetFeatures() const {
+    return isa_features_;
+  }
+
+  int ConstantAreaStart() const {
+    return constant_area_start_;
+  }
+
+  Address LiteralDoubleAddress(double v);
+  Address LiteralFloatAddress(float v);
+  Address LiteralInt32Address(int32_t v);
+  Address LiteralInt64Address(int64_t v);
+
  private:
   // Labels for each block that will be compiled.
   GrowableArray<Label> block_labels_;
@@ -253,6 +290,11 @@ class CodeGeneratorX86_64 : public CodeGenerator {
   InstructionCodeGeneratorX86_64 instruction_visitor_;
   ParallelMoveResolverX86_64 move_resolver_;
   X86_64Assembler assembler_;
+  const X86_64InstructionSetFeatures& isa_features_;
+
+  // Offset to the start of the constant area in the assembled code.
+  // Used for fixups to the constant area.
+  int constant_area_start_;
 
   DISALLOW_COPY_AND_ASSIGN(CodeGeneratorX86_64);
 };

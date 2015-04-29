@@ -123,7 +123,7 @@ const uint64_t MIRGraph::oat_data_flow_attributes_[kMirOpLast] = {
   DF_UA | DF_NULL_CHK_A | DF_REF_A,
 
   // 1F CHK_CAST vAA, type@BBBB
-  DF_UA | DF_REF_A | DF_UMS,
+  DF_UA | DF_REF_A | DF_CHK_CAST | DF_UMS,
 
   // 20 INSTANCE_OF vA, vB, type@CCCC
   DF_DA | DF_UB | DF_CORE_A | DF_REF_B | DF_UMS,
@@ -159,10 +159,10 @@ const uint64_t MIRGraph::oat_data_flow_attributes_[kMirOpLast] = {
   DF_NOP,
 
   // 2B PACKED_SWITCH vAA, +BBBBBBBB
-  DF_UA,
+  DF_UA | DF_CORE_A,
 
   // 2C SPARSE_SWITCH vAA, +BBBBBBBB
-  DF_UA,
+  DF_UA | DF_CORE_A,
 
   // 2D CMPL_FLOAT vAA, vBB, vCC
   DF_DA | DF_UB | DF_UC | DF_FP_B | DF_FP_C | DF_CORE_A,
@@ -180,22 +180,22 @@ const uint64_t MIRGraph::oat_data_flow_attributes_[kMirOpLast] = {
   DF_DA | DF_UB | DF_B_WIDE | DF_UC | DF_C_WIDE | DF_CORE_A | DF_CORE_B | DF_CORE_C,
 
   // 32 IF_EQ vA, vB, +CCCC
-  DF_UA | DF_UB,
+  DF_UA | DF_UB | DF_SAME_TYPE_AB,
 
   // 33 IF_NE vA, vB, +CCCC
-  DF_UA | DF_UB,
+  DF_UA | DF_UB | DF_SAME_TYPE_AB,
 
   // 34 IF_LT vA, vB, +CCCC
-  DF_UA | DF_UB,
+  DF_UA | DF_UB | DF_SAME_TYPE_AB,
 
   // 35 IF_GE vA, vB, +CCCC
-  DF_UA | DF_UB,
+  DF_UA | DF_UB | DF_SAME_TYPE_AB,
 
   // 36 IF_GT vA, vB, +CCCC
-  DF_UA | DF_UB,
+  DF_UA | DF_UB | DF_SAME_TYPE_AB,
 
   // 37 IF_LE vA, vB, +CCCC
-  DF_UA | DF_UB,
+  DF_UA | DF_UB | DF_SAME_TYPE_AB,
 
   // 38 IF_EQZ vAA, +BBBB
   DF_UA,
@@ -374,7 +374,7 @@ const uint64_t MIRGraph::oat_data_flow_attributes_[kMirOpLast] = {
   // 72 INVOKE_INTERFACE {vD, vE, vF, vG, vA}
   DF_FORMAT_35C | DF_NULL_CHK_OUT0 | DF_UMS,
 
-  // 73 RETURN_VOID_BARRIER
+  // 73 RETURN_VOID_NO_BARRIER
   DF_NOP,
 
   // 74 INVOKE_VIRTUAL_RANGE {vCCCC .. vNNNN}
@@ -989,7 +989,7 @@ bool MIRGraph::FindLocalLiveIn(BasicBlock* bb) {
   MIR* mir;
   ArenaBitVector *use_v, *def_v, *live_in_v;
 
-  if (bb->data_flow_info == NULL) return false;
+  if (bb->data_flow_info == nullptr) return false;
 
   use_v = bb->data_flow_info->use_v =
       new (arena_) ArenaBitVector(arena_, GetNumOfCodeAndTempVRs(), false, kBitMapUse);
@@ -998,7 +998,7 @@ bool MIRGraph::FindLocalLiveIn(BasicBlock* bb) {
   live_in_v = bb->data_flow_info->live_in_v =
       new (arena_) ArenaBitVector(arena_, GetNumOfCodeAndTempVRs(), false, kBitMapLiveIn);
 
-  for (mir = bb->first_mir_insn; mir != NULL; mir = mir->next) {
+  for (mir = bb->first_mir_insn; mir != nullptr; mir = mir->next) {
     uint64_t df_attributes = GetDataFlowAttributes(mir);
     MIR::DecodedInstruction* d_insn = &mir->dalvikInsn;
 
@@ -1080,8 +1080,6 @@ void MIRGraph::AllocateSSAUseData(MIR *mir, int num_uses) {
 
   if (mir->ssa_rep->num_uses_allocated < num_uses) {
     mir->ssa_rep->uses = arena_->AllocArray<int32_t>(num_uses, kArenaAllocDFInfo);
-    // NOTE: will be filled in during type & size inference pass
-    mir->ssa_rep->fp_use = arena_->AllocArray<bool>(num_uses, kArenaAllocDFInfo);
   }
 }
 
@@ -1090,7 +1088,6 @@ void MIRGraph::AllocateSSADefData(MIR *mir, int num_defs) {
 
   if (mir->ssa_rep->num_defs_allocated < num_defs) {
     mir->ssa_rep->defs = arena_->AllocArray<int32_t>(num_defs, kArenaAllocDFInfo);
-    mir->ssa_rep->fp_def = arena_->AllocArray<bool>(num_defs, kArenaAllocDFInfo);
   }
 }
 
@@ -1191,7 +1188,7 @@ void MIRGraph::DataFlowSSAFormatExtended(MIR* mir) {
 
 /* Entry function to convert a block into SSA representation */
 bool MIRGraph::DoSSAConversion(BasicBlock* bb) {
-  if (bb->data_flow_info == NULL) return false;
+  if (bb->data_flow_info == nullptr) return false;
 
   /*
    * Pruned SSA form: Insert phi nodes for each dalvik register marked in phi_node_blocks
@@ -1214,7 +1211,7 @@ bool MIRGraph::DoSSAConversion(BasicBlock* bb) {
     }
   }
 
-  for (MIR* mir = bb->first_mir_insn; mir != NULL; mir = mir->next) {
+  for (MIR* mir = bb->first_mir_insn; mir != nullptr; mir = mir->next) {
     mir->ssa_rep =
         static_cast<struct SSARepresentation *>(arena_->Alloc(sizeof(SSARepresentation),
                                                               kArenaAllocDFInfo));
@@ -1287,35 +1284,27 @@ bool MIRGraph::DoSSAConversion(BasicBlock* bb) {
     if (df_attributes & DF_HAS_USES) {
       num_uses = 0;
       if (df_attributes & DF_UA) {
-        mir->ssa_rep->fp_use[num_uses] = df_attributes & DF_FP_A;
         HandleSSAUse(mir->ssa_rep->uses, d_insn->vA, num_uses++);
         if (df_attributes & DF_A_WIDE) {
-          mir->ssa_rep->fp_use[num_uses] = df_attributes & DF_FP_A;
           HandleSSAUse(mir->ssa_rep->uses, d_insn->vA+1, num_uses++);
         }
       }
       if (df_attributes & DF_UB) {
-        mir->ssa_rep->fp_use[num_uses] = df_attributes & DF_FP_B;
         HandleSSAUse(mir->ssa_rep->uses, d_insn->vB, num_uses++);
         if (df_attributes & DF_B_WIDE) {
-          mir->ssa_rep->fp_use[num_uses] = df_attributes & DF_FP_B;
           HandleSSAUse(mir->ssa_rep->uses, d_insn->vB+1, num_uses++);
         }
       }
       if (df_attributes & DF_UC) {
-        mir->ssa_rep->fp_use[num_uses] = df_attributes & DF_FP_C;
         HandleSSAUse(mir->ssa_rep->uses, d_insn->vC, num_uses++);
         if (df_attributes & DF_C_WIDE) {
-          mir->ssa_rep->fp_use[num_uses] = df_attributes & DF_FP_C;
           HandleSSAUse(mir->ssa_rep->uses, d_insn->vC+1, num_uses++);
         }
       }
     }
     if (df_attributes & DF_HAS_DEFS) {
-      mir->ssa_rep->fp_def[0] = df_attributes & DF_FP_A;
       HandleSSADef(mir->ssa_rep->defs, d_insn->vA, 0);
       if (df_attributes & DF_A_WIDE) {
-        mir->ssa_rep->fp_def[1] = df_attributes & DF_FP_A;
         HandleSSADef(mir->ssa_rep->defs, d_insn->vA+1, 1);
       }
     }
@@ -1396,6 +1385,13 @@ void MIRGraph::CompilerInitializeSSAConversion() {
   InitializeBasicBlockDataFlow();
 }
 
+uint32_t MIRGraph::GetUseCountWeight(BasicBlock* bb) const {
+  // Each level of nesting adds *100 to count, up to 3 levels deep.
+  uint32_t depth = std::min(3U, static_cast<uint32_t>(bb->nesting_depth));
+  uint32_t weight = std::max(1U, depth * 100);
+  return weight;
+}
+
 /*
  * Count uses, weighting by loop nesting depth.  This code only
  * counts explicitly used s_regs.  A later phase will add implicit
@@ -1405,34 +1401,15 @@ void MIRGraph::CountUses(BasicBlock* bb) {
   if (bb->block_type != kDalvikByteCode) {
     return;
   }
-  // Each level of nesting adds *100 to count, up to 3 levels deep.
-  uint32_t depth = std::min(3U, static_cast<uint32_t>(bb->nesting_depth));
-  uint32_t weight = std::max(1U, depth * 100);
-  for (MIR* mir = bb->first_mir_insn; (mir != NULL); mir = mir->next) {
-    if (mir->ssa_rep == NULL) {
+  uint32_t weight = GetUseCountWeight(bb);
+  for (MIR* mir = bb->first_mir_insn; (mir != nullptr); mir = mir->next) {
+    if (mir->ssa_rep == nullptr) {
       continue;
     }
     for (int i = 0; i < mir->ssa_rep->num_uses; i++) {
       int s_reg = mir->ssa_rep->uses[i];
       raw_use_counts_[s_reg] += 1u;
       use_counts_[s_reg] += weight;
-    }
-    if (!(cu_->disable_opt & (1 << kPromoteCompilerTemps))) {
-      uint64_t df_attributes = GetDataFlowAttributes(mir);
-      // Implicit use of Method* ? */
-      if (df_attributes & DF_UMS) {
-        /*
-         * Some invokes will not use Method* - need to perform test similar
-         * to that found in GenInvoke() to decide whether to count refs
-         * for Method* on invoke-class opcodes.  This is a relatively expensive
-         * operation, so should only be done once.
-         * TODO: refactor InvokeUsesMethodStar() to perform check at parse time,
-         * and save results for both here and GenInvoke.  For now, go ahead
-         * and assume all invokes use method*.
-         */
-        raw_use_counts_[method_sreg_] += 1u;
-        use_counts_[method_sreg_] += weight;
-      }
     }
   }
 }
@@ -1471,7 +1448,7 @@ bool MIRGraph::VerifyPredInfo(BasicBlock* bb) {
 void MIRGraph::VerifyDataflow() {
     /* Verify if all blocks are connected as claimed */
   AllNodesIterator iter(this);
-  for (BasicBlock* bb = iter.Next(); bb != NULL; bb = iter.Next()) {
+  for (BasicBlock* bb = iter.Next(); bb != nullptr; bb = iter.Next()) {
     VerifyPredInfo(bb);
   }
 }

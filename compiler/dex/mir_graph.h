@@ -38,6 +38,8 @@ class DexCompilationUnit;
 class DexFileMethodInliner;
 class GlobalValueNumbering;
 class GvnDeadCodeElimination;
+class PassManager;
+class TypeInference;
 
 // Forward declaration.
 class MIRGraph;
@@ -63,6 +65,7 @@ enum DataFlowAttributePos {
   kNullTransferSrc0,     // Object copy src[0] -> dst.
   kNullTransferSrcN,     // Phi null check state transfer.
   kRangeCheckC,          // Range check of C.
+  kCheckCastA,           // Check cast of A.
   kFPA,
   kFPB,
   kFPC,
@@ -72,6 +75,7 @@ enum DataFlowAttributePos {
   kRefA,
   kRefB,
   kRefC,
+  kSameTypeAB,           // A and B have the same type but it can be core/ref/fp (IF_cc).
   kUsesMethodStar,       // Implicit use of Method*.
   kUsesIField,           // Accesses an instance field (IGET/IPUT).
   kUsesSField,           // Accesses a static field (SGET/SPUT).
@@ -100,6 +104,7 @@ enum DataFlowAttributePos {
 #define DF_NULL_TRANSFER_0      (UINT64_C(1) << kNullTransferSrc0)
 #define DF_NULL_TRANSFER_N      (UINT64_C(1) << kNullTransferSrcN)
 #define DF_RANGE_CHK_C          (UINT64_C(1) << kRangeCheckC)
+#define DF_CHK_CAST             (UINT64_C(1) << kCheckCastA)
 #define DF_FP_A                 (UINT64_C(1) << kFPA)
 #define DF_FP_B                 (UINT64_C(1) << kFPB)
 #define DF_FP_C                 (UINT64_C(1) << kFPC)
@@ -109,6 +114,7 @@ enum DataFlowAttributePos {
 #define DF_REF_A                (UINT64_C(1) << kRefA)
 #define DF_REF_B                (UINT64_C(1) << kRefB)
 #define DF_REF_C                (UINT64_C(1) << kRefC)
+#define DF_SAME_TYPE_AB         (UINT64_C(1) << kSameTypeAB)
 #define DF_UMS                  (UINT64_C(1) << kUsesMethodStar)
 #define DF_IFIELD               (UINT64_C(1) << kUsesIField)
 #define DF_SFIELD               (UINT64_C(1) << kUsesSField)
@@ -149,6 +155,7 @@ enum OatMethodAttributes {
 
 #define MIR_IGNORE_NULL_CHECK           (1 << kMIRIgnoreNullCheck)
 #define MIR_IGNORE_RANGE_CHECK          (1 << kMIRIgnoreRangeCheck)
+#define MIR_IGNORE_CHECK_CAST           (1 << kMIRIgnoreCheckCast)
 #define MIR_STORE_NON_NULL_VALUE        (1 << kMIRStoreNonNullValue)
 #define MIR_CLASS_IS_INITIALIZED        (1 << kMIRClassIsInitialized)
 #define MIR_CLASS_IS_IN_DEX_CACHE       (1 << kMIRClassIsInDexCache)
@@ -215,13 +222,11 @@ struct BasicBlockDataFlow {
  */
 struct SSARepresentation {
   int32_t* uses;
-  bool* fp_use;
   int32_t* defs;
-  bool* fp_def;
-  int16_t num_uses_allocated;
-  int16_t num_defs_allocated;
-  int16_t num_uses;
-  int16_t num_defs;
+  uint16_t num_uses_allocated;
+  uint16_t num_defs_allocated;
+  uint16_t num_uses;
+  uint16_t num_defs;
 
   static uint32_t GetStartUseIndex(Instruction::Code opcode);
 };
@@ -332,7 +337,8 @@ class MIR : public ArenaObject<kArenaAllocMIR> {
     // SGET/SPUT lowering info index, points to MIRGraph::sfield_lowering_infos_. Due to limit on
     // the number of code points (64K) and size of SGET/SPUT insn (2), this will never exceed 32K.
     uint32_t sfield_lowering_info;
-    // INVOKE data index, points to MIRGraph::method_lowering_infos_.
+    // INVOKE data index, points to MIRGraph::method_lowering_infos_. Also used for inlined
+    // CONST and MOVE insn (with MIR_CALLEE) to remember the invoke for type inference.
     uint32_t method_lowering_info;
   } meta;
 
@@ -513,6 +519,7 @@ struct CallInfo {
   bool is_range;
   DexOffset offset;       // Offset in code units.
   MIR* mir;
+  int32_t string_init_offset;
 };
 
 
@@ -596,7 +603,7 @@ class MIRGraph {
 
   BasicBlock* GetBasicBlock(unsigned int block_id) const {
     DCHECK_LT(block_id, block_list_.size());  // NOTE: NullBasicBlockId is 0.
-    return (block_id == NullBasicBlockId) ? NULL : block_list_[block_id];
+    return (block_id == NullBasicBlockId) ? nullptr : block_list_[block_id];
   }
 
   size_t GetBasicBlockListCount() const {
@@ -645,6 +652,10 @@ class MIRGraph {
    */
   void DumpCFG(const char* dir_prefix, bool all_blocks, const char* suffix = nullptr);
 
+  bool HasCheckCast() const {
+    return (merged_df_flags_ & DF_CHK_CAST) != 0u;
+  }
+
   bool HasFieldAccess() const {
     return (merged_df_flags_ & (DF_IFIELD | DF_SFIELD)) != 0u;
   }
@@ -689,8 +700,16 @@ class MIRGraph {
   void DoCacheMethodLoweringInfo();
 
   const MirMethodLoweringInfo& GetMethodLoweringInfo(MIR* mir) const {
-    DCHECK_LT(mir->meta.method_lowering_info, method_lowering_infos_.size());
-    return method_lowering_infos_[mir->meta.method_lowering_info];
+    return GetMethodLoweringInfo(mir->meta.method_lowering_info);
+  }
+
+  const MirMethodLoweringInfo& GetMethodLoweringInfo(uint32_t lowering_info) const {
+    DCHECK_LT(lowering_info, method_lowering_infos_.size());
+    return method_lowering_infos_[lowering_info];
+  }
+
+  size_t GetMethodLoweringInfoCount() const {
+    return method_lowering_infos_.size();
   }
 
   void ComputeInlineIFieldLoweringInfo(uint16_t field_idx, MIR* invoke, MIR* iget_or_iput);
@@ -704,6 +723,8 @@ class MIRGraph {
   void BasicBlockOptimizationStart();
   void BasicBlockOptimization();
   void BasicBlockOptimizationEnd();
+
+  void StringChange();
 
   const ArenaVector<BasicBlockId>& GetTopologicalSortOrder() {
     DCHECK(!topological_order_.empty());
@@ -958,6 +979,12 @@ class MIRGraph {
    */
   CompilerTemp* GetNewCompilerTemp(CompilerTempType ct_type, bool wide);
 
+  /**
+   * @brief Used to remove last created compiler temporary when it's not needed.
+   * @param temp the temporary to remove.
+   */
+  void RemoveLastCompilerTemp(CompilerTempType ct_type, bool wide, CompilerTemp* temp);
+
   bool MethodIsLeaf() {
     return attributes_ & METHOD_IS_LEAF;
   }
@@ -1065,7 +1092,9 @@ class MIRGraph {
   bool EliminateNullChecksGate();
   bool EliminateNullChecks(BasicBlock* bb);
   void EliminateNullChecksEnd();
+  void InferTypesStart();
   bool InferTypes(BasicBlock* bb);
+  void InferTypesEnd();
   bool EliminateClassInitChecksGate();
   bool EliminateClassInitChecks(BasicBlock* bb);
   void EliminateClassInitChecksEnd();
@@ -1075,9 +1104,9 @@ class MIRGraph {
   bool EliminateDeadCodeGate();
   bool EliminateDeadCode(BasicBlock* bb);
   void EliminateDeadCodeEnd();
+  void GlobalValueNumberingCleanup();
   bool EliminateSuspendChecksGate();
   bool EliminateSuspendChecks(BasicBlock* bb);
-  void EliminateSuspendChecksEnd();
 
   uint16_t GetGvnIFieldId(MIR* mir) const {
     DCHECK(IsInstructionIGetOrIPut(mir->dalvikInsn.opcode));
@@ -1092,34 +1121,6 @@ class MIRGraph {
     DCHECK(temp_.gvn.sfield_ids != nullptr);
     return temp_.gvn.sfield_ids[mir->meta.sfield_lowering_info];
   }
-
-  /*
-   * Type inference handling helpers.  Because Dalvik's bytecode is not fully typed,
-   * we have to do some work to figure out the sreg type.  For some operations it is
-   * clear based on the opcode (i.e. ADD_FLOAT v0, v1, v2), but for others (MOVE), we
-   * may never know the "real" type.
-   *
-   * We perform the type inference operation by using an iterative  walk over
-   * the graph, propagating types "defined" by typed opcodes to uses and defs in
-   * non-typed opcodes (such as MOVE).  The Setxx(index) helpers are used to set defined
-   * types on typed opcodes (such as ADD_INT).  The Setxx(index, is_xx) form is used to
-   * propagate types through non-typed opcodes such as PHI and MOVE.  The is_xx flag
-   * tells whether our guess of the type is based on a previously typed definition.
-   * If so, the defined type takes precedence.  Note that it's possible to have the same sreg
-   * show multiple defined types because dx treats constants as untyped bit patterns.
-   * The return value of the Setxx() helpers says whether or not the Setxx() action changed
-   * the current guess, and is used to know when to terminate the iterative walk.
-   */
-  bool SetFp(int index, bool is_fp);
-  bool SetFp(int index);
-  bool SetCore(int index, bool is_core);
-  bool SetCore(int index);
-  bool SetRef(int index, bool is_ref);
-  bool SetRef(int index);
-  bool SetWide(int index, bool is_wide);
-  bool SetWide(int index);
-  bool SetHigh(int index, bool is_high);
-  bool SetHigh(int index);
 
   bool PuntToInterpreter() {
     return punt_to_interpreter_;
@@ -1183,6 +1184,12 @@ class MIRGraph {
   void DoConstantPropagation(BasicBlock* bb);
 
   /**
+   * @brief Get use count weight for a given block.
+   * @param bb the BasicBlock.
+   */
+  uint32_t GetUseCountWeight(BasicBlock* bb) const;
+
+  /**
    * @brief Count the uses in the BasicBlock
    * @param bb the BasicBlock
    */
@@ -1201,7 +1208,7 @@ class MIRGraph {
 
   void AllocateSSAUseData(MIR *mir, int num_uses);
   void AllocateSSADefData(MIR *mir, int num_defs);
-  void CalculateBasicBlockInformation();
+  void CalculateBasicBlockInformation(const PassManager* const post_opt);
   void ComputeDFSOrders();
   void ComputeDefBlockMatrix();
   void ComputeDominators();
@@ -1239,7 +1246,6 @@ class MIRGraph {
   static const char* extended_mir_op_names_[kMirOpLast - kMirOpFirst];
 
   void HandleSSADef(int* defs, int dalvik_reg, int reg_index);
-  bool InferTypeAndSize(BasicBlock* bb, MIR* mir, bool changed);
 
  protected:
   int FindCommonParent(int block1, int block2);
@@ -1386,6 +1392,7 @@ class MIRGraph {
       ArenaBitVector* work_live_vregs;
       ArenaBitVector** def_block_matrix;  // num_vregs x num_blocks_.
       ArenaBitVector** phi_node_blocks;  // num_vregs x num_blocks_.
+      TypeInference* ti;
     } ssa;
     // Global value numbering.
     struct {
@@ -1394,10 +1401,6 @@ class MIRGraph {
       uint16_t* sfield_ids;  // Ditto.
       GvnDeadCodeElimination* dce;
     } gvn;
-    // Suspend check elimination.
-    struct {
-      DexFileMethodInliner* inliner;
-    } sce;
   } temp_;
   static const int kInvalidEntry = -1;
   ArenaVector<BasicBlock*> block_list_;
@@ -1449,6 +1452,9 @@ class MIRGraph {
   friend class GvnDeadCodeEliminationTest;
   friend class LocalValueNumberingTest;
   friend class TopologicalSortOrderTest;
+  friend class TypeInferenceTest;
+  friend class QuickCFITest;
+  friend class QuickAssembleX86TestBase;
 };
 
 }  // namespace art

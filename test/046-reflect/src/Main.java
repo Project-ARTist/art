@@ -696,25 +696,32 @@ public class Main {
     private static void checkGetDeclaredConstructor() {
         try {
             Method.class.getDeclaredConstructor().setAccessible(true);
-            System.out.print("Didn't get an exception from method getDeclaredConstructor");
+            System.out.print("Didn't get an exception from Method.class.getDeclaredConstructor().setAccessible");
+        } catch (SecurityException e) {
         } catch (NoSuchMethodException e) {
         } catch (Exception e) {
             System.out.print(e);
         }
         try {
             Field.class.getDeclaredConstructor().setAccessible(true);
-            System.out.print("Didn't get an exception from field getDeclaredConstructor");
+            System.out.print("Didn't get an exception from Field.class.getDeclaredConstructor().setAccessible");
+        } catch (SecurityException e) {
         } catch (NoSuchMethodException e) {
         } catch (Exception e) {
             System.out.print(e);
         }
         try {
             Class.class.getDeclaredConstructor().setAccessible(true);
-            System.out.print("Didn't get an exception from class getDeclaredConstructor()");
+            System.out.print("Didn't get an exception from Class.class.getDeclaredConstructor().setAccessible");
         } catch (SecurityException e) {
+        } catch (NoSuchMethodException e) {
         } catch (Exception e) {
             System.out.print(e);
         }
+    }
+
+    static void checkPrivateFieldAccess() {
+        (new OtherClass()).test();
     }
 
     public static void main(String[] args) throws Exception {
@@ -730,6 +737,7 @@ public class Main {
         checkUnique();
         checkParametrizedTypeEqualsAndHashCode();
         checkGenericArrayTypeEqualsAndHashCode();
+        checkPrivateFieldAccess();
     }
 }
 
@@ -801,41 +809,41 @@ class Target extends SuperTarget {
 }
 
 class FieldNoisyInit {
-  static {
-    System.out.println("FieldNoisyInit is initializing");
-    //Throwable th = new Throwable();
-    //th.printStackTrace();
-  }
+    static {
+        System.out.println("FieldNoisyInit is initializing");
+        //Throwable th = new Throwable();
+        //th.printStackTrace();
+    }
 }
 
 class FieldNoisyInitUser {
-  static {
-    System.out.println("FieldNoisyInitUser is initializing");
-  }
-  public static int staticField;
-  public static FieldNoisyInit noisy;
+    static {
+        System.out.println("FieldNoisyInitUser is initializing");
+    }
+    public static int staticField;
+    public static FieldNoisyInit noisy;
 }
 
 class MethodNoisyInit {
-  static {
-    System.out.println("MethodNoisyInit is initializing");
-    //Throwable th = new Throwable();
-    //th.printStackTrace();
-  }
+    static {
+        System.out.println("MethodNoisyInit is initializing");
+        //Throwable th = new Throwable();
+        //th.printStackTrace();
+    }
 }
 
 class MethodNoisyInitUser {
-  static {
-    System.out.println("MethodNoisyInitUser is initializing");
-  }
-  public static void staticMethod() {}
-  public void createMethodNoisyInit(MethodNoisyInit ni) {}
+    static {
+        System.out.println("MethodNoisyInitUser is initializing");
+    }
+    public static void staticMethod() {}
+    public void createMethodNoisyInit(MethodNoisyInit ni) {}
 }
 
 class Thrower {
-  public Thrower() throws UnsupportedOperationException {
-    throw new UnsupportedOperationException();
-  }
+    public Thrower() throws UnsupportedOperationException {
+        throw new UnsupportedOperationException();
+    }
 }
 
 class ParametrizedTypeTest {
@@ -846,4 +854,18 @@ class ParametrizedTypeTest {
 class GenericArrayTypeTest<T> {
     public void aMethod(T[] names) {}
     public void aMethodIdentical(T[] names) {}
+}
+
+class OtherClass {
+    private static final long LONG = 1234;
+    public void test() {
+        try {
+            Field field = getClass().getDeclaredField("LONG");
+            if (1234 != field.getLong(null)) {
+              System.out.println("ERROR: values don't match");
+            }
+        } catch (Exception e) {
+            System.out.println(e);
+        }
+    }
 }

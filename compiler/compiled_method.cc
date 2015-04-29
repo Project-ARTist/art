@@ -108,7 +108,7 @@ const void* CompiledCode::CodePointer(const void* code_pointer,
     }
     default:
       LOG(FATAL) << "Unknown InstructionSet: " << instruction_set;
-      return NULL;
+      return nullptr;
   }
 }
 
@@ -132,7 +132,7 @@ CompiledMethod::CompiledMethod(CompilerDriver* driver,
                                const ArrayRef<const uint8_t>& vmap_table,
                                const ArrayRef<const uint8_t>& native_gc_map,
                                const ArrayRef<const uint8_t>& cfi_info,
-                               const ArrayRef<LinkerPatch>& patches)
+                               const ArrayRef<const LinkerPatch>& patches)
     : CompiledCode(driver, instruction_set, quick_code, !driver->DedupeEnabled()),
       owns_arrays_(!driver->DedupeEnabled()),
       frame_size_in_bytes_(frame_size_in_bytes), core_spill_mask_(core_spill_mask),
@@ -142,7 +142,6 @@ CompiledMethod::CompiledMethod(CompilerDriver* driver,
     if (src_mapping_table == nullptr) {
       src_mapping_table_ = new SwapSrcMap(driver->GetSwapSpaceAllocator());
     } else {
-      src_mapping_table->Arrange();
       src_mapping_table_ = new SwapSrcMap(src_mapping_table->begin(), src_mapping_table->end(),
                                           driver->GetSwapSpaceAllocator());
     }
@@ -159,7 +158,7 @@ CompiledMethod::CompiledMethod(CompilerDriver* driver,
   } else {
     src_mapping_table_ = src_mapping_table == nullptr ?
         driver->DeduplicateSrcMappingTable(ArrayRef<SrcMapElem>()) :
-        driver->DeduplicateSrcMappingTable(ArrayRef<SrcMapElem>(src_mapping_table->Arrange()));
+        driver->DeduplicateSrcMappingTable(ArrayRef<SrcMapElem>(*src_mapping_table));
     mapping_table_ = mapping_table.empty() ?
         nullptr : driver->DeduplicateMappingTable(mapping_table);
     vmap_table_ = driver->DeduplicateVMapTable(vmap_table);
@@ -180,7 +179,7 @@ CompiledMethod* CompiledMethod::SwapAllocCompiledMethod(
     const ArrayRef<const uint8_t>& vmap_table,
     const ArrayRef<const uint8_t>& native_gc_map,
     const ArrayRef<const uint8_t>& cfi_info,
-    const ArrayRef<LinkerPatch>& patches) {
+    const ArrayRef<const LinkerPatch>& patches) {
   SwapAllocator<CompiledMethod> alloc(driver->GetSwapSpaceAllocator());
   CompiledMethod* ret = alloc.allocate(1);
   alloc.construct(ret, driver, instruction_set, quick_code, frame_size_in_bytes, core_spill_mask,
@@ -189,38 +188,6 @@ CompiledMethod* CompiledMethod::SwapAllocCompiledMethod(
   return ret;
 }
 
-CompiledMethod* CompiledMethod::SwapAllocCompiledMethodStackMap(
-    CompilerDriver* driver,
-    InstructionSet instruction_set,
-    const ArrayRef<const uint8_t>& quick_code,
-    const size_t frame_size_in_bytes,
-    const uint32_t core_spill_mask,
-    const uint32_t fp_spill_mask,
-    const ArrayRef<const uint8_t>& stack_map) {
-  SwapAllocator<CompiledMethod> alloc(driver->GetSwapSpaceAllocator());
-  CompiledMethod* ret = alloc.allocate(1);
-  alloc.construct(ret, driver, instruction_set, quick_code, frame_size_in_bytes, core_spill_mask,
-                  fp_spill_mask, nullptr, ArrayRef<const uint8_t>(), stack_map,
-                  ArrayRef<const uint8_t>(), ArrayRef<const uint8_t>(), ArrayRef<LinkerPatch>());
-  return ret;
-}
-
-CompiledMethod* CompiledMethod::SwapAllocCompiledMethodCFI(
-    CompilerDriver* driver,
-    InstructionSet instruction_set,
-    const ArrayRef<const uint8_t>& quick_code,
-    const size_t frame_size_in_bytes,
-    const uint32_t core_spill_mask,
-    const uint32_t fp_spill_mask,
-    const ArrayRef<const uint8_t>& cfi_info) {
-  SwapAllocator<CompiledMethod> alloc(driver->GetSwapSpaceAllocator());
-  CompiledMethod* ret = alloc.allocate(1);
-  alloc.construct(ret, driver, instruction_set, quick_code, frame_size_in_bytes, core_spill_mask,
-                  fp_spill_mask, nullptr, ArrayRef<const uint8_t>(),
-                  ArrayRef<const uint8_t>(), ArrayRef<const uint8_t>(),
-                  cfi_info, ArrayRef<LinkerPatch>());
-  return ret;
-}
 
 
 void CompiledMethod::ReleaseSwapAllocatedCompiledMethod(CompilerDriver* driver, CompiledMethod* m) {

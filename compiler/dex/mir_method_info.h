@@ -88,7 +88,7 @@ class MirMethodInfo {
   // The type index of the class declaring the method, 0 if unresolved.
   uint16_t declaring_class_idx_;
   // The dex file that defines the class containing the method and the method,
-  // nullptr if unresolved.
+  // null if unresolved.
   const DexFile* declaring_dex_file_;
 };
 
@@ -125,6 +125,14 @@ class MirMethodLoweringInfo : public MirMethodInfo {
 
   bool FastPath() const {
     return (flags_ & kFlagFastPath) != 0u;
+  }
+
+  bool IsIntrinsic() const {
+    return (flags_ & kFlagIsIntrinsic) != 0u;
+  }
+
+  bool IsSpecial() const {
+    return (flags_ & kFlagIsSpecial) != 0u;
   }
 
   bool IsReferrersClass() const {
@@ -188,9 +196,11 @@ class MirMethodLoweringInfo : public MirMethodInfo {
  private:
   enum {
     kBitFastPath = kMethodInfoBitEnd,
+    kBitIsIntrinsic,
+    kBitIsSpecial,
     kBitInvokeTypeBegin,
     kBitInvokeTypeEnd = kBitInvokeTypeBegin + 3,  // 3 bits for invoke type.
-    kBitSharpTypeBegin,
+    kBitSharpTypeBegin = kBitInvokeTypeEnd,
     kBitSharpTypeEnd = kBitSharpTypeBegin + 3,  // 3 bits for sharp type.
     kBitIsReferrersClass = kBitSharpTypeEnd,
     kBitClassIsInitialized,
@@ -199,6 +209,8 @@ class MirMethodLoweringInfo : public MirMethodInfo {
   };
   static_assert(kMethodLoweringInfoBitEnd <= 16, "Too many flags");
   static constexpr uint16_t kFlagFastPath = 1u << kBitFastPath;
+  static constexpr uint16_t kFlagIsIntrinsic = 1u << kBitIsIntrinsic;
+  static constexpr uint16_t kFlagIsSpecial = 1u << kBitIsSpecial;
   static constexpr uint16_t kFlagIsReferrersClass = 1u << kBitIsReferrersClass;
   static constexpr uint16_t kFlagClassIsInitialized = 1u << kBitClassIsInitialized;
   static constexpr uint16_t kFlagQuickened = 1u << kBitQuickened;
@@ -211,7 +223,7 @@ class MirMethodLoweringInfo : public MirMethodInfo {
   uintptr_t direct_code_;
   uintptr_t direct_method_;
   // Before Resolve(), target_dex_file_ and target_method_idx_ hold the verification-based
-  // devirtualized invoke target if available, nullptr and 0u otherwise.
+  // devirtualized invoke target if available, null and 0u otherwise.
   // After Resolve() they hold the actual target method that will be called; it will be either
   // a devirtualized target method or the compilation's unit's dex file and MethodIndex().
   const DexFile* target_dex_file_;
@@ -220,6 +232,7 @@ class MirMethodLoweringInfo : public MirMethodInfo {
   int stats_flags_;
 
   friend class MirOptimizationTest;
+  friend class TypeInferenceTest;
 };
 
 }  // namespace art

@@ -90,7 +90,6 @@ static Intrinsics GetIntrinsic(InlineMethod method) {
           LOG(FATAL) << "Unknown/unsupported op size " << method.d.data;
           UNREACHABLE();
       }
-      break;
     case kIntrinsicReverseBytes:
       switch (GetType(method.d.data, true)) {
         case Primitive::kPrimShort:
@@ -103,7 +102,6 @@ static Intrinsics GetIntrinsic(InlineMethod method) {
           LOG(FATAL) << "Unknown/unsupported op size " << method.d.data;
           UNREACHABLE();
       }
-      break;
 
     // Abs.
     case kIntrinsicAbsDouble:
@@ -166,7 +164,6 @@ static Intrinsics GetIntrinsic(InlineMethod method) {
           LOG(FATAL) << "Unknown/unsupported op size " << method.d.data;
           UNREACHABLE();
       }
-      break;
 
     // Memory.poke.
     case kIntrinsicPoke:
@@ -183,19 +180,28 @@ static Intrinsics GetIntrinsic(InlineMethod method) {
           LOG(FATAL) << "Unknown/unsupported op size " << method.d.data;
           UNREACHABLE();
       }
-      break;
 
     // String.
     case kIntrinsicCharAt:
       return Intrinsics::kStringCharAt;
     case kIntrinsicCompareTo:
       return Intrinsics::kStringCompareTo;
+    case kIntrinsicGetCharsNoCheck:
+      return Intrinsics::kStringGetCharsNoCheck;
     case kIntrinsicIsEmptyOrLength:
-      return ((method.d.data & kIntrinsicFlagIsEmpty) == 0) ?
-          Intrinsics::kStringLength : Intrinsics::kStringIsEmpty;
+      // The inliner can handle these two cases - and this is the preferred approach
+      // since after inlining the call is no longer visible (as opposed to waiting
+      // until codegen to handle intrinsic).
+      return Intrinsics::kNone;
     case kIntrinsicIndexOf:
       return ((method.d.data & kIntrinsicFlagBase0) == 0) ?
           Intrinsics::kStringIndexOfAfter : Intrinsics::kStringIndexOf;
+    case kIntrinsicNewStringFromBytes:
+      return Intrinsics::kStringNewStringFromBytes;
+    case kIntrinsicNewStringFromChars:
+      return Intrinsics::kStringNewStringFromChars;
+    case kIntrinsicNewStringFromString:
+      return Intrinsics::kStringNewStringFromString;
 
     case kIntrinsicCas:
       switch (GetType(method.d.data, false)) {
@@ -209,7 +215,6 @@ static Intrinsics GetIntrinsic(InlineMethod method) {
           LOG(FATAL) << "Unknown/unsupported op size " << method.d.data;
           UNREACHABLE();
       }
-      break;
     case kIntrinsicUnsafeGet: {
       const bool is_volatile = (method.d.data & kIntrinsicFlagIsVolatile);
       switch (GetType(method.d.data, false)) {
@@ -223,7 +228,6 @@ static Intrinsics GetIntrinsic(InlineMethod method) {
           LOG(FATAL) << "Unknown/unsupported op size " << method.d.data;
           UNREACHABLE();
       }
-      break;
     }
     case kIntrinsicUnsafePut: {
       enum Sync { kNoSync, kVolatile, kOrdered };
@@ -282,6 +286,11 @@ static Intrinsics GetIntrinsic(InlineMethod method) {
     case kInlineOpNonWideConst:
     case kInlineOpIGet:
     case kInlineOpIPut:
+      return Intrinsics::kNone;
+
+    // String init cases, not intrinsics.
+
+    case kInlineStringInit:
       return Intrinsics::kNone;
 
     // No default case to make the compiler warn on missing cases.
@@ -365,4 +374,3 @@ INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
 }
 
 }  // namespace art
-

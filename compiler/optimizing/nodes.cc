@@ -51,9 +51,7 @@ void HGraph::RemoveInstructionsAsUsersFromDeadBlocks(const ArenaBitVector& visit
   for (size_t i = 0; i < blocks_.Size(); ++i) {
     if (!visited.IsBitSet(i)) {
       HBasicBlock* block = blocks_.Get(i);
-      for (HInstructionIterator it(block->GetPhis()); !it.Done(); it.Advance()) {
-        RemoveAsUser(it.Current());
-      }
+      DCHECK(block->GetPhis().IsEmpty()) << "Phis are not inserted at this stage";
       for (HInstructionIterator it(block->GetInstructions()); !it.Done(); it.Advance()) {
         RemoveAsUser(it.Current());
       }
@@ -61,19 +59,17 @@ void HGraph::RemoveInstructionsAsUsersFromDeadBlocks(const ArenaBitVector& visit
   }
 }
 
-void HGraph::RemoveDeadBlocks(const ArenaBitVector& visited) const {
+void HGraph::RemoveDeadBlocks(const ArenaBitVector& visited) {
   for (size_t i = 0; i < blocks_.Size(); ++i) {
     if (!visited.IsBitSet(i)) {
       HBasicBlock* block = blocks_.Get(i);
+      // We only need to update the successor, which might be live.
       for (size_t j = 0; j < block->GetSuccessors().Size(); ++j) {
         block->GetSuccessors().Get(j)->RemovePredecessor(block);
       }
-      for (HInstructionIterator it(block->GetPhis()); !it.Done(); it.Advance()) {
-        block->RemovePhi(it.Current()->AsPhi(), /*ensure_safety=*/ false);
-      }
-      for (HInstructionIterator it(block->GetInstructions()); !it.Done(); it.Advance()) {
-        block->RemoveInstruction(it.Current(), /*ensure_safety=*/ false);
-      }
+      // Remove the block from the list of blocks, so that further analyses
+      // never see it.
+      blocks_.Put(i, nullptr);
     }
   }
 }
@@ -185,7 +181,7 @@ void HGraph::SplitCriticalEdge(HBasicBlock* block, HBasicBlock* successor) {
   if (successor->IsLoopHeader()) {
     // If we split at a back edge boundary, make the new block the back edge.
     HLoopInformation* info = successor->GetLoopInformation();
-    if (info->IsBackEdge(block)) {
+    if (info->IsBackEdge(*block)) {
       info->RemoveBackEdge(block);
       info->AddBackEdge(new_block);
     }
@@ -258,6 +254,7 @@ void HGraph::SimplifyCFG() {
   // (2): Simplify loops by having only one back edge, and one preheader.
   for (size_t i = 0; i < blocks_.Size(); ++i) {
     HBasicBlock* block = blocks_.Get(i);
+    if (block == nullptr) continue;
     if (block->GetSuccessors().Size() > 1) {
       for (size_t j = 0; j < block->GetSuccessors().Size(); ++j) {
         HBasicBlock* successor = block->GetSuccessors().Get(j);
@@ -274,8 +271,9 @@ void HGraph::SimplifyCFG() {
 }
 
 bool HGraph::AnalyzeNaturalLoops() const {
-  for (size_t i = 0; i < blocks_.Size(); ++i) {
-    HBasicBlock* block = blocks_.Get(i);
+  // Order does not matter.
+  for (HReversePostOrderIterator it(*this); !it.Done(); it.Advance()) {
+    HBasicBlock* block = it.Current();
     if (block->IsLoopHeader()) {
       HLoopInformation* info = block->GetLoopInformation();
       if (!info->Populate()) {
@@ -287,17 +285,63 @@ bool HGraph::AnalyzeNaturalLoops() const {
   return true;
 }
 
+void HGraph::InsertConstant(HConstant* constant) {
+  // New constants are inserted before the final control-flow instruction
+  // of the graph, or at its end if called from the graph builder.
+  if (entry_block_->EndsWithControlFlowInstruction()) {
+    entry_block_->InsertInstructionBefore(constant, entry_block_->GetLastInstruction());
+  } else {
+    entry_block_->AddInstruction(constant);
+  }
+}
+
 HNullConstant* HGraph::GetNullConstant() {
   if (cached_null_constant_ == nullptr) {
     cached_null_constant_ = new (arena_) HNullConstant();
-    entry_block_->InsertInstructionBefore(cached_null_constant_,
-                                          entry_block_->GetLastInstruction());
+    InsertConstant(cached_null_constant_);
   }
   return cached_null_constant_;
 }
 
+HConstant* HGraph::GetConstant(Primitive::Type type, int64_t value) {
+  switch (type) {
+    case Primitive::Type::kPrimBoolean:
+      DCHECK(IsUint<1>(value));
+      FALLTHROUGH_INTENDED;
+    case Primitive::Type::kPrimByte:
+    case Primitive::Type::kPrimChar:
+    case Primitive::Type::kPrimShort:
+    case Primitive::Type::kPrimInt:
+      DCHECK(IsInt(Primitive::ComponentSize(type) * kBitsPerByte, value));
+      return GetIntConstant(static_cast<int32_t>(value));
+
+    case Primitive::Type::kPrimLong:
+      return GetLongConstant(value);
+
+    default:
+      LOG(FATAL) << "Unsupported constant type";
+      UNREACHABLE();
+  }
+}
+
+void HGraph::CacheFloatConstant(HFloatConstant* constant) {
+  int32_t value = bit_cast<int32_t, float>(constant->GetValue());
+  DCHECK(cached_float_constants_.find(value) == cached_float_constants_.end());
+  cached_float_constants_.Overwrite(value, constant);
+}
+
+void HGraph::CacheDoubleConstant(HDoubleConstant* constant) {
+  int64_t value = bit_cast<int64_t, double>(constant->GetValue());
+  DCHECK(cached_double_constants_.find(value) == cached_double_constants_.end());
+  cached_double_constants_.Overwrite(value, constant);
+}
+
 void HLoopInformation::Add(HBasicBlock* block) {
   blocks_.SetBit(block->GetBlockId());
+}
+
+void HLoopInformation::Remove(HBasicBlock* block) {
+  blocks_.ClearBit(block->GetBlockId());
 }
 
 void HLoopInformation::PopulateRecursive(HBasicBlock* block) {
@@ -332,7 +376,6 @@ bool HLoopInformation::Populate() {
 }
 
 HBasicBlock* HLoopInformation::GetPreHeader() const {
-  DCHECK_EQ(header_->GetPredecessors().Size(), 2u);
   return header_->GetDominator();
 }
 
@@ -365,26 +408,6 @@ static void UpdateInputsUsers(HInstruction* instruction) {
   DCHECK(!instruction->HasEnvironment());
 }
 
-void HBasicBlock::InsertInstructionBefore(HInstruction* instruction, HInstruction* cursor) {
-  DCHECK(!cursor->IsPhi());
-  DCHECK(!instruction->IsPhi());
-  DCHECK_EQ(instruction->GetId(), -1);
-  DCHECK_NE(cursor->GetId(), -1);
-  DCHECK_EQ(cursor->GetBlock(), this);
-  DCHECK(!instruction->IsControlFlow());
-  instruction->next_ = cursor;
-  instruction->previous_ = cursor->previous_;
-  cursor->previous_ = instruction;
-  if (GetFirstInstruction() == cursor) {
-    instructions_.first_instruction_ = instruction;
-  } else {
-    instruction->previous_->next_ = instruction;
-  }
-  instruction->SetBlock(this);
-  instruction->SetId(GetGraph()->GetNextInstructionId());
-  UpdateInputsUsers(instruction);
-}
-
 void HBasicBlock::ReplaceAndRemoveInstructionWith(HInstruction* initial,
                                                   HInstruction* replacement) {
   DCHECK(initial->GetBlock() == this);
@@ -412,23 +435,41 @@ void HBasicBlock::AddPhi(HPhi* phi) {
   Add(&phis_, this, phi);
 }
 
+void HBasicBlock::InsertInstructionBefore(HInstruction* instruction, HInstruction* cursor) {
+  DCHECK(!cursor->IsPhi());
+  DCHECK(!instruction->IsPhi());
+  DCHECK_EQ(instruction->GetId(), -1);
+  DCHECK_NE(cursor->GetId(), -1);
+  DCHECK_EQ(cursor->GetBlock(), this);
+  DCHECK(!instruction->IsControlFlow());
+  instruction->SetBlock(this);
+  instruction->SetId(GetGraph()->GetNextInstructionId());
+  UpdateInputsUsers(instruction);
+  instructions_.InsertInstructionBefore(instruction, cursor);
+}
+
+void HBasicBlock::InsertInstructionAfter(HInstruction* instruction, HInstruction* cursor) {
+  DCHECK(!cursor->IsPhi());
+  DCHECK(!instruction->IsPhi());
+  DCHECK_EQ(instruction->GetId(), -1);
+  DCHECK_NE(cursor->GetId(), -1);
+  DCHECK_EQ(cursor->GetBlock(), this);
+  DCHECK(!instruction->IsControlFlow());
+  DCHECK(!cursor->IsControlFlow());
+  instruction->SetBlock(this);
+  instruction->SetId(GetGraph()->GetNextInstructionId());
+  UpdateInputsUsers(instruction);
+  instructions_.InsertInstructionAfter(instruction, cursor);
+}
+
 void HBasicBlock::InsertPhiAfter(HPhi* phi, HPhi* cursor) {
   DCHECK_EQ(phi->GetId(), -1);
   DCHECK_NE(cursor->GetId(), -1);
   DCHECK_EQ(cursor->GetBlock(), this);
-  if (cursor->next_ == nullptr) {
-    cursor->next_ = phi;
-    phi->previous_ = cursor;
-    DCHECK(phi->next_ == nullptr);
-  } else {
-    phi->next_ = cursor->next_;
-    phi->previous_ = cursor;
-    cursor->next_ = phi;
-    phi->next_->previous_ = phi;
-  }
   phi->SetBlock(this);
   phi->SetId(GetGraph()->GetNextInstructionId());
   UpdateInputsUsers(phi);
+  phis_.InsertInstructionAfter(phi, cursor);
 }
 
 static void Remove(HInstructionList* instruction_list,
@@ -446,6 +487,7 @@ static void Remove(HInstructionList* instruction_list,
 }
 
 void HBasicBlock::RemoveInstruction(HInstruction* instruction, bool ensure_safety) {
+  DCHECK(!instruction->IsPhi());
   Remove(&instructions_, this, instruction, ensure_safety);
 }
 
@@ -453,11 +495,41 @@ void HBasicBlock::RemovePhi(HPhi* phi, bool ensure_safety) {
   Remove(&phis_, this, phi, ensure_safety);
 }
 
+void HBasicBlock::RemoveInstructionOrPhi(HInstruction* instruction, bool ensure_safety) {
+  if (instruction->IsPhi()) {
+    RemovePhi(instruction->AsPhi(), ensure_safety);
+  } else {
+    RemoveInstruction(instruction, ensure_safety);
+  }
+}
+
 void HEnvironment::CopyFrom(HEnvironment* env) {
   for (size_t i = 0; i < env->Size(); i++) {
     HInstruction* instruction = env->GetInstructionAt(i);
     SetRawEnvAt(i, instruction);
     if (instruction != nullptr) {
+      instruction->AddEnvUseAt(this, i);
+    }
+  }
+}
+
+void HEnvironment::CopyFromWithLoopPhiAdjustment(HEnvironment* env,
+                                                 HBasicBlock* loop_header) {
+  DCHECK(loop_header->IsLoopHeader());
+  for (size_t i = 0; i < env->Size(); i++) {
+    HInstruction* instruction = env->GetInstructionAt(i);
+    SetRawEnvAt(i, instruction);
+    if (instruction == nullptr) {
+      continue;
+    }
+    if (instruction->IsLoopHeaderPhi() && (instruction->GetBlock() == loop_header)) {
+      // At the end of the loop pre-header, the corresponding value for instruction
+      // is the first input of the phi.
+      HInstruction* initial = instruction->AsPhi()->InputAt(0);
+      DCHECK(initial->GetBlock()->Dominates(loop_header));
+      SetRawEnvAt(i, initial);
+      initial->AddEnvUseAt(this, i);
+    } else {
       instruction->AddEnvUseAt(this, i);
     }
   }
@@ -492,6 +564,34 @@ void HInstructionList::AddInstruction(HInstruction* instruction) {
     last_instruction_->next_ = instruction;
     instruction->previous_ = last_instruction_;
     last_instruction_ = instruction;
+  }
+}
+
+void HInstructionList::InsertInstructionBefore(HInstruction* instruction, HInstruction* cursor) {
+  DCHECK(Contains(cursor));
+  if (cursor == first_instruction_) {
+    cursor->previous_ = instruction;
+    instruction->next_ = cursor;
+    first_instruction_ = instruction;
+  } else {
+    instruction->previous_ = cursor->previous_;
+    instruction->next_ = cursor;
+    cursor->previous_ = instruction;
+    instruction->previous_->next_ = instruction;
+  }
+}
+
+void HInstructionList::InsertInstructionAfter(HInstruction* instruction, HInstruction* cursor) {
+  DCHECK(Contains(cursor));
+  if (cursor == last_instruction_) {
+    cursor->next_ = instruction;
+    instruction->previous_ = cursor;
+    last_instruction_ = instruction;
+  } else {
+    instruction->next_ = cursor->next_;
+    instruction->previous_ = cursor;
+    cursor->next_ = instruction;
+    instruction->next_->previous_ = instruction;
   }
 }
 
@@ -609,6 +709,11 @@ void HPhi::AddInput(HInstruction* input) {
   input->AddUseAt(this, inputs_.Size() - 1);
 }
 
+void HPhi::RemoveInputAt(size_t index) {
+  RemoveAsUserOfInput(index);
+  inputs_.DeleteAt(index);
+}
+
 #define DEFINE_ACCEPT(name, super)                                             \
 void H##name::Accept(HGraphVisitor* visitor) {                                 \
   visitor->Visit##name(this);                                                  \
@@ -621,7 +726,10 @@ FOR_EACH_INSTRUCTION(DEFINE_ACCEPT)
 void HGraphVisitor::VisitInsertionOrder() {
   const GrowableArray<HBasicBlock*>& blocks = graph_->GetBlocks();
   for (size_t i = 0 ; i < blocks.Size(); i++) {
-    VisitBasicBlock(blocks.Get(i));
+    HBasicBlock* block = blocks.Get(i);
+    if (block != nullptr) {
+      VisitBasicBlock(block);
+    }
   }
 }
 
@@ -643,12 +751,12 @@ void HGraphVisitor::VisitBasicBlock(HBasicBlock* block) {
 HConstant* HUnaryOperation::TryStaticEvaluation() const {
   if (GetInput()->IsIntConstant()) {
     int32_t value = Evaluate(GetInput()->AsIntConstant()->GetValue());
-    return new(GetBlock()->GetGraph()->GetArena()) HIntConstant(value);
+    return GetBlock()->GetGraph()->GetIntConstant(value);
   } else if (GetInput()->IsLongConstant()) {
     // TODO: Implement static evaluation of long unary operations.
     //
     // Do not exit with a fatal condition here.  Instead, simply
-    // return `nullptr' to notify the caller that this instruction
+    // return `null' to notify the caller that this instruction
     // cannot (yet) be statically evaluated.
     return nullptr;
   }
@@ -659,15 +767,15 @@ HConstant* HBinaryOperation::TryStaticEvaluation() const {
   if (GetLeft()->IsIntConstant() && GetRight()->IsIntConstant()) {
     int32_t value = Evaluate(GetLeft()->AsIntConstant()->GetValue(),
                              GetRight()->AsIntConstant()->GetValue());
-    return new(GetBlock()->GetGraph()->GetArena()) HIntConstant(value);
+    return GetBlock()->GetGraph()->GetIntConstant(value);
   } else if (GetLeft()->IsLongConstant() && GetRight()->IsLongConstant()) {
     int64_t value = Evaluate(GetLeft()->AsLongConstant()->GetValue(),
                              GetRight()->AsLongConstant()->GetValue());
     if (GetResultType() == Primitive::kPrimLong) {
-      return new(GetBlock()->GetGraph()->GetArena()) HLongConstant(value);
+      return GetBlock()->GetGraph()->GetLongConstant(value);
     } else {
       DCHECK_EQ(GetResultType(), Primitive::kPrimInt);
-      return new(GetBlock()->GetGraph()->GetArena()) HIntConstant(value);
+      return GetBlock()->GetGraph()->GetIntConstant(static_cast<int32_t>(value));
     }
   }
   return nullptr;
@@ -684,7 +792,7 @@ HConstant* HBinaryOperation::GetConstantRight() const {
 }
 
 // If `GetConstantRight()` returns one of the input, this returns the other
-// one. Otherwise it returns nullptr.
+// one. Otherwise it returns null.
 HInstruction* HBinaryOperation::GetLeastConstantLeft() const {
   HInstruction* most_constant_right = GetConstantRight();
   if (most_constant_right == nullptr) {
@@ -696,18 +804,8 @@ HInstruction* HBinaryOperation::GetLeastConstantLeft() const {
   }
 }
 
-bool HCondition::IsBeforeWhenDisregardMoves(HIf* if_) const {
-  return this == if_->GetPreviousDisregardingMoves();
-}
-
-HConstant* HConstant::NewConstant(ArenaAllocator* allocator, Primitive::Type type, int64_t val) {
-  if (type == Primitive::kPrimInt) {
-    DCHECK(IsInt<32>(val));
-    return new (allocator) HIntConstant(val);
-  } else {
-    DCHECK_EQ(type, Primitive::kPrimLong);
-    return new (allocator) HLongConstant(val);
-  }
+bool HCondition::IsBeforeWhenDisregardMoves(HInstruction* instruction) const {
+  return this == instruction->GetPreviousDisregardingMoves();
 }
 
 bool HInstruction::Equals(HInstruction* other) const {
@@ -788,6 +886,38 @@ HBasicBlock* HBasicBlock::SplitAfter(HInstruction* cursor) {
   return new_block;
 }
 
+bool HBasicBlock::IsSingleGoto() const {
+  HLoopInformation* loop_info = GetLoopInformation();
+  // TODO: Remove the null check b/19084197.
+  return GetFirstInstruction() != nullptr
+         && GetPhis().IsEmpty()
+         && GetFirstInstruction() == GetLastInstruction()
+         && GetLastInstruction()->IsGoto()
+         // Back edges generate the suspend check.
+         && (loop_info == nullptr || !loop_info->IsBackEdge(*this));
+}
+
+bool HBasicBlock::EndsWithControlFlowInstruction() const {
+  return !GetInstructions().IsEmpty() && GetLastInstruction()->IsControlFlow();
+}
+
+bool HBasicBlock::EndsWithIf() const {
+  return !GetInstructions().IsEmpty() && GetLastInstruction()->IsIf();
+}
+
+bool HBasicBlock::HasSinglePhi() const {
+  return !GetPhis().IsEmpty() && GetFirstPhi()->GetNext() == nullptr;
+}
+
+size_t HInstructionList::CountSize() const {
+  size_t size = 0;
+  HInstruction* current = first_instruction_;
+  for (; current != nullptr; current = current->GetNext()) {
+    size++;
+  }
+  return size;
+}
+
 void HInstructionList::SetBlockOfInstructions(HBasicBlock* block) const {
   for (HInstruction* current = first_instruction_;
        current != nullptr;
@@ -811,27 +941,189 @@ void HInstructionList::AddAfter(HInstruction* cursor, const HInstructionList& in
 }
 
 void HInstructionList::Add(const HInstructionList& instruction_list) {
-  DCHECK(!IsEmpty());
-  AddAfter(last_instruction_, instruction_list);
+  if (IsEmpty()) {
+    first_instruction_ = instruction_list.first_instruction_;
+    last_instruction_ = instruction_list.last_instruction_;
+  } else {
+    AddAfter(last_instruction_, instruction_list);
+  }
+}
+
+void HBasicBlock::DisconnectAndDelete() {
+  // Dominators must be removed after all the blocks they dominate. This way
+  // a loop header is removed last, a requirement for correct loop information
+  // iteration.
+  DCHECK(dominated_blocks_.IsEmpty());
+
+  // Remove the block from all loops it is included in.
+  for (HLoopInformationOutwardIterator it(*this); !it.Done(); it.Advance()) {
+    HLoopInformation* loop_info = it.Current();
+    loop_info->Remove(this);
+    if (loop_info->IsBackEdge(*this)) {
+      // This deliberately leaves the loop in an inconsistent state and will
+      // fail SSAChecker unless the entire loop is removed during the pass.
+      loop_info->RemoveBackEdge(this);
+    }
+  }
+
+  // Disconnect the block from its predecessors and update their control-flow
+  // instructions.
+  for (size_t i = 0, e = predecessors_.Size(); i < e; ++i) {
+    HBasicBlock* predecessor = predecessors_.Get(i);
+    HInstruction* last_instruction = predecessor->GetLastInstruction();
+    predecessor->RemoveInstruction(last_instruction);
+    predecessor->RemoveSuccessor(this);
+    if (predecessor->GetSuccessors().Size() == 1u) {
+      DCHECK(last_instruction->IsIf());
+      predecessor->AddInstruction(new (graph_->GetArena()) HGoto());
+    } else {
+      // The predecessor has no remaining successors and therefore must be dead.
+      // We deliberately leave it without a control-flow instruction so that the
+      // SSAChecker fails unless it is not removed during the pass too.
+      DCHECK_EQ(predecessor->GetSuccessors().Size(), 0u);
+    }
+  }
+  predecessors_.Reset();
+
+  // Disconnect the block from its successors and update their dominators
+  // and phis.
+  for (size_t i = 0, e = successors_.Size(); i < e; ++i) {
+    HBasicBlock* successor = successors_.Get(i);
+    // Delete this block from the list of predecessors.
+    size_t this_index = successor->GetPredecessorIndexOf(this);
+    successor->predecessors_.DeleteAt(this_index);
+
+    // Check that `successor` has other predecessors, otherwise `this` is the
+    // dominator of `successor` which violates the order DCHECKed at the top.
+    DCHECK(!successor->predecessors_.IsEmpty());
+
+    // Recompute the successor's dominator.
+    HBasicBlock* old_dominator = successor->GetDominator();
+    HBasicBlock* new_dominator = successor->predecessors_.Get(0);
+    for (size_t j = 1, f = successor->predecessors_.Size(); j < f; ++j) {
+      new_dominator = graph_->FindCommonDominator(
+          new_dominator, successor->predecessors_.Get(j));
+    }
+    if (old_dominator != new_dominator) {
+      successor->SetDominator(new_dominator);
+      old_dominator->RemoveDominatedBlock(successor);
+      new_dominator->AddDominatedBlock(successor);
+    }
+
+    // Remove this block's entries in the successor's phis.
+    if (successor->predecessors_.Size() == 1u) {
+      // The successor has just one predecessor left. Replace phis with the only
+      // remaining input.
+      for (HInstructionIterator phi_it(successor->GetPhis()); !phi_it.Done(); phi_it.Advance()) {
+        HPhi* phi = phi_it.Current()->AsPhi();
+        phi->ReplaceWith(phi->InputAt(1 - this_index));
+        successor->RemovePhi(phi);
+      }
+    } else {
+      for (HInstructionIterator phi_it(successor->GetPhis()); !phi_it.Done(); phi_it.Advance()) {
+        phi_it.Current()->AsPhi()->RemoveInputAt(this_index);
+      }
+    }
+  }
+  successors_.Reset();
+
+  // Disconnect from the dominator.
+  dominator_->RemoveDominatedBlock(this);
+  SetDominator(nullptr);
+
+  // Delete from the graph. The function safely deletes remaining instructions
+  // and updates the reverse post order.
+  graph_->DeleteDeadBlock(this);
+  SetGraph(nullptr);
+}
+
+void HBasicBlock::UpdateLoopInformation() {
+  // Check if loop information points to a dismantled loop. If so, replace with
+  // the loop information of a larger loop which contains this block, or nullptr
+  // otherwise. We iterate in case the larger loop has been destroyed too.
+  while (IsInLoop() && loop_information_->GetBackEdges().IsEmpty()) {
+    if (IsLoopHeader()) {
+      HSuspendCheck* suspend_check = loop_information_->GetSuspendCheck();
+      DCHECK_EQ(suspend_check->GetBlock(), this);
+      RemoveInstruction(suspend_check);
+    }
+    loop_information_ = loop_information_->GetPreHeader()->GetLoopInformation();
+  }
 }
 
 void HBasicBlock::MergeWith(HBasicBlock* other) {
-  DCHECK(successors_.IsEmpty()) << "Unimplemented block merge scenario";
-  DCHECK(dominated_blocks_.IsEmpty()) << "Unimplemented block merge scenario";
-  DCHECK(other->GetDominator()->IsEntryBlock() && other->GetGraph() != graph_)
-      << "Unimplemented block merge scenario";
+  DCHECK_EQ(GetGraph(), other->GetGraph());
+  DCHECK(GetDominatedBlocks().Contains(other));
+  DCHECK_EQ(GetSuccessors().Size(), 1u);
+  DCHECK_EQ(GetSuccessors().Get(0), other);
+  DCHECK_EQ(other->GetPredecessors().Size(), 1u);
+  DCHECK_EQ(other->GetPredecessors().Get(0), this);
   DCHECK(other->GetPhis().IsEmpty());
 
-  successors_.Reset();
-  dominated_blocks_.Reset();
+  // Move instructions from `other` to `this`.
+  DCHECK(EndsWithControlFlowInstruction());
+  RemoveInstruction(GetLastInstruction());
   instructions_.Add(other->GetInstructions());
-  other->GetInstructions().SetBlockOfInstructions(this);
+  other->instructions_.SetBlockOfInstructions(this);
+  other->instructions_.Clear();
 
-  while (!other->GetSuccessors().IsEmpty()) {
-    HBasicBlock* successor = other->GetSuccessors().Get(0);
+  // Remove `other` from the loops it is included in.
+  for (HLoopInformationOutwardIterator it(*other); !it.Done(); it.Advance()) {
+    HLoopInformation* loop_info = it.Current();
+    loop_info->Remove(other);
+    if (loop_info->IsBackEdge(*other)) {
+      loop_info->ClearBackEdges();
+      loop_info->AddBackEdge(this);
+    }
+  }
+
+  // Update links to the successors of `other`.
+  successors_.Reset();
+  while (!other->successors_.IsEmpty()) {
+    HBasicBlock* successor = other->successors_.Get(0);
     successor->ReplacePredecessor(other, this);
   }
 
+  // Update the dominator tree.
+  dominated_blocks_.Delete(other);
+  for (size_t i = 0, e = other->GetDominatedBlocks().Size(); i < e; ++i) {
+    HBasicBlock* dominated = other->GetDominatedBlocks().Get(i);
+    dominated_blocks_.Add(dominated);
+    dominated->SetDominator(this);
+  }
+  other->dominated_blocks_.Reset();
+  other->dominator_ = nullptr;
+
+  // Clear the list of predecessors of `other` in preparation of deleting it.
+  other->predecessors_.Reset();
+
+  // Delete `other` from the graph. The function updates reverse post order.
+  graph_->DeleteDeadBlock(other);
+  other->SetGraph(nullptr);
+}
+
+void HBasicBlock::MergeWithInlined(HBasicBlock* other) {
+  DCHECK_NE(GetGraph(), other->GetGraph());
+  DCHECK(GetDominatedBlocks().IsEmpty());
+  DCHECK(GetSuccessors().IsEmpty());
+  DCHECK(!EndsWithControlFlowInstruction());
+  DCHECK_EQ(other->GetPredecessors().Size(), 1u);
+  DCHECK(other->GetPredecessors().Get(0)->IsEntryBlock());
+  DCHECK(other->GetPhis().IsEmpty());
+  DCHECK(!other->IsInLoop());
+
+  // Move instructions from `other` to `this`.
+  instructions_.Add(other->GetInstructions());
+  other->instructions_.SetBlockOfInstructions(this);
+
+  // Update links to the successors of `other`.
+  successors_.Reset();
+  while (!other->successors_.IsEmpty()) {
+    HBasicBlock* successor = other->successors_.Get(0);
+    successor->ReplacePredecessor(other, this);
+  }
+
+  // Update the dominator tree.
   for (size_t i = 0, e = other->GetDominatedBlocks().Size(); i < e; ++i) {
     HBasicBlock* dominated = other->GetDominatedBlocks().Get(i);
     dominated_blocks_.Add(dominated);
@@ -873,24 +1165,25 @@ static void MakeRoomFor(GrowableArray<HBasicBlock*>* blocks,
   }
 }
 
-void HGraph::InlineInto(HGraph* outer_graph, HInvoke* invoke) {
-  // Walk over the entry block and:
-  // - Move constants from the entry block to the outer_graph's entry block,
-  // - Replace HParameterValue instructions with their real value.
-  // - Remove suspend checks, that hold an environment.
-  int parameter_index = 0;
-  for (HInstructionIterator it(entry_block_->GetInstructions()); !it.Done(); it.Advance()) {
-    HInstruction* current = it.Current();
-    if (current->IsConstant()) {
-      current->MoveBefore(outer_graph->GetEntryBlock()->GetLastInstruction());
-    } else if (current->IsParameterValue()) {
-      current->ReplaceWith(invoke->InputAt(parameter_index++));
-    } else {
-      DCHECK(current->IsGoto() || current->IsSuspendCheck());
-      entry_block_->RemoveInstruction(current);
-    }
+void HGraph::DeleteDeadBlock(HBasicBlock* block) {
+  DCHECK_EQ(block->GetGraph(), this);
+  DCHECK(block->GetSuccessors().IsEmpty());
+  DCHECK(block->GetPredecessors().IsEmpty());
+  DCHECK(block->GetDominatedBlocks().IsEmpty());
+  DCHECK(block->GetDominator() == nullptr);
+
+  for (HBackwardInstructionIterator it(block->GetInstructions()); !it.Done(); it.Advance()) {
+    block->RemoveInstruction(it.Current());
+  }
+  for (HBackwardInstructionIterator it(block->GetPhis()); !it.Done(); it.Advance()) {
+    block->RemovePhi(it.Current()->AsPhi());
   }
 
+  reverse_post_order_.Delete(block);
+  blocks_.Put(block->GetBlockId(), nullptr);
+}
+
+void HGraph::InlineInto(HGraph* outer_graph, HInvoke* invoke) {
   if (GetBlocks().Size() == 3) {
     // Simple case of an entry block, a body block, and an exit block.
     // Put the body block's instruction into `invoke`'s block.
@@ -922,7 +1215,7 @@ void HGraph::InlineInto(HGraph* outer_graph, HInvoke* invoke) {
 
     HBasicBlock* first = entry_block_->GetSuccessors().Get(0);
     DCHECK(!first->IsInLoop());
-    at->MergeWith(first);
+    at->MergeWithInlined(first);
     exit_block_->ReplaceWith(to);
 
     // Update all predecessors of the exit block (now the `to` block)
@@ -993,8 +1286,10 @@ void HGraph::InlineInto(HGraph* outer_graph, HInvoke* invoke) {
         outer_graph->AddBlock(current);
         outer_graph->reverse_post_order_.Put(++index_of_at, current);
         if (info != nullptr) {
-          info->Add(current);
           current->SetLoopInformation(info);
+          for (HLoopInformationOutwardIterator loop_it(*at); !loop_it.Done(); loop_it.Advance()) {
+            loop_it.Current()->Add(current);
+          }
         }
       }
     }
@@ -1004,15 +1299,56 @@ void HGraph::InlineInto(HGraph* outer_graph, HInvoke* invoke) {
     outer_graph->AddBlock(to);
     outer_graph->reverse_post_order_.Put(++index_of_at, to);
     if (info != nullptr) {
-      info->Add(to);
       to->SetLoopInformation(info);
-      if (info->IsBackEdge(at)) {
+      for (HLoopInformationOutwardIterator loop_it(*at); !loop_it.Done(); loop_it.Advance()) {
+        loop_it.Current()->Add(to);
+      }
+      if (info->IsBackEdge(*at)) {
         // Only `at` can become a back edge, as the inlined blocks
         // are predecessors of `at`.
         DCHECK_EQ(1u, info->NumberOfBackEdges());
         info->ClearBackEdges();
         info->AddBackEdge(to);
       }
+    }
+  }
+
+  // Update the next instruction id of the outer graph, so that instructions
+  // added later get bigger ids than those in the inner graph.
+  outer_graph->SetCurrentInstructionId(GetNextInstructionId());
+
+  // Walk over the entry block and:
+  // - Move constants from the entry block to the outer_graph's entry block,
+  // - Replace HParameterValue instructions with their real value.
+  // - Remove suspend checks, that hold an environment.
+  // We must do this after the other blocks have been inlined, otherwise ids of
+  // constants could overlap with the inner graph.
+  size_t parameter_index = 0;
+  for (HInstructionIterator it(entry_block_->GetInstructions()); !it.Done(); it.Advance()) {
+    HInstruction* current = it.Current();
+    if (current->IsNullConstant()) {
+      current->ReplaceWith(outer_graph->GetNullConstant());
+    } else if (current->IsIntConstant()) {
+      current->ReplaceWith(outer_graph->GetIntConstant(current->AsIntConstant()->GetValue()));
+    } else if (current->IsLongConstant()) {
+      current->ReplaceWith(outer_graph->GetLongConstant(current->AsLongConstant()->GetValue()));
+    } else if (current->IsFloatConstant()) {
+      current->ReplaceWith(outer_graph->GetFloatConstant(current->AsFloatConstant()->GetValue()));
+    } else if (current->IsDoubleConstant()) {
+      current->ReplaceWith(outer_graph->GetDoubleConstant(current->AsDoubleConstant()->GetValue()));
+    } else if (current->IsParameterValue()) {
+      if (kIsDebugBuild
+          && invoke->IsInvokeStaticOrDirect()
+          && invoke->AsInvokeStaticOrDirect()->IsStaticWithExplicitClinitCheck()) {
+        // Ensure we do not use the last input of `invoke`, as it
+        // contains a clinit check which is not an actual argument.
+        size_t last_input_index = invoke->InputCount() - 1;
+        DCHECK(parameter_index != last_input_index);
+      }
+      current->ReplaceWith(invoke->InputAt(parameter_index++));
+    } else {
+      DCHECK(current->IsGoto() || current->IsSuspendCheck());
+      entry_block_->RemoveInstruction(current);
     }
   }
 

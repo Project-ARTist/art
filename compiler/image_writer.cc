@@ -19,11 +19,13 @@
 #include <sys/stat.h>
 
 #include <memory>
+#include <numeric>
 #include <vector>
 
+#include "art_field-inl.h"
 #include "base/logging.h"
 #include "base/unix_file/fd_file.h"
-#include "class_linker.h"
+#include "class_linker-inl.h"
 #include "compiled_method.h"
 #include "dex_file-inl.h"
 #include "driver/compiler_driver.h"
@@ -39,8 +41,8 @@
 #include "globals.h"
 #include "image.h"
 #include "intern_table.h"
+#include "linear_alloc.h"
 #include "lock_word.h"
-#include "mirror/art_field-inl.h"
 #include "mirror/art_method-inl.h"
 #include "mirror/array-inl.h"
 #include "mirror/class-inl.h"
@@ -54,10 +56,8 @@
 #include "runtime.h"
 #include "scoped_thread_state_change.h"
 #include "handle_scope-inl.h"
+#include "utils/dex_cache_arrays_layout-inl.h"
 
-#include <numeric>
-
-using ::art::mirror::ArtField;
 using ::art::mirror::ArtMethod;
 using ::art::mirror::Class;
 using ::art::mirror::DexCache;
@@ -70,6 +70,7 @@ namespace art {
 
 // Separate objects into multiple bins to optimize dirty memory use.
 static constexpr bool kBinObjects = true;
+static constexpr bool kComputeEagerResolvedStrings = false;
 
 static void CheckNoDexObjectsCallback(Object* obj, void* arg ATTRIBUTE_UNUSED)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
@@ -88,7 +89,12 @@ bool ImageWriter::PrepareImageAddressSpace() {
     Thread::Current()->TransitionFromSuspendedToRunnable();
     PruneNonImageClasses();  // Remove junk
     ComputeLazyFieldsForImageClasses();  // Add useful information
-    ProcessStrings();
+
+    // Calling this can in theory fill in some resolved strings. However, in practice it seems to
+    // never resolve any.
+    if (kComputeEagerResolvedStrings) {
+      ComputeEagerResolvedStrings();
+    }
     Thread::Current()->TransitionFromRunnableToSuspended(kNative);
   }
   gc::Heap* heap = Runtime::Current()->GetHeap();
@@ -128,12 +134,12 @@ bool ImageWriter::Write(const std::string& image_filename,
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
 
   std::unique_ptr<File> oat_file(OS::OpenFileReadWrite(oat_filename.c_str()));
-  if (oat_file.get() == NULL) {
+  if (oat_file.get() == nullptr) {
     PLOG(ERROR) << "Failed to open oat file " << oat_filename << " for " << oat_location;
     return false;
   }
   std::string error_msg;
-  oat_file_ = OatFile::OpenReadable(oat_file.get(), oat_location, &error_msg);
+  oat_file_ = OatFile::OpenReadable(oat_file.get(), oat_location, nullptr, &error_msg);
   if (oat_file_ == nullptr) {
     PLOG(ERROR) << "Failed to open writable oat file " << oat_filename << " for " << oat_location
         << ": " << error_msg;
@@ -164,6 +170,9 @@ bool ImageWriter::Write(const std::string& image_filename,
 
   Thread::Current()->TransitionFromSuspendedToRunnable();
   CreateHeader(oat_loaded_size, oat_data_offset);
+  // TODO: heap validation can't handle these fix up passes.
+  Runtime::Current()->GetHeap()->DisableObjectValidation();
+  CopyAndFixupNativeData();
   CopyAndFixupObjects();
   Thread::Current()->TransitionFromRunnableToSuspended(kNative);
 
@@ -176,7 +185,7 @@ bool ImageWriter::Write(const std::string& image_filename,
 
   std::unique_ptr<File> image_file(OS::CreateEmptyFile(image_filename.c_str()));
   ImageHeader* image_header = reinterpret_cast<ImageHeader*>(image_->Begin());
-  if (image_file.get() == NULL) {
+  if (image_file.get() == nullptr) {
     LOG(ERROR) << "Failed to open image file " << image_filename;
     return false;
   }
@@ -186,9 +195,10 @@ bool ImageWriter::Write(const std::string& image_filename,
     return EXIT_FAILURE;
   }
 
-  // Write out the image.
+  // Write out the image + fields.
+  const auto write_count = image_header->GetImageSize() + image_header->GetArtFieldsSize();
   CHECK_EQ(image_end_, image_header->GetImageSize());
-  if (!image_file->WriteFully(image_->Begin(), image_end_)) {
+  if (!image_file->WriteFully(image_->Begin(), write_count)) {
     PLOG(ERROR) << "Failed to write image file " << image_filename;
     image_file->Erase();
     return false;
@@ -204,6 +214,8 @@ bool ImageWriter::Write(const std::string& image_filename,
     return false;
   }
 
+  CHECK_EQ(image_header->GetImageBitmapOffset() + image_header->GetImageBitmapSize(),
+           static_cast<size_t>(image_file->GetLength()));
   if (image_file->FlushCloseOrErase() != 0) {
     PLOG(ERROR) << "Failed to flush and close image file " << image_filename;
     return false;
@@ -219,6 +231,8 @@ void ImageWriter::SetImageOffset(mirror::Object* object,
   mirror::Object* obj = reinterpret_cast<mirror::Object*>(image_->Begin() + offset);
   DCHECK_ALIGNED(obj, kObjectAlignment);
 
+  static size_t max_offset = 0;
+  max_offset = std::max(max_offset, offset);
   image_bitmap_->Set(obj);  // Mark the obj as mutated, since we will end up changing it.
   {
     // Remember the object-inside-of-the-image's hash code so we can restore it after the copy.
@@ -238,7 +252,7 @@ void ImageWriter::AssignImageOffset(mirror::Object* object, ImageWriter::BinSlot
   DCHECK(object != nullptr);
   DCHECK_NE(image_objects_offset_begin_, 0u);
 
-  size_t previous_bin_sizes = GetBinSizeSum(bin_slot.GetBin());  // sum sizes in [0..bin#)
+  size_t previous_bin_sizes = bin_slot_previous_sizes_[bin_slot.GetBin()];
   size_t new_offset = image_objects_offset_begin_ + previous_bin_sizes + bin_slot.GetIndex();
   DCHECK_ALIGNED(new_offset, kObjectAlignment);
 
@@ -293,6 +307,41 @@ void ImageWriter::SetImageBinSlot(mirror::Object* object, BinSlot bin_slot) {
   DCHECK(IsImageBinSlotAssigned(object));
 }
 
+void ImageWriter::PrepareDexCacheArraySlots() {
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  ReaderMutexLock mu(Thread::Current(), *class_linker->DexLock());
+  size_t dex_cache_count = class_linker->GetDexCacheCount();
+  uint32_t size = 0u;
+  for (size_t idx = 0; idx < dex_cache_count; ++idx) {
+    DexCache* dex_cache = class_linker->GetDexCache(idx);
+    const DexFile* dex_file = dex_cache->GetDexFile();
+    dex_cache_array_starts_.Put(dex_file, size);
+    DexCacheArraysLayout layout(target_ptr_size_, dex_file);
+    DCHECK(layout.Valid());
+    auto types_size = layout.TypesSize(dex_file->NumTypeIds());
+    auto methods_size = layout.MethodsSize(dex_file->NumMethodIds());
+    auto fields_size = layout.FieldsSize(dex_file->NumFieldIds());
+    auto strings_size = layout.StringsSize(dex_file->NumStringIds());
+    dex_cache_array_indexes_.Put(
+        dex_cache->GetResolvedTypes(),
+        DexCacheArrayLocation {size + layout.TypesOffset(), types_size});
+    dex_cache_array_indexes_.Put(
+        dex_cache->GetResolvedMethods(),
+        DexCacheArrayLocation {size + layout.MethodsOffset(), methods_size});
+    dex_cache_array_indexes_.Put(
+        dex_cache->GetResolvedFields(),
+        DexCacheArrayLocation {size + layout.FieldsOffset(), fields_size});
+    dex_cache_array_indexes_.Put(
+        dex_cache->GetStrings(),
+        DexCacheArrayLocation {size + layout.StringsOffset(), strings_size});
+    size += layout.Size();
+    CHECK_EQ(layout.Size(), types_size + methods_size + fields_size + strings_size);
+  }
+  // Set the slot size early to avoid DCHECK() failures in IsImageBinSlotAssigned()
+  // when AssignImageBinSlot() assigns their indexes out or order.
+  bin_slot_sizes_[kBinDexCacheArray] = size;
+}
+
 void ImageWriter::AssignImageBinSlot(mirror::Object* object) {
   DCHECK(object != nullptr);
   size_t object_size = object->SizeOf();
@@ -307,6 +356,7 @@ void ImageWriter::AssignImageBinSlot(mirror::Object* object) {
   // This means more pages will stay either clean or shared dirty (with zygote) and
   // the app will use less of its own (private) memory.
   Bin bin = kBinRegular;
+  size_t current_offset = 0u;
 
   if (kBinObjects) {
     //
@@ -316,6 +366,12 @@ void ImageWriter::AssignImageBinSlot(mirror::Object* object) {
     // Memory analysis has determined that the following types of objects get dirtied
     // the most:
     //
+    // * Dex cache arrays are stored in a special bin. The arrays for each dex cache have
+    //   a fixed layout which helps improve generated code (using PC-relative addressing),
+    //   so we pre-calculate their offsets separately in PrepareDexCacheArraySlots().
+    //   Since these arrays are huge, most pages do not overlap other objects and it's not
+    //   really important where they are for the clean/dirty separation. Due to their
+    //   special PC-relative addressing, we arbitrarily keep them at the beginning.
     // * Class'es which are verified [their clinit runs only at runtime]
     //   - classes in general [because their static fields get overwritten]
     //   - initialized classes with all-final statics are unlikely to be ever dirty,
@@ -376,13 +432,29 @@ void ImageWriter::AssignImageBinSlot(mirror::Object* object) {
       }
     } else if (object->GetClass<kVerifyNone>()->IsStringClass()) {
       bin = kBinString;  // Strings are almost always immutable (except for object header).
+    } else if (object->IsArrayInstance()) {
+      mirror::Class* klass = object->GetClass<kVerifyNone>();
+      auto* component_type = klass->GetComponentType();
+      if (!component_type->IsPrimitive() || component_type->IsPrimitiveInt() ||
+          component_type->IsPrimitiveLong()) {
+        auto it = dex_cache_array_indexes_.find(object);
+        if (it != dex_cache_array_indexes_.end()) {
+          bin = kBinDexCacheArray;
+          // Use prepared offset defined by the DexCacheLayout.
+          current_offset = it->second.offset_;
+          // Override incase of cross compilation.
+          object_size = it->second.length_;
+        }  // else bin = kBinRegular
+      }
     }  // else bin = kBinRegular
   }
 
-  size_t current_offset = bin_slot_sizes_[bin];  // How many bytes the current bin is at (aligned).
-  // Move the current bin size up to accomodate the object we just assigned a bin slot.
   size_t offset_delta = RoundUp(object_size, kObjectAlignment);  // 64-bit alignment
-  bin_slot_sizes_[bin] += offset_delta;
+  if (bin != kBinDexCacheArray) {
+    current_offset = bin_slot_sizes_[bin];  // How many bytes the current bin is at (aligned).
+    // Move the current bin size up to accomodate the object we just assigned a bin slot.
+    bin_slot_sizes_[bin] += offset_delta;
+  }
 
   BinSlot new_bin_slot(bin, current_offset);
   SetImageBinSlot(object, new_bin_slot);
@@ -428,7 +500,10 @@ ImageWriter::BinSlot ImageWriter::GetImageBinSlot(mirror::Object* object) const 
 }
 
 bool ImageWriter::AllocMemory() {
-  size_t length = RoundUp(Runtime::Current()->GetHeap()->GetTotalMemory(), kPageSize);
+  auto* runtime = Runtime::Current();
+  const size_t heap_size = runtime->GetHeap()->GetTotalMemory();
+  // Add linear alloc usage since we need to have room for the ArtFields.
+  const size_t length = RoundUp(heap_size + runtime->GetLinearAlloc()->GetUsedMemory(), kPageSize);
   std::string error_msg;
   image_.reset(MemMap::MapAnonymous("image writer image", nullptr, length, PROT_READ | PROT_WRITE,
                                     false, false, &error_msg));
@@ -439,7 +514,7 @@ bool ImageWriter::AllocMemory() {
 
   // Create the image bitmap.
   image_bitmap_.reset(gc::accounting::ContinuousSpaceBitmap::Create("image bitmap", image_->Begin(),
-                                                                    length));
+                                                                    RoundUp(length, kPageSize)));
   if (image_bitmap_.get() == nullptr) {
     LOG(ERROR) << "Failed to allocate memory for image bitmap";
     return false;
@@ -449,7 +524,7 @@ bool ImageWriter::AllocMemory() {
 
 void ImageWriter::ComputeLazyFieldsForImageClasses() {
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  class_linker->VisitClassesWithoutClassesLock(ComputeLazyFieldsForClassesVisitor, NULL);
+  class_linker->VisitClassesWithoutClassesLock(ComputeLazyFieldsForClassesVisitor, nullptr);
 }
 
 bool ImageWriter::ComputeLazyFieldsForClassesVisitor(Class* c, void* /*arg*/) {
@@ -457,14 +532,6 @@ bool ImageWriter::ComputeLazyFieldsForClassesVisitor(Class* c, void* /*arg*/) {
   StackHandleScope<1> hs(self);
   mirror::Class::ComputeName(hs.NewHandle(c));
   return true;
-}
-
-// Count the number of strings in the heap and put the result in arg as a size_t pointer.
-static void CountStringsCallback(Object* obj, void* arg)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  if (obj->GetClass()->IsStringClass()) {
-    ++*reinterpret_cast<size_t*>(arg);
-  }
 }
 
 // Collect all the java.lang.String in the heap and put them in the output strings_ array.
@@ -496,95 +563,19 @@ class LexicographicalStringComparator {
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     mirror::String* lhs_s = lhs.AsMirrorPtr();
     mirror::String* rhs_s = rhs.AsMirrorPtr();
-    uint16_t* lhs_begin = lhs_s->GetCharArray()->GetData() + lhs_s->GetOffset();
-    uint16_t* rhs_begin = rhs_s->GetCharArray()->GetData() + rhs_s->GetOffset();
+    uint16_t* lhs_begin = lhs_s->GetValue();
+    uint16_t* rhs_begin = rhs_s->GetValue();
     return std::lexicographical_compare(lhs_begin, lhs_begin + lhs_s->GetLength(),
                                         rhs_begin, rhs_begin + rhs_s->GetLength());
   }
 };
-
-static bool IsPrefix(mirror::String* pref, mirror::String* full)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  if (pref->GetLength() > full->GetLength()) {
-    return false;
-  }
-  uint16_t* pref_begin = pref->GetCharArray()->GetData() + pref->GetOffset();
-  uint16_t* full_begin = full->GetCharArray()->GetData() + full->GetOffset();
-  return std::equal(pref_begin, pref_begin + pref->GetLength(), full_begin);
-}
-
-void ImageWriter::ProcessStrings() {
-  size_t total_strings = 0;
-  gc::Heap* heap = Runtime::Current()->GetHeap();
-  ClassLinker* cl = Runtime::Current()->GetClassLinker();
-  // Count the strings.
-  heap->VisitObjects(CountStringsCallback, &total_strings);
-  Thread* self = Thread::Current();
-  StackHandleScope<1> hs(self);
-  auto strings = hs.NewHandle(cl->AllocStringArray(self, total_strings));
-  StringCollector string_collector(strings, 0U);
-  // Read strings into the array.
-  heap->VisitObjects(StringCollector::Callback, &string_collector);
-  // Some strings could have gotten freed if AllocStringArray caused a GC.
-  CHECK_LE(string_collector.GetIndex(), total_strings);
-  total_strings = string_collector.GetIndex();
-  auto* strings_begin = reinterpret_cast<mirror::HeapReference<mirror::String>*>(
-          strings->GetRawData(sizeof(mirror::HeapReference<mirror::String>), 0));
-  std::sort(strings_begin, strings_begin + total_strings, LexicographicalStringComparator());
-  // Characters of strings which are non equal prefix of another string (not the same string).
-  // We don't count the savings from equal strings since these would get interned later anyways.
-  size_t prefix_saved_chars = 0;
-  // Count characters needed for the strings.
-  size_t num_chars = 0u;
-  mirror::String* prev_s = nullptr;
-  for (size_t idx = 0; idx != total_strings; ++idx) {
-    mirror::String* s = strings->GetWithoutChecks(idx);
-    size_t length = s->GetLength();
-    num_chars += length;
-    if (prev_s != nullptr && IsPrefix(prev_s, s)) {
-      size_t prev_length = prev_s->GetLength();
-      num_chars -= prev_length;
-      if (prev_length != length) {
-        prefix_saved_chars += prev_length;
-      }
-    }
-    prev_s = s;
-  }
-  // Create character array, copy characters and point the strings there.
-  mirror::CharArray* array = mirror::CharArray::Alloc(self, num_chars);
-  string_data_array_ = array;
-  uint16_t* array_data = array->GetData();
-  size_t pos = 0u;
-  prev_s = nullptr;
-  for (size_t idx = 0; idx != total_strings; ++idx) {
-    mirror::String* s = strings->GetWithoutChecks(idx);
-    uint16_t* s_data = s->GetCharArray()->GetData() + s->GetOffset();
-    int32_t s_length = s->GetLength();
-    int32_t prefix_length = 0u;
-    if (idx != 0u && IsPrefix(prev_s, s)) {
-      prefix_length = prev_s->GetLength();
-    }
-    memcpy(array_data + pos, s_data + prefix_length, (s_length - prefix_length) * sizeof(*s_data));
-    s->SetOffset(pos - prefix_length);
-    s->SetArray(array);
-    pos += s_length - prefix_length;
-    prev_s = s;
-  }
-  CHECK_EQ(pos, num_chars);
-
-  if (kIsDebugBuild || VLOG_IS_ON(compiler)) {
-    LOG(INFO) << "Total # image strings=" << total_strings << " combined length="
-        << num_chars << " prefix saved chars=" << prefix_saved_chars;
-  }
-  ComputeEagerResolvedStrings();
-}
 
 void ImageWriter::ComputeEagerResolvedStringsCallback(Object* obj, void* arg ATTRIBUTE_UNUSED) {
   if (!obj->GetClass()->IsStringClass()) {
     return;
   }
   mirror::String* string = obj->AsString();
-  const uint16_t* utf16_string = string->GetCharArray()->GetData() + string->GetOffset();
+  const uint16_t* utf16_string = string->GetValue();
   size_t utf16_length = static_cast<size_t>(string->GetLength());
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   ReaderMutexLock mu(Thread::Current(), *class_linker->DexLock());
@@ -601,7 +592,7 @@ void ImageWriter::ComputeEagerResolvedStringsCallback(Object* obj, void* arg ATT
     if (string_id != nullptr) {
       // This string occurs in this dex file, assign the dex cache entry.
       uint32_t string_idx = dex_file.GetIndexForStringId(*string_id);
-      if (dex_cache->GetResolvedString(string_idx) == NULL) {
+      if (dex_cache->GetResolvedString(string_idx) == nullptr) {
         dex_cache->SetResolvedString(string_idx, string);
       }
     }
@@ -623,7 +614,7 @@ struct NonImageClasses {
 };
 
 void ImageWriter::PruneNonImageClasses() {
-  if (compiler_driver_.GetImageClasses() == NULL) {
+  if (compiler_driver_.GetImageClasses() == nullptr) {
     return;
   }
   Runtime* runtime = Runtime::Current();
@@ -638,7 +629,7 @@ void ImageWriter::PruneNonImageClasses() {
 
   // Remove the undesired classes from the class roots.
   for (const std::string& it : non_image_classes) {
-    bool result = class_linker->RemoveClass(it.c_str(), NULL);
+    bool result = class_linker->RemoveClass(it.c_str(), nullptr);
     DCHECK(result);
   }
 
@@ -650,20 +641,20 @@ void ImageWriter::PruneNonImageClasses() {
     DexCache* dex_cache = class_linker->GetDexCache(idx);
     for (size_t i = 0; i < dex_cache->NumResolvedTypes(); i++) {
       Class* klass = dex_cache->GetResolvedType(i);
-      if (klass != NULL && !IsImageClass(klass)) {
-        dex_cache->SetResolvedType(i, NULL);
+      if (klass != nullptr && !IsImageClass(klass)) {
+        dex_cache->SetResolvedType(i, nullptr);
       }
     }
     for (size_t i = 0; i < dex_cache->NumResolvedMethods(); i++) {
       ArtMethod* method = dex_cache->GetResolvedMethod(i);
-      if (method != NULL && !IsImageClass(method->GetDeclaringClass())) {
+      if (method != nullptr && !IsImageClass(method->GetDeclaringClass())) {
         dex_cache->SetResolvedMethod(i, resolution_method);
       }
     }
     for (size_t i = 0; i < dex_cache->NumResolvedFields(); i++) {
-      ArtField* field = dex_cache->GetResolvedField(i);
-      if (field != NULL && !IsImageClass(field->GetDeclaringClass())) {
-        dex_cache->SetResolvedField(i, NULL);
+      ArtField* field = dex_cache->GetResolvedField(i, sizeof(void*));
+      if (field != nullptr && !IsImageClass(field->GetDeclaringClass())) {
+        dex_cache->SetResolvedField(i, nullptr, sizeof(void*));
       }
     }
     // Clean the dex field. It might have been populated during the initialization phase, but
@@ -702,15 +693,15 @@ void ImageWriter::CheckNonImageClassesRemovedCallback(Object* obj, void* arg) {
 }
 
 void ImageWriter::DumpImageClasses() {
-  const std::set<std::string>* image_classes = compiler_driver_.GetImageClasses();
-  CHECK(image_classes != NULL);
+  auto image_classes = compiler_driver_.GetImageClasses();
+  CHECK(image_classes != nullptr);
   for (const std::string& image_class : *image_classes) {
     LOG(INFO) << " " << image_class;
   }
 }
 
 void ImageWriter::CalculateObjectBinSlots(Object* obj) {
-  DCHECK(obj != NULL);
+  DCHECK(obj != nullptr);
   // if it is a string, we want to intern it if its not interned.
   if (obj->GetClass()->IsStringClass()) {
     // we must be an interned string that was forward referenced and already assigned
@@ -749,7 +740,7 @@ ObjectArray<Object>* ImageWriter::CreateImageRoots() const {
   // caches. We check that the number of dex caches does not change.
   size_t dex_cache_count;
   {
-    ReaderMutexLock mu(Thread::Current(), *class_linker->DexLock());
+    ReaderMutexLock mu(self, *class_linker->DexLock());
     dex_cache_count = class_linker->GetDexCacheCount();
   }
   Handle<ObjectArray<Object>> dex_caches(
@@ -757,7 +748,7 @@ ObjectArray<Object>* ImageWriter::CreateImageRoots() const {
                                               dex_cache_count)));
   CHECK(dex_caches.Get() != nullptr) << "Failed to allocate a dex cache array.";
   {
-    ReaderMutexLock mu(Thread::Current(), *class_linker->DexLock());
+    ReaderMutexLock mu(self, *class_linker->DexLock());
     CHECK_EQ(dex_cache_count, class_linker->GetDexCacheCount())
         << "The number of dex caches changed.";
     for (size_t i = 0; i < dex_cache_count; ++i) {
@@ -782,7 +773,7 @@ ObjectArray<Object>* ImageWriter::CreateImageRoots() const {
   image_roots->Set<false>(ImageHeader::kDexCaches, dex_caches.Get());
   image_roots->Set<false>(ImageHeader::kClassRoots, class_linker->GetClassRoots());
   for (int i = 0; i < ImageHeader::kImageRootsMax; i++) {
-    CHECK(image_roots->Get(i) != NULL);
+    CHECK(image_roots->Get(i) != nullptr);
   }
   return image_roots.Get();
 }
@@ -824,15 +815,30 @@ void ImageWriter::WalkFieldsInOrder(mirror::Object* obj) {
     WalkInstanceFields(h_obj.Get(), klass.Get());
     // Walk static fields of a Class.
     if (h_obj->IsClass()) {
-      size_t num_static_fields = klass->NumReferenceStaticFields();
+      size_t num_reference_static_fields = klass->NumReferenceStaticFields();
       MemberOffset field_offset = klass->GetFirstReferenceStaticFieldOffset();
-      for (size_t i = 0; i < num_static_fields; ++i) {
+      for (size_t i = 0; i < num_reference_static_fields; ++i) {
         mirror::Object* value = h_obj->GetFieldObject<mirror::Object>(field_offset);
         if (value != nullptr) {
           WalkFieldsInOrder(value);
         }
         field_offset = MemberOffset(field_offset.Uint32Value() +
                                     sizeof(mirror::HeapReference<mirror::Object>));
+      }
+
+      // Visit and assign offsets for fields.
+      ArtField* fields[2] = { h_obj->AsClass()->GetSFields(), h_obj->AsClass()->GetIFields() };
+      size_t num_fields[2] = { h_obj->AsClass()->NumStaticFields(),
+          h_obj->AsClass()->NumInstanceFields() };
+      for (size_t i = 0; i < 2; ++i) {
+        for (size_t j = 0; j < num_fields[i]; ++j) {
+          auto* field = fields[i] + j;
+          auto it = art_field_reloc_.find(field);
+          CHECK(it == art_field_reloc_.end()) << "Field at index " << i << ":" << j
+              << " already assigned " << PrettyField(field);
+          art_field_reloc_.emplace(field, bin_slot_sizes_[kBinArtField]);
+          bin_slot_sizes_[kBinArtField] += sizeof(ArtField);
+        }
       }
     } else if (h_obj->IsObjectArray()) {
       // Walk elements of an object array.
@@ -884,39 +890,60 @@ void ImageWriter::CalculateNewObjectOffsets() {
   // know where image_roots is going to end up
   image_end_ += RoundUp(sizeof(ImageHeader), kObjectAlignment);  // 64-bit-alignment
 
-  // TODO: Image spaces only?
   DCHECK_LT(image_end_, image_->Size());
   image_objects_offset_begin_ = image_end_;
+  // Prepare bin slots for dex cache arrays.
+  PrepareDexCacheArraySlots();
   // Clear any pre-existing monitors which may have been in the monitor words, assign bin slots.
   heap->VisitObjects(WalkFieldsCallback, this);
+  // Calculate cumulative bin slot sizes.
+  size_t previous_sizes = 0u;
+  for (size_t i = 0; i != kBinSize; ++i) {
+    bin_slot_previous_sizes_[i] = previous_sizes;
+    previous_sizes += bin_slot_sizes_[i];
+  }
+  DCHECK_EQ(previous_sizes, GetBinSizeSum());
+  DCHECK_EQ(image_end_, GetBinSizeSum(kBinMirrorCount) + image_objects_offset_begin_);
+
   // Transform each object's bin slot into an offset which will be used to do the final copy.
   heap->VisitObjects(UnbinObjectsIntoOffsetCallback, this);
   DCHECK(saved_hashes_map_.empty());  // All binslot hashes should've been put into vector by now.
 
-  DCHECK_GT(image_end_, GetBinSizeSum());
+  DCHECK_EQ(image_end_, GetBinSizeSum(kBinMirrorCount) + image_objects_offset_begin_);
 
   image_roots_address_ = PointerToLowMemUInt32(GetImageAddress(image_roots.Get()));
 
-  // Note that image_end_ is left at end of used space
+  // Note that image_end_ is left at end of used mirror space
 }
 
 void ImageWriter::CreateHeader(size_t oat_loaded_size, size_t oat_data_offset) {
   CHECK_NE(0U, oat_loaded_size);
   const uint8_t* oat_file_begin = GetOatFileBegin();
   const uint8_t* oat_file_end = oat_file_begin + oat_loaded_size;
-
   oat_data_begin_ = oat_file_begin + oat_data_offset;
   const uint8_t* oat_data_end = oat_data_begin_ + oat_file_->Size();
-
+  // Write out sections.
+  size_t cur_pos = image_end_;
+  // Add fields.
+  auto fields_offset = cur_pos;
+  CHECK_EQ(image_objects_offset_begin_ + GetBinSizeSum(kBinArtField), fields_offset);
+  auto fields_size = bin_slot_sizes_[kBinArtField];
+  cur_pos += fields_size;
   // Return to write header at start of image with future location of image_roots. At this point,
-  // image_end_ is the size of the image (excluding bitmaps).
+  // image_end_ is the size of the image (excluding bitmaps, ArtFields).
+  /*
   const size_t heap_bytes_per_bitmap_byte = kBitsPerByte * kObjectAlignment;
   const size_t bitmap_bytes = RoundUp(image_end_, heap_bytes_per_bitmap_byte) /
       heap_bytes_per_bitmap_byte;
+      */
+  const size_t bitmap_bytes = image_bitmap_->Size();
+  auto bitmap_offset = RoundUp(cur_pos, kPageSize);
+  auto bitmap_size = RoundUp(bitmap_bytes, kPageSize);
+  cur_pos += bitmap_size;
   new (image_->Begin()) ImageHeader(PointerToLowMemUInt32(image_begin_),
                                     static_cast<uint32_t>(image_end_),
-                                    RoundUp(image_end_, kPageSize),
-                                    RoundUp(bitmap_bytes, kPageSize),
+                                    fields_offset, fields_size,
+                                    bitmap_offset, bitmap_size,
                                     image_roots_address_,
                                     oat_file_->GetOatHeader().GetChecksum(),
                                     PointerToLowMemUInt32(oat_file_begin),
@@ -926,11 +953,21 @@ void ImageWriter::CreateHeader(size_t oat_loaded_size, size_t oat_data_offset) {
                                     compile_pic_);
 }
 
+void ImageWriter::CopyAndFixupNativeData() {
+  // Copy ArtFields to their locations and update the array for convenience.
+  auto fields_offset = image_objects_offset_begin_ + GetBinSizeSum(kBinArtField);
+  for (auto& pair : art_field_reloc_) {
+    pair.second += fields_offset;
+    auto* dest = image_->Begin() + pair.second;
+    DCHECK_GE(dest, image_->Begin() + image_end_);
+    memcpy(dest, pair.first, sizeof(ArtField));
+    reinterpret_cast<ArtField*>(dest)->SetDeclaringClass(
+        down_cast<Class*>(GetImageAddress(pair.first->GetDeclaringClass())));
+  }
+}
+
 void ImageWriter::CopyAndFixupObjects() {
   gc::Heap* heap = Runtime::Current()->GetHeap();
-  // TODO: heap validation can't handle this fix up pass
-  heap->DisableObjectValidation();
-  // TODO: Image spaces only?
   heap->VisitObjects(CopyAndFixupObjectsCallback, this);
   // Fix up the object previously had hash codes.
   for (const std::pair<mirror::Object*, uint32_t>& hash_pair : saved_hashes_) {
@@ -944,26 +981,88 @@ void ImageWriter::CopyAndFixupObjects() {
 void ImageWriter::CopyAndFixupObjectsCallback(Object* obj, void* arg) {
   DCHECK(obj != nullptr);
   DCHECK(arg != nullptr);
-  ImageWriter* image_writer = reinterpret_cast<ImageWriter*>(arg);
+  reinterpret_cast<ImageWriter*>(arg)->CopyAndFixupObject(obj);
+}
+
+bool ImageWriter::CopyAndFixupIfDexCacheFieldArray(mirror::Object* dst, mirror::Object* obj,
+                                                   mirror::Class* klass) {
+  if (!klass->IsArrayClass()) {
+    return false;
+  }
+  auto* component_type = klass->GetComponentType();
+  bool is_int_arr = component_type->IsPrimitiveInt();
+  bool is_long_arr = component_type->IsPrimitiveLong();
+  if (!is_int_arr && !is_long_arr) {
+    return false;
+  }
+  auto it = dex_cache_array_indexes_.find(obj);  // Is this a dex cache array?
+  if (it == dex_cache_array_indexes_.end()) {
+    return false;
+  }
+  mirror::Array* arr = obj->AsArray();
+  CHECK_EQ(reinterpret_cast<Object*>(
+      image_->Begin() + it->second.offset_ + image_objects_offset_begin_), dst);
+  dex_cache_array_indexes_.erase(it);
+  // Fixup int pointers for the field array.
+  CHECK(!arr->IsObjectArray());
+  const size_t num_elements = arr->GetLength();
+  if (target_ptr_size_ == 4) {
+    // Will get fixed up by fixup object.
+    dst->SetClass(down_cast<mirror::Class*>(
+    GetImageAddress(mirror::IntArray::GetArrayClass())));
+  } else {
+    DCHECK_EQ(target_ptr_size_, 8u);
+    dst->SetClass(down_cast<mirror::Class*>(
+    GetImageAddress(mirror::LongArray::GetArrayClass())));
+  }
+  mirror::Array* dest_array = down_cast<mirror::Array*>(dst);
+  dest_array->SetLength(num_elements);
+  for (size_t i = 0, count = num_elements; i < count; ++i) {
+    ArtField* field = reinterpret_cast<ArtField*>(is_int_arr ?
+        arr->AsIntArray()->GetWithoutChecks(i) : arr->AsLongArray()->GetWithoutChecks(i));
+    uint8_t* fixup_location = nullptr;
+    if (field != nullptr) {
+      auto it2 = art_field_reloc_.find(field);
+      CHECK(it2 != art_field_reloc_.end()) << "No relocation for field " << PrettyField(field);
+      fixup_location = image_begin_ + it2->second;
+    }
+    if (target_ptr_size_ == 4) {
+      down_cast<mirror::IntArray*>(dest_array)->SetWithoutChecks<kVerifyNone>(
+          i, static_cast<uint32_t>(reinterpret_cast<uint64_t>(fixup_location)));
+    } else {
+      down_cast<mirror::LongArray*>(dest_array)->SetWithoutChecks<kVerifyNone>(
+          i, reinterpret_cast<uint64_t>(fixup_location));
+    }
+  }
+  dst->SetLockWord(LockWord::Default(), false);
+  return true;
+}
+
+void ImageWriter::CopyAndFixupObject(Object* obj) {
   // see GetLocalAddress for similar computation
-  size_t offset = image_writer->GetImageOffset(obj);
-  uint8_t* dst = image_writer->image_->Begin() + offset;
+  size_t offset = GetImageOffset(obj);
+  auto* dst = reinterpret_cast<Object*>(image_->Begin() + offset);
   const uint8_t* src = reinterpret_cast<const uint8_t*>(obj);
   size_t n;
-  if (obj->IsArtMethod()) {
+  mirror::Class* klass = obj->GetClass();
+
+  if (CopyAndFixupIfDexCacheFieldArray(dst, obj, klass)) {
+    return;
+  }
+  if (klass->IsArtMethodClass()) {
     // Size without pointer fields since we don't want to overrun the buffer if target art method
     // is 32 bits but source is 64 bits.
-    n = mirror::ArtMethod::SizeWithoutPointerFields(image_writer->target_ptr_size_);
+    n = mirror::ArtMethod::SizeWithoutPointerFields(target_ptr_size_);
   } else {
     n = obj->SizeOf();
   }
-  DCHECK_LT(offset + n, image_writer->image_->Size());
+  DCHECK_LE(offset + n, image_->Size());
   memcpy(dst, src, n);
-  Object* copy = reinterpret_cast<Object*>(dst);
+
   // Write in a hash code of objects which have inflated monitors or a hash code in their monitor
   // word.
-  copy->SetLockWord(LockWord::Default(), false);
-  image_writer->FixupObject(obj, copy);
+  dst->SetLockWord(LockWord::Default(), false);
+  FixupObject(obj, dst);
 }
 
 // Rewrite all the references in the copied object to point to their image address equivalent
@@ -999,15 +1098,10 @@ class FixupClassVisitor FINAL : public FixupVisitor {
   FixupClassVisitor(ImageWriter* image_writer, Object* copy) : FixupVisitor(image_writer, copy) {
   }
 
-  void operator()(Object* obj, MemberOffset offset, bool /*is_static*/) const
+  void operator()(Object* obj, MemberOffset offset, bool is_static ATTRIBUTE_UNUSED) const
       EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_, Locks::heap_bitmap_lock_) {
     DCHECK(obj->IsClass());
     FixupVisitor::operator()(obj, offset, /*is_static*/false);
-
-    // TODO: Remove dead code
-    if (offset.Uint32Value() < mirror::Class::EmbeddedVTableOffset().Uint32Value()) {
-      return;
-    }
   }
 
   void operator()(mirror::Class* klass ATTRIBUTE_UNUSED,
@@ -1017,6 +1111,31 @@ class FixupClassVisitor FINAL : public FixupVisitor {
     LOG(FATAL) << "Reference not expected here.";
   }
 };
+
+void ImageWriter::FixupClass(mirror::Class* orig, mirror::Class* copy) {
+  // Copy and fix up ArtFields in the class.
+  ArtField* fields[2] = { orig->AsClass()->GetSFields(), orig->AsClass()->GetIFields() };
+  size_t num_fields[2] = { orig->AsClass()->NumStaticFields(),
+      orig->AsClass()->NumInstanceFields() };
+  // Update the arrays.
+  for (size_t i = 0; i < 2; ++i) {
+    if (num_fields[i] == 0) {
+      CHECK(fields[i] == nullptr);
+      continue;
+    }
+    auto it = art_field_reloc_.find(fields[i]);
+    CHECK(it != art_field_reloc_.end()) << PrettyClass(orig->AsClass()) << " : "
+        << PrettyField(fields[i]);
+    auto* image_fields = reinterpret_cast<ArtField*>(image_begin_ + it->second);
+    if (i == 0) {
+      down_cast<Class*>(copy)->SetSFieldsUnchecked(image_fields);
+    } else {
+      down_cast<Class*>(copy)->SetIFieldsUnchecked(image_fields);
+    }
+  }
+  FixupClassVisitor visitor(this, copy);
+  static_cast<mirror::Object*>(orig)->VisitReferences<true /*visit class*/>(visitor, visitor);
+}
 
 void ImageWriter::FixupObject(Object* orig, Object* copy) {
   DCHECK(orig != nullptr);
@@ -1029,9 +1148,8 @@ void ImageWriter::FixupObject(Object* orig, Object* copy) {
       DCHECK_EQ(copy->GetReadBarrierPointer(), GetImageAddress(orig));
     }
   }
-  if (orig->IsClass() && orig->AsClass()->ShouldHaveEmbeddedImtAndVTable()) {
-    FixupClassVisitor visitor(this, copy);
-    orig->VisitReferences<true /*visit class*/>(visitor, visitor);
+  if (orig->IsClass()) {
+    FixupClass(orig->AsClass<kVerifyNone>(), down_cast<mirror::Class*>(copy));
   } else {
     FixupVisitor visitor(this, copy);
     orig->VisitReferences<true /*visit class*/>(visitor, visitor);
@@ -1187,8 +1305,8 @@ size_t ImageWriter::GetBinSizeSum(ImageWriter::Bin up_to) const {
 
 ImageWriter::BinSlot::BinSlot(uint32_t lockword) : lockword_(lockword) {
   // These values may need to get updated if more bins are added to the enum Bin
-  static_assert(kBinBits == 3, "wrong number of bin bits");
-  static_assert(kBinShift == 29, "wrong number of shift");
+  static_assert(kBinBits == 4, "wrong number of bin bits");
+  static_assert(kBinShift == 28, "wrong number of shift");
   static_assert(sizeof(BinSlot) == sizeof(LockWord), "BinSlot/LockWord must have equal sizes");
 
   DCHECK_LT(GetBin(), kBinSize);

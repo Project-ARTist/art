@@ -28,6 +28,8 @@ enum MethodCompilationStat {
   kAttemptCompilation = 0,
   kCompiledBaseline,
   kCompiledOptimized,
+  kCompiledQuick,
+  kInstructionSimplifications,
   kInlinedInvoke,
   kNotCompiledUnsupportedIsa,
   kNotCompiledPathological,
@@ -38,12 +40,16 @@ enum MethodCompilationStat {
   kNotCompiledUnresolvedMethod,
   kNotCompiledUnresolvedField,
   kNotCompiledNonSequentialRegPair,
+  kNotCompiledSpaceFilter,
   kNotOptimizedTryCatch,
   kNotOptimizedDisabled,
   kNotCompiledCantAccesType,
   kNotOptimizedRegisterAllocator,
   kNotCompiledUnhandledInstruction,
+  kNotCompiledVerifyAtRuntime,
+  kNotCompiledClassNotVerified,
   kRemovedCheckedCast,
+  kRemovedDeadInstruction,
   kRemovedNullCheck,
   kLastStat
 };
@@ -52,8 +58,8 @@ class OptimizingCompilerStats {
  public:
   OptimizingCompilerStats() {}
 
-  void RecordStat(MethodCompilationStat stat) {
-    compile_stats_[stat]++;
+  void RecordStat(MethodCompilationStat stat, size_t count = 1) {
+    compile_stats_[stat] += count;
   }
 
   void Log() const {
@@ -64,16 +70,22 @@ class OptimizingCompilerStats {
           compile_stats_[kCompiledBaseline] * 100 / compile_stats_[kAttemptCompilation];
       size_t optimized_percent =
           compile_stats_[kCompiledOptimized] * 100 / compile_stats_[kAttemptCompilation];
+      size_t quick_percent =
+          compile_stats_[kCompiledQuick] * 100 / compile_stats_[kAttemptCompilation];
       std::ostringstream oss;
-      oss << "Attempted compilation of " << compile_stats_[kAttemptCompilation] << " methods: "
-          << unoptimized_percent << "% (" << compile_stats_[kCompiledBaseline] << ") unoptimized, "
-          << optimized_percent << "% (" << compile_stats_[kCompiledOptimized] << ") optimized.";
+      oss << "Attempted compilation of " << compile_stats_[kAttemptCompilation] << " methods: ";
+
+      oss << unoptimized_percent << "% (" << compile_stats_[kCompiledBaseline] << ") unoptimized, ";
+      oss << optimized_percent << "% (" << compile_stats_[kCompiledOptimized] << ") optimized, ";
+      oss << quick_percent << "% (" << compile_stats_[kCompiledQuick] << ") quick.";
+
+      LOG(INFO) << oss.str();
+
       for (int i = 0; i < kLastStat; i++) {
         if (compile_stats_[i] != 0) {
-          oss << "\n" << PrintMethodCompilationStat(i) << ": " << compile_stats_[i];
+          LOG(INFO) << PrintMethodCompilationStat(i) << ": " << compile_stats_[i];
         }
       }
-      LOG(INFO) << oss.str();
     }
   }
 
@@ -83,7 +95,9 @@ class OptimizingCompilerStats {
       case kAttemptCompilation : return "kAttemptCompilation";
       case kCompiledBaseline : return "kCompiledBaseline";
       case kCompiledOptimized : return "kCompiledOptimized";
+      case kCompiledQuick : return "kCompiledQuick";
       case kInlinedInvoke : return "kInlinedInvoke";
+      case kInstructionSimplifications: return "kInstructionSimplifications";
       case kNotCompiledUnsupportedIsa : return "kNotCompiledUnsupportedIsa";
       case kNotCompiledPathological : return "kNotCompiledPathological";
       case kNotCompiledHugeMethod : return "kNotCompiledHugeMethod";
@@ -96,9 +110,13 @@ class OptimizingCompilerStats {
       case kNotOptimizedDisabled : return "kNotOptimizedDisabled";
       case kNotOptimizedTryCatch : return "kNotOptimizedTryCatch";
       case kNotCompiledCantAccesType : return "kNotCompiledCantAccesType";
+      case kNotCompiledSpaceFilter : return "kNotCompiledSpaceFilter";
       case kNotOptimizedRegisterAllocator : return "kNotOptimizedRegisterAllocator";
       case kNotCompiledUnhandledInstruction : return "kNotCompiledUnhandledInstruction";
+      case kNotCompiledVerifyAtRuntime : return "kNotCompiledVerifyAtRuntime";
+      case kNotCompiledClassNotVerified : return "kNotCompiledClassNotVerified";
       case kRemovedCheckedCast: return "kRemovedCheckedCast";
+      case kRemovedDeadInstruction: return "kRemovedDeadInstruction";
       case kRemovedNullCheck: return "kRemovedNullCheck";
       default: LOG(FATAL) << "invalid stat";
     }

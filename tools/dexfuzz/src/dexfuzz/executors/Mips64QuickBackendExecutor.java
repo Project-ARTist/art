@@ -21,26 +21,15 @@ import dexfuzz.listeners.BaseListener;
 public class Mips64QuickBackendExecutor extends Executor {
 
   public Mips64QuickBackendExecutor(BaseListener listener, Device device) {
-    super("MIPS64 Quick Backend", 5, listener, Architecture.MIPS64, device);
+    super("MIPS64 Quick Backend", 5, listener, Architecture.MIPS64, device, true);
   }
 
   @Override
   public void execute(String programName) {
     StringBuilder commandBuilder = new StringBuilder();
-    commandBuilder.append("dalvikvm64 ");
+    commandBuilder.append("dalvikvm64 -Xcompiler-option --compiler-backend=Quick ");
     commandBuilder.append("-cp ").append(testLocation).append("/").append(programName).append(" ");
     commandBuilder.append(executeClass);
-    executionResult = executeOnDevice(commandBuilder.toString(), true);
-  }
-
-  @Override
-  public void deleteGeneratedOatFile(String programName) {
-    String command = "rm -f /data/dalvik-cache/mips64/" + getOatFileName(programName);
-    executeOnDevice(command, false);
-  }
-
-  @Override
-  public boolean needsCleanCodeCache() {
-    return true;
+    executionResult = executeCommandWithTimeout(commandBuilder.toString(), true);
   }
 }

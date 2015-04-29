@@ -216,6 +216,8 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xmethod-trace-file-size:_")
           .WithType<unsigned int>()
           .IntoKey(M::MethodTraceFileSize)
+      .Define("-Xmethod-trace-stream")
+          .IntoKey(M::MethodTraceStreaming)
       .Define("-Xprofile:_")
           .WithType<TraceClockSource>()
           .WithValueMap({{"threadcpuclock", TraceClockSource::kThreadCpu},
@@ -250,11 +252,14 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-XX:NativeBridge=_")
           .WithType<std::string>()
           .IntoKey(M::NativeBridge)
-      .Define("-Xzygote-max-failed-boots=_")
+      .Define("-Xzygote-max-boot-retry=_")
           .WithType<unsigned int>()
           .IntoKey(M::ZygoteMaxFailedBoots)
       .Define("-Xno-dex-file-fallback")
           .IntoKey(M::NoDexFileFallback)
+      .Define("--cpu-abilist=_")
+          .WithType<std::string>()
+          .IntoKey(M::CpuAbiList)
       .Ignore({
           "-ea", "-da", "-enableassertions", "-disableassertions", "--runtime-arg", "-esa",
           "-dsa", "-enablesystemassertions", "-disablesystemassertions", "-Xrs", "-Xint:_",
@@ -319,7 +324,7 @@ bool ParsedOptions::ProcessSpecialOptions(const RuntimeOptions& options,
     } else if (option == "vfprintf") {
       const void* hook = options[i].second;
       if (hook == nullptr) {
-        Usage("vfprintf argument was NULL");
+        Usage("vfprintf argument was nullptr");
         return false;
       }
       int (*hook_vfprintf)(FILE *, const char*, va_list) =
@@ -332,7 +337,7 @@ bool ParsedOptions::ProcessSpecialOptions(const RuntimeOptions& options,
     } else if (option == "exit") {
       const void* hook = options[i].second;
       if (hook == nullptr) {
-        Usage("exit argument was NULL");
+        Usage("exit argument was nullptr");
         return false;
       }
       void(*hook_exit)(jint) = reinterpret_cast<void(*)(jint)>(const_cast<void*>(hook));
@@ -343,7 +348,7 @@ bool ParsedOptions::ProcessSpecialOptions(const RuntimeOptions& options,
     } else if (option == "abort") {
       const void* hook = options[i].second;
       if (hook == nullptr) {
-        Usage("abort was NULL\n");
+        Usage("abort was nullptr\n");
         return false;
       }
       void(*hook_abort)() = reinterpret_cast<void(*)()>(const_cast<void*>(hook));
@@ -410,7 +415,6 @@ bool ParsedOptions::Parse(const RuntimeOptions& options, bool ignore_unrecognize
     }
 
     UNREACHABLE();
-    return false;
   }
 
   using M = RuntimeArgumentMap;
@@ -438,8 +442,8 @@ bool ParsedOptions::Parse(const RuntimeOptions& options, bool ignore_unrecognize
   }
 
   // Default to number of processors minus one since the main GC thread also does work.
-  args.SetIfMissing(M::ParallelGCThreads,
-                    static_cast<unsigned int>(sysconf(_SC_NPROCESSORS_CONF) - 1u));
+  args.SetIfMissing(M::ParallelGCThreads, gc::Heap::kDefaultEnableParallelGC ?
+      static_cast<unsigned int>(sysconf(_SC_NPROCESSORS_CONF) - 1u) : 0u);
 
   // -Xverbose:
   {

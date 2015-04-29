@@ -43,8 +43,9 @@ namespace space {
 Atomic<uint32_t> ImageSpace::bitmap_index_(0);
 
 ImageSpace::ImageSpace(const std::string& image_filename, const char* image_location,
-                       MemMap* mem_map, accounting::ContinuousSpaceBitmap* live_bitmap)
-    : MemMapSpace(image_filename, mem_map, mem_map->Begin(), mem_map->End(), mem_map->End(),
+                       MemMap* mem_map, accounting::ContinuousSpaceBitmap* live_bitmap,
+                       uint8_t* end)
+    : MemMapSpace(image_filename, mem_map, mem_map->Begin(), end, end,
                   kGcRetentionPolicyNeverCollect),
       image_location_(image_location) {
   DCHECK(live_bitmap != nullptr);
@@ -642,10 +643,10 @@ ImageSpace* ImageSpace::Create(const char* image_location,
 void ImageSpace::VerifyImageAllocations() {
   uint8_t* current = Begin() + RoundUp(sizeof(ImageHeader), kObjectAlignment);
   while (current < End()) {
-    DCHECK_ALIGNED(current, kObjectAlignment);
-    mirror::Object* obj = reinterpret_cast<mirror::Object*>(current);
-    CHECK(live_bitmap_->Test(obj));
+    CHECK_ALIGNED(current, kObjectAlignment);
+    auto* obj = reinterpret_cast<mirror::Object*>(current);
     CHECK(obj->GetClass() != nullptr) << "Image object at address " << obj << " has null class";
+    CHECK(live_bitmap_->Test(obj)) << PrettyTypeOf(obj);
     if (kUseBakerOrBrooksReadBarrier) {
       obj->AssertReadBarrierPointer();
     }
@@ -665,7 +666,7 @@ ImageSpace* ImageSpace::Init(const char* image_filename, const char* image_locat
   }
 
   std::unique_ptr<File> file(OS::OpenFileForReading(image_filename));
-  if (file.get() == NULL) {
+  if (file.get() == nullptr) {
     *error_msg = StringPrintf("Failed to open '%s'", image_filename);
     return nullptr;
   }
@@ -675,7 +676,6 @@ ImageSpace* ImageSpace::Init(const char* image_filename, const char* image_locat
     *error_msg = StringPrintf("Invalid image header in '%s'", image_filename);
     return nullptr;
   }
-
   // Check that the file is large enough.
   uint64_t image_file_size = static_cast<uint64_t>(file->GetLength());
   if (image_header.GetImageSize() > image_file_size) {
@@ -683,24 +683,19 @@ ImageSpace* ImageSpace::Init(const char* image_filename, const char* image_locat
                               image_file_size, image_header.GetImageSize());
     return nullptr;
   }
-  if (image_header.GetBitmapOffset() + image_header.GetImageBitmapSize() != image_file_size) {
-    *error_msg = StringPrintf("Image file too small for image bitmap: %" PRIu64 " vs. %zu.",
-                              image_file_size,
-                              image_header.GetBitmapOffset() + image_header.GetImageBitmapSize());
+  auto end_of_bitmap = image_header.GetImageBitmapOffset() + image_header.GetImageBitmapSize();
+  if (end_of_bitmap != image_file_size) {
+    *error_msg = StringPrintf(
+        "Image file size does not equal end of bitmap: size=%" PRIu64 " vs. %zu.", image_file_size,
+        end_of_bitmap);
     return nullptr;
   }
 
   // Note: The image header is part of the image due to mmap page alignment required of offset.
-  std::unique_ptr<MemMap> map(MemMap::MapFileAtAddress(image_header.GetImageBegin(),
-                                                 image_header.GetImageSize(),
-                                                 PROT_READ | PROT_WRITE,
-                                                 MAP_PRIVATE,
-                                                 file->Fd(),
-                                                 0,
-                                                 false,
-                                                 image_filename,
-                                                 error_msg));
-  if (map.get() == NULL) {
+  std::unique_ptr<MemMap> map(MemMap::MapFileAtAddress(
+      image_header.GetImageBegin(), image_header.GetImageSize() + image_header.GetArtFieldsSize(),
+      PROT_READ | PROT_WRITE, MAP_PRIVATE, file->Fd(), 0, false, image_filename, error_msg));
+  if (map.get() == nullptr) {
     DCHECK(!error_msg->empty());
     return nullptr;
   }
@@ -710,7 +705,7 @@ ImageSpace* ImageSpace::Init(const char* image_filename, const char* image_locat
   std::unique_ptr<MemMap> image_map(
       MemMap::MapFileAtAddress(nullptr, image_header.GetImageBitmapSize(),
                                PROT_READ, MAP_PRIVATE,
-                               file->Fd(), image_header.GetBitmapOffset(),
+                               file->Fd(), image_header.GetImageBitmapOffset(),
                                false,
                                image_filename,
                                error_msg));
@@ -730,8 +725,9 @@ ImageSpace* ImageSpace::Init(const char* image_filename, const char* image_locat
     return nullptr;
   }
 
+  uint8_t* const image_end = map->Begin() + image_header.GetImageSize();
   std::unique_ptr<ImageSpace> space(new ImageSpace(image_filename, image_location,
-                                             map.release(), bitmap.release()));
+                                                   map.release(), bitmap.release(), image_end));
 
   // VerifyImageAllocations() will be called later in Runtime::Init()
   // as some class roots like ArtMethod::java_lang_reflect_ArtMethod_
@@ -788,8 +784,9 @@ OatFile* ImageSpace::OpenOatFile(const char* image_path, std::string* error_msg)
 
   OatFile* oat_file = OatFile::Open(oat_filename, oat_filename, image_header.GetOatDataBegin(),
                                     image_header.GetOatFileBegin(),
-                                    !Runtime::Current()->IsAotCompiler(), error_msg);
-  if (oat_file == NULL) {
+                                    !Runtime::Current()->IsAotCompiler(),
+                                    nullptr, error_msg);
+  if (oat_file == nullptr) {
     *error_msg = StringPrintf("Failed to open oat file '%s' referenced from image %s: %s",
                               oat_filename.c_str(), GetName(), error_msg->c_str());
     return nullptr;
@@ -814,7 +811,7 @@ OatFile* ImageSpace::OpenOatFile(const char* image_path, std::string* error_msg)
 }
 
 bool ImageSpace::ValidateOatFile(std::string* error_msg) const {
-  CHECK(oat_file_.get() != NULL);
+  CHECK(oat_file_.get() != nullptr);
   for (const OatFile::OatDexFile* oat_dex_file : oat_file_->GetOatDexFiles()) {
     const std::string& dex_file_location = oat_dex_file->GetDexFileLocation();
     uint32_t dex_file_location_checksum;
@@ -840,7 +837,7 @@ const OatFile* ImageSpace::GetOatFile() const {
 }
 
 OatFile* ImageSpace::ReleaseOatFile() {
-  CHECK(oat_file_.get() != NULL);
+  CHECK(oat_file_.get() != nullptr);
   return oat_file_.release();
 }
 

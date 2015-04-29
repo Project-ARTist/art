@@ -22,6 +22,7 @@
 
 #include <string>
 
+#include "arch/instruction_set.h"
 #include "base/mutex.h"
 #include "globals.h"
 #include "os.h"
@@ -79,6 +80,12 @@ class CommonRuntimeTest : public testing::Test {
   // Gets the path of the libcore dex file.
   static std::string GetLibCoreDexFileName();
 
+  // Returns bin directory which contains host's prebuild tools.
+  static std::string GetAndroidHostToolsDir();
+
+  // Returns bin directory which contains target's prebuild tools.
+  static std::string GetAndroidTargetToolsDir(InstructionSet isa);
+
  protected:
   static bool IsHost() {
     return !kIsTargetBuild;
@@ -133,10 +140,18 @@ class CommonRuntimeTest : public testing::Test {
   const DexFile* java_lang_dex_file_;
   std::vector<const DexFile*> boot_class_path_;
 
+  // Get the dex files from a PathClassLoader. This in order of the dex elements and their dex
+  // arrays.
+  std::vector<const DexFile*> GetDexFiles(jobject jclass_loader);
+
+  // Get the first dex file from a PathClassLoader. Will abort if it is null.
+  const DexFile* GetFirstDexFile(jobject jclass_loader);
+
+  std::unique_ptr<CompilerCallbacks> callbacks_;
+
  private:
   static std::string GetCoreFileLocation(const char* suffix);
 
-  std::unique_ptr<CompilerCallbacks> callbacks_;
   std::vector<std::unique_ptr<const DexFile>> loaded_dex_files_;
 };
 

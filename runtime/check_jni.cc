@@ -19,6 +19,7 @@
 #include <sys/mman.h>
 #include <zlib.h>
 
+#include "art_field-inl.h"
 #include "base/logging.h"
 #include "base/to_str.h"
 #include "class_linker.h"
@@ -27,7 +28,6 @@
 #include "gc/space/space.h"
 #include "java_vm_ext.h"
 #include "jni_internal.h"
-#include "mirror/art_field-inl.h"
 #include "mirror/art_method-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
@@ -169,7 +169,7 @@ class ScopedCheck {
       return false;
     }
 
-    mirror::ArtField* f = CheckFieldID(soa, fid);
+    ArtField* f = CheckFieldID(soa, fid);
     if (f == nullptr) {
       return false;
     }
@@ -183,7 +183,7 @@ class ScopedCheck {
   }
 
   /*
-   * Verify that the pointer value is non-NULL.
+   * Verify that the pointer value is non-null.
    */
   bool CheckNonNull(const void* ptr) {
     if (UNLIKELY(ptr == nullptr)) {
@@ -248,7 +248,7 @@ class ScopedCheck {
   bool CheckStaticFieldID(ScopedObjectAccess& soa, jclass java_class, jfieldID fid)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     mirror::Class* c = soa.Decode<mirror::Class*>(java_class);
-    mirror::ArtField* f = CheckFieldID(soa, fid);
+    ArtField* f = CheckFieldID(soa, fid);
     if (f == nullptr) {
       return false;
     }
@@ -565,7 +565,7 @@ class ScopedCheck {
     if (!is_static && !CheckInstanceFieldID(soa, obj, fid)) {
       return false;
     }
-    mirror::ArtField* field = soa.DecodeField(fid);
+    ArtField* field = soa.DecodeField(fid);
     DCHECK(field != nullptr);  // Already checked by Check.
     if (is_static != field->IsStatic()) {
       AbortF("attempt to access %s field %s: %p",
@@ -612,7 +612,7 @@ class ScopedCheck {
   };
 
   /*
-   * Verify that "jobj" is a valid non-NULL object reference, and points to
+   * Verify that "jobj" is a valid non-null object reference, and points to
    * an instance of expectedClass.
    *
    * Because we're looking at an object on the GC heap, we have to switch
@@ -742,7 +742,6 @@ class ScopedCheck {
 
   bool CheckNonHeapValue(char fmt, JniValueType arg) {
     switch (fmt) {
-      case '.':  // ...
       case 'p':  // TODO: pointer - null or readable?
       case 'v':  // JavaVM*
       case 'B':  // jbyte
@@ -817,7 +816,7 @@ class ScopedCheck {
       }
       case 'f': {  // jfieldID
         jfieldID fid = arg.f;
-        mirror::ArtField* f = soa.DecodeField(fid);
+        ArtField* f = soa.DecodeField(fid);
         *msg += PrettyField(f);
         if (!entry) {
           StringAppendF(msg, " (%p)", fid);
@@ -937,15 +936,12 @@ class ScopedCheck {
             break;
         }
         break;
-      case '.':
-        *msg += "...";
-        break;
       default:
         LOG(FATAL) << function_name_ << ": unknown trace format specifier: '" << fmt << "'";
     }
   }
   /*
-   * Verify that "array" is non-NULL and points to an Array object.
+   * Verify that "array" is non-null and points to an Array object.
    *
    * Since we're dealing with objects, switch to "running" mode.
    */
@@ -986,14 +982,15 @@ class ScopedCheck {
     return true;
   }
 
-  mirror::ArtField* CheckFieldID(ScopedObjectAccess& soa, jfieldID fid)
+  ArtField* CheckFieldID(ScopedObjectAccess& soa, jfieldID fid)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     if (fid == nullptr) {
       AbortF("jfieldID was NULL");
       return nullptr;
     }
-    mirror::ArtField* f = soa.DecodeField(fid);
-    if (!Runtime::Current()->GetHeap()->IsValidObjectAddress(f) || !f->IsArtField()) {
+    ArtField* f = soa.DecodeField(fid);
+    // TODO: Better check here.
+    if (!Runtime::Current()->GetHeap()->IsValidObjectAddress(f->GetDeclaringClass())) {
       Runtime::Current()->GetHeap()->DumpSpaces(LOG(ERROR));
       AbortF("invalid jfieldID: %p", fid);
       return nullptr;
@@ -1280,7 +1277,7 @@ class GuardedCopy {
    * Verify the guard area and, if "modOkay" is false, that the data itself
    * has not been altered.
    *
-   * The caller has already checked that "dataBuf" is non-NULL.
+   * The caller has already checked that "dataBuf" is non-null.
    */
   static bool Check(const char* function_name, const void* embedded_buf, bool mod_okay) {
     const GuardedCopy* copy = FromEmbedded(embedded_buf);
@@ -1634,7 +1631,7 @@ class CheckJNI {
   static jint ThrowNew(JNIEnv* env, jclass c, const char* message) {
     ScopedObjectAccess soa(env);
     ScopedCheck sc(kFlag_NullableUtf, __FUNCTION__);
-    JniValueType args[5] = {{.E = env}, {.c = c}, {.u = message}};
+    JniValueType args[3] = {{.E = env}, {.c = c}, {.u = message}};
     if (sc.Check(soa, true, "Ecu", args) && sc.CheckThrowableClass(soa, c)) {
       JniValueType result;
       result.i = baseEnv(env)->ThrowNew(env, c, message);
@@ -1810,7 +1807,7 @@ class CheckJNI {
     ScopedObjectAccess soa(env);
     ScopedCheck sc(kFlag_Default, __FUNCTION__);
     JniValueType args[3] = {{.E = env}, {.c = c}, {.m = mid}};
-    if (sc.Check(soa, true, "Ecm.", args) && sc.CheckInstantiableNonArray(soa, c) &&
+    if (sc.Check(soa, true, "Ecm", args) && sc.CheckInstantiableNonArray(soa, c) &&
         sc.CheckConstructor(soa, mid)) {
       JniValueType result;
       result.L = baseEnv(env)->NewObjectV(env, c, mid, vargs);
@@ -1833,7 +1830,7 @@ class CheckJNI {
     ScopedObjectAccess soa(env);
     ScopedCheck sc(kFlag_Default, __FUNCTION__);
     JniValueType args[3] = {{.E = env}, {.c = c}, {.m = mid}};
-    if (sc.Check(soa, true, "Ecm.", args) && sc.CheckInstantiableNonArray(soa, c) &&
+    if (sc.Check(soa, true, "Ecm", args) && sc.CheckInstantiableNonArray(soa, c) &&
         sc.CheckConstructor(soa, mid)) {
       JniValueType result;
       result.L = baseEnv(env)->NewObjectA(env, c, mid, vargs);
@@ -2668,18 +2665,18 @@ class CheckJNI {
       case kVirtual: {
         DCHECK(c == nullptr);
         JniValueType args[3] = {{.E = env}, {.L = obj}, {.m = mid}};
-        checked = sc.Check(soa, true, "ELm.", args);
+        checked = sc.Check(soa, true, "ELm", args);
         break;
       }
       case kDirect: {
         JniValueType args[4] = {{.E = env}, {.L = obj}, {.c = c}, {.m = mid}};
-        checked = sc.Check(soa, true, "ELcm.", args);
+        checked = sc.Check(soa, true, "ELcm", args);
         break;
       }
       case kStatic: {
         DCHECK(obj == nullptr);
         JniValueType args[3] = {{.E = env}, {.c = c}, {.m = mid}};
-        checked = sc.Check(soa, true, "Ecm.", args);
+        checked = sc.Check(soa, true, "Ecm", args);
         break;
       }
       default:

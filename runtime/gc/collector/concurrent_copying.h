@@ -192,9 +192,11 @@ class ConcurrentCopying : public GarbageCollector {
   void Scan(mirror::Object* to_ref) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   void Process(mirror::Object* obj, MemberOffset offset)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void Process(mirror::Object** root) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  static void ProcessRootCallback(mirror::Object** root, void* arg, const RootInfo& root_info)
-      EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_);
+  virtual void VisitRoots(mirror::Object*** roots, size_t count, const RootInfo& info)
+      OVERRIDE SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  virtual void VisitRoots(mirror::CompressedReference<mirror::Object>** roots, size_t count,
+                          const RootInfo& info)
+      OVERRIDE SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   void VerifyNoFromSpaceReferences() EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_);
   accounting::ObjectStack* GetAllocationStack();
   accounting::ObjectStack* GetLiveStack();
@@ -230,7 +232,7 @@ class ConcurrentCopying : public GarbageCollector {
   bool IsOnAllocStack(mirror::Object* ref) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   mirror::Object* GetFwdPtr(mirror::Object* from_ref)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void FlipThreadRoots() LOCKS_EXCLUDED(Locks::mutator_lock_);;
+  void FlipThreadRoots() LOCKS_EXCLUDED(Locks::mutator_lock_);
   void SwapStacks(Thread* self) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   void RecordLiveStackFreezeSize(Thread* self);
   void ComputeUnevacFromSpaceLiveRatio();

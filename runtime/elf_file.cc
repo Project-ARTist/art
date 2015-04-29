@@ -25,7 +25,6 @@
 #include "base/stringprintf.h"
 #include "base/stl_util.h"
 #include "base/unix_file/fd_file.h"
-#include "dwarf.h"
 #include "elf_file_impl.h"
 #include "elf_utils.h"
 #include "leb128.h"
@@ -111,12 +110,10 @@ static void UnregisterCodeEntry(JITCodeEntry* entry) {
   delete entry;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::ElfFileImpl(File* file, bool writable, bool program_header_only, uint8_t* requested_base)
+template <typename ElfTypes>
+ElfFileImpl<ElfTypes>::ElfFileImpl(File* file, bool writable,
+                                   bool program_header_only,
+                                   uint8_t* requested_base)
   : file_(file),
     writable_(writable),
     program_header_only_(program_header_only),
@@ -139,20 +136,12 @@ ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   CHECK(file != nullptr);
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>*
-    ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::Open(File* file, bool writable, bool program_header_only,
-           std::string* error_msg, uint8_t* requested_base) {
-  std::unique_ptr<ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>>
-    elf_file(new ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-                 Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-                 (file, writable, program_header_only, requested_base));
+template <typename ElfTypes>
+ElfFileImpl<ElfTypes>* ElfFileImpl<ElfTypes>::Open(
+    File* file, bool writable, bool program_header_only,
+    std::string* error_msg, uint8_t* requested_base) {
+  std::unique_ptr<ElfFileImpl<ElfTypes>> elf_file(new ElfFileImpl<ElfTypes>
+      (file, writable, program_header_only, requested_base));
   int prot;
   int flags;
   if (writable) {
@@ -168,32 +157,20 @@ ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return elf_file.release();
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>*
-    ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::Open(File* file, int prot, int flags, std::string* error_msg) {
-  std::unique_ptr<ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>>
-    elf_file(new ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-                 Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-                 (file, (prot & PROT_WRITE) == PROT_WRITE, /*program_header_only*/false,
-                 /*requested_base*/nullptr));
+template <typename ElfTypes>
+ElfFileImpl<ElfTypes>* ElfFileImpl<ElfTypes>::Open(
+    File* file, int prot, int flags, std::string* error_msg) {
+  std::unique_ptr<ElfFileImpl<ElfTypes>> elf_file(new ElfFileImpl<ElfTypes>
+      (file, (prot & PROT_WRITE) == PROT_WRITE, /*program_header_only*/false,
+      /*requested_base*/nullptr));
   if (!elf_file->Setup(prot, flags, error_msg)) {
     return nullptr;
   }
   return elf_file.release();
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::Setup(int prot, int flags, std::string* error_msg) {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::Setup(int prot, int flags, std::string* error_msg) {
   int64_t temp_file_length = file_->GetLength();
   if (temp_file_length < 0) {
     errno = -temp_file_length;
@@ -350,12 +327,8 @@ bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return true;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::~ElfFileImpl() {
+template <typename ElfTypes>
+ElfFileImpl<ElfTypes>::~ElfFileImpl() {
   STLDeleteElements(&segments_);
   delete symtab_symbol_table_;
   delete dynsym_symbol_table_;
@@ -365,13 +338,9 @@ ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   }
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::CheckAndSet(Elf32_Off offset, const char* label,
-                  uint8_t** target, std::string* error_msg) {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::CheckAndSet(Elf32_Off offset, const char* label,
+                                        uint8_t** target, std::string* error_msg) {
   if (Begin() + offset >= End()) {
     *error_msg = StringPrintf("Offset %d is out of range for %s in ELF file: '%s'", offset, label,
                               file_->GetPath().c_str());
@@ -381,12 +350,9 @@ bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return true;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::CheckSectionsLinked(const uint8_t* source, const uint8_t* target) const {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::CheckSectionsLinked(const uint8_t* source,
+                                                const uint8_t* target) const {
   // Only works in whole-program mode, as we need to iterate over the sections.
   // Note that we normally can't search by type, as duplicates are allowed for most section types.
   if (program_header_only_) {
@@ -417,12 +383,8 @@ bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return target_found && source_section != nullptr && source_section->sh_link == target_index;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::CheckSectionsExist(std::string* error_msg) const {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::CheckSectionsExist(std::string* error_msg) const {
   if (!program_header_only_) {
     // If in full mode, need section headers.
     if (section_headers_start_ == nullptr) {
@@ -505,12 +467,8 @@ bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return true;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::SetMap(MemMap* map, std::string* error_msg) {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::SetMap(MemMap* map, std::string* error_msg) {
   if (map == nullptr) {
     // MemMap::Open should have already set an error.
     DCHECK(!error_msg->empty());
@@ -644,64 +602,41 @@ bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return true;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Ehdr& ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetHeader() const {
+template <typename ElfTypes>
+typename ElfTypes::Ehdr& ElfFileImpl<ElfTypes>::GetHeader() const {
   CHECK(header_ != nullptr);  // Header has been checked in SetMap. This is a sanity check.
   return *header_;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-uint8_t* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetProgramHeadersStart() const {
+template <typename ElfTypes>
+uint8_t* ElfFileImpl<ElfTypes>::GetProgramHeadersStart() const {
   CHECK(program_headers_start_ != nullptr);  // Header has been set in Setup. This is a sanity
                                              // check.
   return program_headers_start_;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-uint8_t* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetSectionHeadersStart() const {
+template <typename ElfTypes>
+uint8_t* ElfFileImpl<ElfTypes>::GetSectionHeadersStart() const {
   CHECK(!program_header_only_);              // Only used in "full" mode.
   CHECK(section_headers_start_ != nullptr);  // Is checked in CheckSectionsExist. Sanity check.
   return section_headers_start_;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Phdr& ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetDynamicProgramHeader() const {
+template <typename ElfTypes>
+typename ElfTypes::Phdr& ElfFileImpl<ElfTypes>::GetDynamicProgramHeader() const {
   CHECK(dynamic_program_header_ != nullptr);  // Is checked in CheckSectionsExist. Sanity check.
   return *dynamic_program_header_;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Dyn* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetDynamicSectionStart() const {
+template <typename ElfTypes>
+typename ElfTypes::Dyn* ElfFileImpl<ElfTypes>::GetDynamicSectionStart() const {
   CHECK(dynamic_section_start_ != nullptr);  // Is checked in CheckSectionsExist. Sanity check.
   return dynamic_section_start_;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Sym* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetSymbolSectionStart(Elf_Word section_type) const {
+template <typename ElfTypes>
+typename ElfTypes::Sym* ElfFileImpl<ElfTypes>::GetSymbolSectionStart(
+    Elf_Word section_type) const {
   CHECK(IsSymbolSectionType(section_type)) << file_->GetPath() << " " << section_type;
   switch (section_type) {
     case SHT_SYMTAB: {
@@ -719,12 +654,9 @@ Elf_Sym* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   }
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-const char* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetStringSectionStart(Elf_Word section_type) const {
+template <typename ElfTypes>
+const char* ElfFileImpl<ElfTypes>::GetStringSectionStart(
+    Elf_Word section_type) const {
   CHECK(IsSymbolSectionType(section_type)) << file_->GetPath() << " " << section_type;
   switch (section_type) {
     case SHT_SYMTAB: {
@@ -740,12 +672,9 @@ const char* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   }
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-const char* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetString(Elf_Word section_type, Elf_Word i) const {
+template <typename ElfTypes>
+const char* ElfFileImpl<ElfTypes>::GetString(Elf_Word section_type,
+                                             Elf_Word i) const {
   CHECK(IsSymbolSectionType(section_type)) << file_->GetPath() << " " << section_type;
   if (i == 0) {
     return nullptr;
@@ -760,39 +689,23 @@ const char* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
 // WARNING: The following methods do not check for an error condition (non-existent hash section).
 //          It is the caller's job to do this.
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Word* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetHashSectionStart() const {
+template <typename ElfTypes>
+typename ElfTypes::Word* ElfFileImpl<ElfTypes>::GetHashSectionStart() const {
   return hash_section_start_;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Word ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetHashBucketNum() const {
+template <typename ElfTypes>
+typename ElfTypes::Word ElfFileImpl<ElfTypes>::GetHashBucketNum() const {
   return GetHashSectionStart()[0];
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Word ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetHashChainNum() const {
+template <typename ElfTypes>
+typename ElfTypes::Word ElfFileImpl<ElfTypes>::GetHashChainNum() const {
   return GetHashSectionStart()[1];
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Word ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetHashBucket(size_t i, bool* ok) const {
+template <typename ElfTypes>
+typename ElfTypes::Word ElfFileImpl<ElfTypes>::GetHashBucket(size_t i, bool* ok) const {
   if (i >= GetHashBucketNum()) {
     *ok = false;
     return 0;
@@ -802,12 +715,8 @@ Elf_Word ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return GetHashSectionStart()[2 + i];
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Word ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetHashChain(size_t i, bool* ok) const {
+template <typename ElfTypes>
+typename ElfTypes::Word ElfFileImpl<ElfTypes>::GetHashChain(size_t i, bool* ok) const {
   if (i >= GetHashChainNum()) {
     *ok = false;
     return 0;
@@ -817,21 +726,13 @@ Elf_Word ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return GetHashSectionStart()[2 + GetHashBucketNum() + i];
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Word ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetProgramHeaderNum() const {
+template <typename ElfTypes>
+typename ElfTypes::Word ElfFileImpl<ElfTypes>::GetProgramHeaderNum() const {
   return GetHeader().e_phnum;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Phdr* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetProgramHeader(Elf_Word i) const {
+template <typename ElfTypes>
+typename ElfTypes::Phdr* ElfFileImpl<ElfTypes>::GetProgramHeader(Elf_Word i) const {
   CHECK_LT(i, GetProgramHeaderNum()) << file_->GetPath();  // Sanity check for caller.
   uint8_t* program_header = GetProgramHeadersStart() + (i * GetHeader().e_phentsize);
   if (program_header >= End()) {
@@ -840,12 +741,8 @@ Elf_Phdr* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return reinterpret_cast<Elf_Phdr*>(program_header);
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Phdr* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::FindProgamHeaderByType(Elf_Word type) const {
+template <typename ElfTypes>
+typename ElfTypes::Phdr* ElfFileImpl<ElfTypes>::FindProgamHeaderByType(Elf_Word type) const {
   for (Elf_Word i = 0; i < GetProgramHeaderNum(); i++) {
     Elf_Phdr* program_header = GetProgramHeader(i);
     if (program_header->p_type == type) {
@@ -855,21 +752,13 @@ Elf_Phdr* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return nullptr;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Word ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetSectionHeaderNum() const {
+template <typename ElfTypes>
+typename ElfTypes::Word ElfFileImpl<ElfTypes>::GetSectionHeaderNum() const {
   return GetHeader().e_shnum;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Shdr* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetSectionHeader(Elf_Word i) const {
+template <typename ElfTypes>
+typename ElfTypes::Shdr* ElfFileImpl<ElfTypes>::GetSectionHeader(Elf_Word i) const {
   // Can only access arbitrary sections when we have the whole file, not just program header.
   // Even if we Load(), it doesn't bring in all the sections.
   CHECK(!program_header_only_) << file_->GetPath();
@@ -883,12 +772,8 @@ Elf_Shdr* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return reinterpret_cast<Elf_Shdr*>(section_header);
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Shdr* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::FindSectionByType(Elf_Word type) const {
+template <typename ElfTypes>
+typename ElfTypes::Shdr* ElfFileImpl<ElfTypes>::FindSectionByType(Elf_Word type) const {
   // Can only access arbitrary sections when we have the whole file, not just program header.
   // We could change this to switch on known types if they were detected during loading.
   CHECK(!program_header_only_) << file_->GetPath();
@@ -915,21 +800,14 @@ static unsigned elfhash(const char *_name) {
   return h;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Shdr* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetSectionNameStringSection() const {
+template <typename ElfTypes>
+typename ElfTypes::Shdr* ElfFileImpl<ElfTypes>::GetSectionNameStringSection() const {
   return GetSectionHeader(GetHeader().e_shstrndx);
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-const uint8_t* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::FindDynamicSymbolAddress(const std::string& symbol_name) const {
+template <typename ElfTypes>
+const uint8_t* ElfFileImpl<ElfTypes>::FindDynamicSymbolAddress(
+    const std::string& symbol_name) const {
   // Check that we have a hash section.
   if (GetHashSectionStart() == nullptr) {
     return nullptr;  // Failure condition.
@@ -945,12 +823,9 @@ const uint8_t* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
 }
 
 // WARNING: Only called from FindDynamicSymbolAddress. Elides check for hash section.
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-const Elf_Sym* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::FindDynamicSymbol(const std::string& symbol_name) const {
+template <typename ElfTypes>
+const typename ElfTypes::Sym* ElfFileImpl<ElfTypes>::FindDynamicSymbol(
+    const std::string& symbol_name) const {
   if (GetHashBucketNum() == 0) {
     // No dynamic symbols at all.
     return nullptr;
@@ -979,34 +854,21 @@ const Elf_Sym* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return nullptr;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::IsSymbolSectionType(Elf_Word section_type) {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::IsSymbolSectionType(Elf_Word section_type) {
   return ((section_type == SHT_SYMTAB) || (section_type == SHT_DYNSYM));
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Word ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetSymbolNum(Elf_Shdr& section_header) const {
+template <typename ElfTypes>
+typename ElfTypes::Word ElfFileImpl<ElfTypes>::GetSymbolNum(Elf_Shdr& section_header) const {
   CHECK(IsSymbolSectionType(section_header.sh_type))
       << file_->GetPath() << " " << section_header.sh_type;
   CHECK_NE(0U, section_header.sh_entsize) << file_->GetPath();
   return section_header.sh_size / section_header.sh_entsize;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Sym* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetSymbol(Elf_Word section_type,
-                Elf_Word i) const {
+template <typename ElfTypes>
+typename ElfTypes::Sym* ElfFileImpl<ElfTypes>::GetSymbol(Elf_Word section_type, Elf_Word i) const {
   Elf_Sym* sym_start = GetSymbolSectionStart(section_type);
   if (sym_start == nullptr) {
     return nullptr;
@@ -1014,14 +876,9 @@ Elf_Sym* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return sym_start + i;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-typename ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::SymbolTable** ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetSymbolTable(Elf_Word section_type) {
+template <typename ElfTypes>
+typename ElfFileImpl<ElfTypes>::SymbolTable**
+ElfFileImpl<ElfTypes>::GetSymbolTable(Elf_Word section_type) {
   CHECK(IsSymbolSectionType(section_type)) << file_->GetPath() << " " << section_type;
   switch (section_type) {
     case SHT_SYMTAB: {
@@ -1037,14 +894,9 @@ typename ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   }
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Sym* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::FindSymbolByName(Elf_Word section_type,
-                       const std::string& symbol_name,
-                       bool build_map) {
+template <typename ElfTypes>
+typename ElfTypes::Sym* ElfFileImpl<ElfTypes>::FindSymbolByName(
+    Elf_Word section_type, const std::string& symbol_name, bool build_map) {
   CHECK(!program_header_only_) << file_->GetPath();
   CHECK(IsSymbolSectionType(section_type)) << file_->GetPath() << " " << section_type;
 
@@ -1123,14 +975,9 @@ Elf_Sym* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return nullptr;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Addr ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::FindSymbolAddress(Elf_Word section_type,
-                        const std::string& symbol_name,
-                        bool build_map) {
+template <typename ElfTypes>
+typename ElfTypes::Addr ElfFileImpl<ElfTypes>::FindSymbolAddress(
+    Elf_Word section_type, const std::string& symbol_name, bool build_map) {
   Elf_Sym* symbol = FindSymbolByName(section_type, symbol_name, build_map);
   if (symbol == nullptr) {
     return 0;
@@ -1138,12 +985,9 @@ Elf_Addr ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return symbol->st_value;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-const char* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetString(Elf_Shdr& string_section, Elf_Word i) const {
+template <typename ElfTypes>
+const char* ElfFileImpl<ElfTypes>::GetString(Elf_Shdr& string_section,
+                                             Elf_Word i) const {
   CHECK(!program_header_only_) << file_->GetPath();
   // TODO: remove this static_cast from enum when using -std=gnu++0x
   if (static_cast<Elf_Word>(SHT_STRTAB) != string_section.sh_type) {
@@ -1163,124 +1007,80 @@ const char* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return reinterpret_cast<const char*>(string);
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Word ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetDynamicNum() const {
+template <typename ElfTypes>
+typename ElfTypes::Word ElfFileImpl<ElfTypes>::GetDynamicNum() const {
   return GetDynamicProgramHeader().p_filesz / sizeof(Elf_Dyn);
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Dyn& ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetDynamic(Elf_Word i) const {
+template <typename ElfTypes>
+typename ElfTypes::Dyn& ElfFileImpl<ElfTypes>::GetDynamic(Elf_Word i) const {
   CHECK_LT(i, GetDynamicNum()) << file_->GetPath();
   return *(GetDynamicSectionStart() + i);
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Dyn* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::FindDynamicByType(Elf_Sword type) const {
+template <typename ElfTypes>
+typename ElfTypes::Dyn* ElfFileImpl<ElfTypes>::FindDynamicByType(Elf_Sword type) const {
   for (Elf_Word i = 0; i < GetDynamicNum(); i++) {
     Elf_Dyn* dyn = &GetDynamic(i);
     if (dyn->d_tag == type) {
       return dyn;
     }
   }
-  return NULL;
+  return nullptr;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Word ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::FindDynamicValueByType(Elf_Sword type) const {
+template <typename ElfTypes>
+typename ElfTypes::Word ElfFileImpl<ElfTypes>::FindDynamicValueByType(Elf_Sword type) const {
   Elf_Dyn* dyn = FindDynamicByType(type);
-  if (dyn == NULL) {
+  if (dyn == nullptr) {
     return 0;
   } else {
     return dyn->d_un.d_val;
   }
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Rel* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetRelSectionStart(Elf_Shdr& section_header) const {
+template <typename ElfTypes>
+typename ElfTypes::Rel* ElfFileImpl<ElfTypes>::GetRelSectionStart(Elf_Shdr& section_header) const {
   CHECK(SHT_REL == section_header.sh_type) << file_->GetPath() << " " << section_header.sh_type;
   return reinterpret_cast<Elf_Rel*>(Begin() + section_header.sh_offset);
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Word ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetRelNum(Elf_Shdr& section_header) const {
+template <typename ElfTypes>
+typename ElfTypes::Word ElfFileImpl<ElfTypes>::GetRelNum(Elf_Shdr& section_header) const {
   CHECK(SHT_REL == section_header.sh_type) << file_->GetPath() << " " << section_header.sh_type;
   CHECK_NE(0U, section_header.sh_entsize) << file_->GetPath();
   return section_header.sh_size / section_header.sh_entsize;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Rel& ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetRel(Elf_Shdr& section_header, Elf_Word i) const {
+template <typename ElfTypes>
+typename ElfTypes::Rel& ElfFileImpl<ElfTypes>::GetRel(Elf_Shdr& section_header, Elf_Word i) const {
   CHECK(SHT_REL == section_header.sh_type) << file_->GetPath() << " " << section_header.sh_type;
   CHECK_LT(i, GetRelNum(section_header)) << file_->GetPath();
   return *(GetRelSectionStart(section_header) + i);
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Rela* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-  Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-  ::GetRelaSectionStart(Elf_Shdr& section_header) const {
+template <typename ElfTypes>
+typename ElfTypes::Rela* ElfFileImpl<ElfTypes>::GetRelaSectionStart(Elf_Shdr& section_header) const {
   CHECK(SHT_RELA == section_header.sh_type) << file_->GetPath() << " " << section_header.sh_type;
   return reinterpret_cast<Elf_Rela*>(Begin() + section_header.sh_offset);
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Word ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetRelaNum(Elf_Shdr& section_header) const {
+template <typename ElfTypes>
+typename ElfTypes::Word ElfFileImpl<ElfTypes>::GetRelaNum(Elf_Shdr& section_header) const {
   CHECK(SHT_RELA == section_header.sh_type) << file_->GetPath() << " " << section_header.sh_type;
   return section_header.sh_size / section_header.sh_entsize;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Rela& ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetRela(Elf_Shdr& section_header, Elf_Word i) const {
+template <typename ElfTypes>
+typename ElfTypes::Rela& ElfFileImpl<ElfTypes>::GetRela(Elf_Shdr& section_header, Elf_Word i) const {
   CHECK(SHT_RELA == section_header.sh_type) << file_->GetPath() << " " << section_header.sh_type;
   CHECK_LT(i, GetRelaNum(section_header)) << file_->GetPath();
   return *(GetRelaSectionStart(section_header) + i);
 }
 
 // Base on bionic phdr_table_get_load_size
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-size_t ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GetLoadedSize() const {
+template <typename ElfTypes>
+size_t ElfFileImpl<ElfTypes>::GetLoadedSize() const {
   Elf_Addr min_vaddr = 0xFFFFFFFFu;
   Elf_Addr max_vaddr = 0x00000000u;
   for (Elf_Word i = 0; i < GetProgramHeaderNum(); i++) {
@@ -1304,12 +1104,8 @@ size_t ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return loaded_size;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::Load(bool executable, std::string* error_msg) {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::Load(bool executable, std::string* error_msg) {
   CHECK(program_header_only_) << file_->GetPath();
 
   if (executable) {
@@ -1544,12 +1340,8 @@ bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return true;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::ValidPointer(const uint8_t* start) const {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::ValidPointer(const uint8_t* start) const {
   for (size_t i = 0; i < segments_.size(); ++i) {
     const MemMap* segment = segments_[i];
     if (segment->Begin() <= start && start < segment->End()) {
@@ -1560,12 +1352,9 @@ bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
 }
 
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-Elf_Shdr* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::FindSectionByName(const std::string& name) const {
+template <typename ElfTypes>
+typename ElfTypes::Shdr* ElfFileImpl<ElfTypes>::FindSectionByName(
+    const std::string& name) const {
   CHECK(!program_header_only_);
   Elf_Shdr* shstrtab_sec = GetSectionNameStringSection();
   if (shstrtab_sec == nullptr) {
@@ -1587,492 +1376,11 @@ Elf_Shdr* ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return nullptr;
 }
 
-struct PACKED(1) FDE32 {
-  uint32_t raw_length_;
-  uint32_t GetLength() {
-    return raw_length_ + sizeof(raw_length_);
-  }
-  uint32_t CIE_pointer;
-  uint32_t initial_location;
-  uint32_t address_range;
-  uint8_t instructions[0];
-};
-
-static FDE32* NextFDE(FDE32* frame) {
-  uint8_t* fde_bytes = reinterpret_cast<uint8_t*>(frame);
-  fde_bytes += frame->GetLength();
-  return reinterpret_cast<FDE32*>(fde_bytes);
-}
-
-static bool IsFDE(FDE32* frame) {
-  return frame->CIE_pointer != 0;
-}
-
-struct PACKED(1) FDE64 {
-  uint32_t raw_length_;
-  uint64_t extended_length_;
-  uint64_t GetLength() {
-    return extended_length_ + sizeof(raw_length_) + sizeof(extended_length_);
-  }
-  uint64_t CIE_pointer;
-  uint64_t initial_location;
-  uint64_t address_range;
-  uint8_t instructions[0];
-};
-
-static FDE64* NextFDE(FDE64* frame) {
-  uint8_t* fde_bytes = reinterpret_cast<uint8_t*>(frame);
-  fde_bytes += frame->GetLength();
-  return reinterpret_cast<FDE64*>(fde_bytes);
-}
-
-static bool IsFDE(FDE64* frame) {
-  return frame->CIE_pointer != 0;
-}
-
-static bool FixupEHFrame(off_t base_address_delta,
-                           uint8_t* eh_frame, size_t eh_frame_size) {
-  if (*(reinterpret_cast<uint32_t*>(eh_frame)) == 0xffffffff) {
-    FDE64* last_frame = reinterpret_cast<FDE64*>(eh_frame + eh_frame_size);
-    FDE64* frame = NextFDE(reinterpret_cast<FDE64*>(eh_frame));
-    for (; frame < last_frame; frame = NextFDE(frame)) {
-      if (!IsFDE(frame)) {
-        return false;
-      }
-      frame->initial_location += base_address_delta;
-    }
-    return true;
-  } else {
-    FDE32* last_frame = reinterpret_cast<FDE32*>(eh_frame + eh_frame_size);
-    FDE32* frame = NextFDE(reinterpret_cast<FDE32*>(eh_frame));
-    for (; frame < last_frame; frame = NextFDE(frame)) {
-      if (!IsFDE(frame)) {
-        return false;
-      }
-      frame->initial_location += base_address_delta;
-    }
-    return true;
-  }
-}
-
-static uint8_t* NextLeb128(uint8_t* current) {
-  DecodeUnsignedLeb128(const_cast<const uint8_t**>(&current));
-  return current;
-}
-
-struct PACKED(1) DebugLineHeader {
-  uint32_t unit_length_;  // TODO 32-bit specific size
-  uint16_t version_;
-  uint32_t header_length_;  // TODO 32-bit specific size
-  uint8_t minimum_instruction_lenght_;
-  uint8_t maximum_operations_per_instruction_;
-  uint8_t default_is_stmt_;
-  int8_t line_base_;
-  uint8_t line_range_;
-  uint8_t opcode_base_;
-  uint8_t remaining_[0];
-
-  bool IsStandardOpcode(const uint8_t* op) const {
-    return *op != 0 && *op < opcode_base_;
-  }
-
-  bool IsExtendedOpcode(const uint8_t* op) const {
-    return *op == 0;
-  }
-
-  const uint8_t* GetStandardOpcodeLengths() const {
-    return remaining_;
-  }
-
-  uint8_t* GetNextOpcode(uint8_t* op) const {
-    if (IsExtendedOpcode(op)) {
-      uint8_t* length_field = op + 1;
-      uint32_t length = DecodeUnsignedLeb128(const_cast<const uint8_t**>(&length_field));
-      return length_field + length;
-    } else if (!IsStandardOpcode(op)) {
-      return op + 1;
-    } else if (*op == DW_LNS_fixed_advance_pc) {
-      return op + 1 + sizeof(uint16_t);
-    } else {
-      uint8_t num_args = GetStandardOpcodeLengths()[*op - 1];
-      op += 1;
-      for (int i = 0; i < num_args; i++) {
-        op = NextLeb128(op);
-      }
-      return op;
-    }
-  }
-
-  uint8_t* GetDebugLineData() const {
-    const uint8_t* hdr_start =
-        reinterpret_cast<const uint8_t*>(&header_length_) + sizeof(header_length_);
-    return const_cast<uint8_t*>(hdr_start + header_length_);
-  }
-};
-
-class DebugLineInstructionIterator FINAL {
- public:
-  static DebugLineInstructionIterator* Create(DebugLineHeader* header, size_t section_size) {
-    std::unique_ptr<DebugLineInstructionIterator> line_iter(
-        new DebugLineInstructionIterator(header, section_size));
-    if (line_iter.get() == nullptr) {
-      return nullptr;
-    } else {
-      return line_iter.release();
-    }
-  }
-
-  ~DebugLineInstructionIterator() {}
-
-  bool Next() {
-    if (current_instruction_ == nullptr) {
-      return false;
-    }
-    current_instruction_ = header_->GetNextOpcode(current_instruction_);
-    if (current_instruction_ >= last_instruction_) {
-      current_instruction_ = nullptr;
-      return false;
-    } else {
-      return true;
-    }
-  }
-
-  uint8_t* GetInstruction() const {
-    return current_instruction_;
-  }
-
-  bool IsExtendedOpcode() const {
-    return header_->IsExtendedOpcode(current_instruction_);
-  }
-
-  uint8_t GetOpcode() {
-    if (!IsExtendedOpcode()) {
-      return *current_instruction_;
-    } else {
-      uint8_t* len_ptr = current_instruction_ + 1;
-      return *NextLeb128(len_ptr);
-    }
-  }
-
-  uint8_t* GetArguments() {
-    if (!IsExtendedOpcode()) {
-      return current_instruction_ + 1;
-    } else {
-      uint8_t* len_ptr = current_instruction_ + 1;
-      return NextLeb128(len_ptr) + 1;
-    }
-  }
-
- private:
-  DebugLineInstructionIterator(DebugLineHeader* header, size_t size)
-    : header_(header), last_instruction_(reinterpret_cast<uint8_t*>(header) + size),
-      current_instruction_(header->GetDebugLineData()) {}
-
-  DebugLineHeader* const header_;
-  uint8_t* const last_instruction_;
-  uint8_t* current_instruction_;
-};
-
-static bool FixupDebugLine(off_t base_offset_delta, DebugLineInstructionIterator* iter) {
-  while (iter->Next()) {
-    if (iter->IsExtendedOpcode() && iter->GetOpcode() == DW_LNE_set_address) {
-      *reinterpret_cast<uint32_t*>(iter->GetArguments()) += base_offset_delta;
-    }
-  }
-  return true;
-}
-
-struct PACKED(1) DebugInfoHeader {
-  uint32_t unit_length;  // TODO 32-bit specific size
-  uint16_t version;
-  uint32_t debug_abbrev_offset;  // TODO 32-bit specific size
-  uint8_t  address_size;
-};
-
-// Returns -1 if it is variable length, which we will just disallow for now.
-static int32_t FormLength(uint32_t att) {
-  switch (att) {
-    case DW_FORM_data1:
-    case DW_FORM_flag:
-    case DW_FORM_flag_present:
-    case DW_FORM_ref1:
-      return 1;
-
-    case DW_FORM_data2:
-    case DW_FORM_ref2:
-      return 2;
-
-    case DW_FORM_addr:        // TODO 32-bit only
-    case DW_FORM_ref_addr:    // TODO 32-bit only
-    case DW_FORM_sec_offset:  // TODO 32-bit only
-    case DW_FORM_strp:        // TODO 32-bit only
-    case DW_FORM_data4:
-    case DW_FORM_ref4:
-      return 4;
-
-    case DW_FORM_data8:
-    case DW_FORM_ref8:
-    case DW_FORM_ref_sig8:
-      return 8;
-
-    case DW_FORM_block:
-    case DW_FORM_block1:
-    case DW_FORM_block2:
-    case DW_FORM_block4:
-    case DW_FORM_exprloc:
-    case DW_FORM_indirect:
-    case DW_FORM_ref_udata:
-    case DW_FORM_sdata:
-    case DW_FORM_string:
-    case DW_FORM_udata:
-    default:
-      return -1;
-  }
-}
-
-class DebugTag FINAL {
- public:
-  ~DebugTag() {}
-  // Creates a new tag and moves data pointer up to the start of the next one.
-  // nullptr means error.
-  static DebugTag* Create(const uint8_t** data_pointer) {
-    const uint8_t* data = *data_pointer;
-    uint32_t index = DecodeUnsignedLeb128(&data);
-    std::unique_ptr<DebugTag> tag(new DebugTag(index));
-    tag->size_ = static_cast<uint32_t>(
-        reinterpret_cast<uintptr_t>(data) - reinterpret_cast<uintptr_t>(*data_pointer));
-    // skip the abbrev
-    tag->tag_ = DecodeUnsignedLeb128(&data);
-    tag->has_child_ = (*data == 0);
-    data++;
-    while (true) {
-      uint32_t attr = DecodeUnsignedLeb128(&data);
-      uint32_t form = DecodeUnsignedLeb128(&data);
-      if (attr == 0 && form == 0) {
-        break;
-      } else if (attr == 0 || form == 0) {
-        // Bad abbrev.
-        return nullptr;
-      }
-      int32_t size = FormLength(form);
-      if (size == -1) {
-        return nullptr;
-      }
-      tag->AddAttribute(attr, static_cast<uint32_t>(size));
-    }
-    *data_pointer = data;
-    return tag.release();
-  }
-
-  uint32_t GetSize() const {
-    return size_;
-  }
-
-  bool HasChild() const {
-    return has_child_;
-  }
-
-  uint32_t GetTagNumber() const {
-    return tag_;
-  }
-
-  uint32_t GetIndex() const {
-    return index_;
-  }
-
-  // Gets the offset of a particular attribute in this tag structure.
-  // Interpretation of the data is left to the consumer. 0 is returned if the
-  // tag does not contain the attribute.
-  uint32_t GetOffsetOf(uint32_t dwarf_attribute) const {
-    auto it = off_map_.find(dwarf_attribute);
-    if (it == off_map_.end()) {
-      return 0;
-    } else {
-      return it->second;
-    }
-  }
-
-  // Gets the size of attribute
-  uint32_t GetAttrSize(uint32_t dwarf_attribute) const {
-    auto it = size_map_.find(dwarf_attribute);
-    if (it == size_map_.end()) {
-      return 0;
-    } else {
-      return it->second;
-    }
-  }
-
- private:
-  explicit DebugTag(uint32_t index) : index_(index), size_(0), tag_(0), has_child_(false) {}
-  void AddAttribute(uint32_t type, uint32_t attr_size) {
-    off_map_.insert(std::pair<uint32_t, uint32_t>(type, size_));
-    size_map_.insert(std::pair<uint32_t, uint32_t>(type, attr_size));
-    size_ += attr_size;
-  }
-
-  const uint32_t index_;
-  std::map<uint32_t, uint32_t> off_map_;
-  std::map<uint32_t, uint32_t> size_map_;
-  uint32_t size_;
-  uint32_t tag_;
-  bool has_child_;
-};
-
-class DebugAbbrev {
- public:
-  ~DebugAbbrev() {}
-  static DebugAbbrev* Create(const uint8_t* dbg_abbrev, size_t dbg_abbrev_size) {
-    std::unique_ptr<DebugAbbrev> abbrev(new DebugAbbrev(dbg_abbrev, dbg_abbrev + dbg_abbrev_size));
-    if (!abbrev->ReadAtOffset(0)) {
-      return nullptr;
-    }
-    return abbrev.release();
-  }
-
-  bool ReadAtOffset(uint32_t abbrev_offset) {
-    tags_.clear();
-    tag_list_.clear();
-    const uint8_t* dbg_abbrev = begin_ + abbrev_offset;
-    while (dbg_abbrev < end_ && *dbg_abbrev != 0) {
-      std::unique_ptr<DebugTag> tag(DebugTag::Create(&dbg_abbrev));
-      if (tag.get() == nullptr) {
-        return false;
-      } else {
-        tags_.insert(std::pair<uint32_t, uint32_t>(tag->GetIndex(), tag_list_.size()));
-        tag_list_.push_back(std::move(tag));
-      }
-    }
-    return true;
-  }
-
-  DebugTag* ReadTag(const uint8_t* entry) {
-    uint32_t tag_num = DecodeUnsignedLeb128(&entry);
-    auto it = tags_.find(tag_num);
-    if (it == tags_.end()) {
-      return nullptr;
-    } else {
-      CHECK_GT(tag_list_.size(), it->second);
-      return tag_list_.at(it->second).get();
-    }
-  }
-
- private:
-  DebugAbbrev(const uint8_t* begin, const uint8_t* end) : begin_(begin), end_(end) {}
-  const uint8_t* const begin_;
-  const uint8_t* const end_;
-  std::map<uint32_t, uint32_t> tags_;
-  std::vector<std::unique_ptr<DebugTag>> tag_list_;
-};
-
-class DebugInfoIterator {
- public:
-  static DebugInfoIterator* Create(DebugInfoHeader* header, size_t frame_size,
-                                   DebugAbbrev* abbrev) {
-    std::unique_ptr<DebugInfoIterator> iter(new DebugInfoIterator(header, frame_size, abbrev));
-    if (iter->GetCurrentTag() == nullptr) {
-      return nullptr;
-    } else {
-      return iter.release();
-    }
-  }
-  ~DebugInfoIterator() {}
-
-  // Moves to the next DIE. Returns false if at last entry.
-  // TODO Handle variable length attributes.
-  bool next() {
-    if (current_entry_ == nullptr || current_tag_ == nullptr) {
-      return false;
-    }
-    bool reread_abbrev = false;
-    current_entry_ += current_tag_->GetSize();
-    if (reinterpret_cast<DebugInfoHeader*>(current_entry_) >= next_cu_) {
-      current_cu_ = next_cu_;
-      next_cu_ = GetNextCu(current_cu_);
-      current_entry_ = reinterpret_cast<uint8_t*>(current_cu_) + sizeof(DebugInfoHeader);
-      reread_abbrev = true;
-    }
-    if (current_entry_ >= last_entry_) {
-      current_entry_ = nullptr;
-      return false;
-    }
-    if (reread_abbrev) {
-      abbrev_->ReadAtOffset(current_cu_->debug_abbrev_offset);
-    }
-    current_tag_ = abbrev_->ReadTag(current_entry_);
-    if (current_tag_ == nullptr) {
-      current_entry_ = nullptr;
-      return false;
-    } else {
-      return true;
-    }
-  }
-
-  const DebugTag* GetCurrentTag() {
-    return const_cast<DebugTag*>(current_tag_);
-  }
-  uint8_t* GetPointerToField(uint8_t dwarf_field) {
-    if (current_tag_ == nullptr || current_entry_ == nullptr || current_entry_ >= last_entry_) {
-      return nullptr;
-    }
-    uint32_t off = current_tag_->GetOffsetOf(dwarf_field);
-    if (off == 0) {
-      // tag does not have that field.
-      return nullptr;
-    } else {
-      DCHECK_LT(off, current_tag_->GetSize());
-      return current_entry_ + off;
-    }
-  }
-
- private:
-  static DebugInfoHeader* GetNextCu(DebugInfoHeader* hdr) {
-    uint8_t* hdr_byte = reinterpret_cast<uint8_t*>(hdr);
-    return reinterpret_cast<DebugInfoHeader*>(hdr_byte + sizeof(uint32_t) + hdr->unit_length);
-  }
-
-  DebugInfoIterator(DebugInfoHeader* header, size_t frame_size, DebugAbbrev* abbrev)
-      : abbrev_(abbrev),
-        current_cu_(header),
-        next_cu_(GetNextCu(header)),
-        last_entry_(reinterpret_cast<uint8_t*>(header) + frame_size),
-        current_entry_(reinterpret_cast<uint8_t*>(header) + sizeof(DebugInfoHeader)),
-        current_tag_(abbrev_->ReadTag(current_entry_)) {}
-  DebugAbbrev* const abbrev_;
-  DebugInfoHeader* current_cu_;
-  DebugInfoHeader* next_cu_;
-  uint8_t* const last_entry_;
-  uint8_t* current_entry_;
-  DebugTag* current_tag_;
-};
-
-static bool FixupDebugInfo(off_t base_address_delta, DebugInfoIterator* iter) {
-  do {
-    if (iter->GetCurrentTag()->GetAttrSize(DW_AT_low_pc) != sizeof(int32_t) ||
-        iter->GetCurrentTag()->GetAttrSize(DW_AT_high_pc) != sizeof(int32_t)) {
-      LOG(ERROR) << "DWARF information with 64 bit pointers is not supported yet.";
-      return false;
-    }
-    uint32_t* PC_low = reinterpret_cast<uint32_t*>(iter->GetPointerToField(DW_AT_low_pc));
-    uint32_t* PC_high = reinterpret_cast<uint32_t*>(iter->GetPointerToField(DW_AT_high_pc));
-    if (PC_low != nullptr && PC_high != nullptr) {
-      *PC_low  += base_address_delta;
-      *PC_high += base_address_delta;
-    }
-  } while (iter->next());
-  return true;
-}
-
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::FixupDebugSections(off_t base_address_delta) {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::FixupDebugSections(typename std::make_signed<Elf_Off>::type base_address_delta) {
   const Elf_Shdr* debug_info = FindSectionByName(".debug_info");
   const Elf_Shdr* debug_abbrev = FindSectionByName(".debug_abbrev");
-  const Elf_Shdr* eh_frame = FindSectionByName(".eh_frame");
   const Elf_Shdr* debug_str = FindSectionByName(".debug_str");
-  const Elf_Shdr* debug_line = FindSectionByName(".debug_line");
   const Elf_Shdr* strtab_sec = FindSectionByName(".strtab");
   const Elf_Shdr* symtab_sec = FindSectionByName(".symtab");
 
@@ -2084,45 +1392,77 @@ bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   if (base_address_delta == 0) {
     return true;
   }
-  if (eh_frame != nullptr &&
-      !FixupEHFrame(base_address_delta, Begin() + eh_frame->sh_offset, eh_frame->sh_size)) {
+  if (!ApplyOatPatchesTo(".debug_info", base_address_delta)) {
     return false;
   }
-
-  std::unique_ptr<DebugAbbrev> abbrev(DebugAbbrev::Create(Begin() + debug_abbrev->sh_offset,
-                                                          debug_abbrev->sh_size));
-  if (abbrev.get() == nullptr) {
+  if (!ApplyOatPatchesTo(".debug_line", base_address_delta)) {
     return false;
   }
-  DebugInfoHeader* info_header =
-      reinterpret_cast<DebugInfoHeader*>(Begin() + debug_info->sh_offset);
-  std::unique_ptr<DebugInfoIterator> info_iter(DebugInfoIterator::Create(info_header,
-                                                                         debug_info->sh_size,
-                                                                         abbrev.get()));
-  if (info_iter.get() == nullptr) {
-    return false;
-  }
-  if (debug_line != nullptr) {
-    DebugLineHeader* line_header =
-        reinterpret_cast<DebugLineHeader*>(Begin() + debug_line->sh_offset);
-    std::unique_ptr<DebugLineInstructionIterator> line_iter(
-        DebugLineInstructionIterator::Create(line_header, debug_line->sh_size));
-    if (line_iter.get() == nullptr) {
-      return false;
-    }
-    if (!FixupDebugLine(base_address_delta, line_iter.get())) {
-      return false;
-    }
-  }
-  return FixupDebugInfo(base_address_delta, info_iter.get());
+  return true;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-void ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::GdbJITSupport() {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::ApplyOatPatchesTo(
+    const char* target_section_name,
+    typename std::make_signed<Elf_Off>::type delta) {
+  auto patches_section = FindSectionByName(".oat_patches");
+  if (patches_section == nullptr) {
+    LOG(ERROR) << ".oat_patches section not found.";
+    return false;
+  }
+  if (patches_section->sh_type != SHT_OAT_PATCH) {
+    LOG(ERROR) << "Unexpected type of .oat_patches.";
+    return false;
+  }
+  auto target_section = FindSectionByName(target_section_name);
+  if (target_section == nullptr) {
+    LOG(ERROR) << target_section_name << " section not found.";
+    return false;
+  }
+  if (!ApplyOatPatches(
+      Begin() + patches_section->sh_offset,
+      Begin() + patches_section->sh_offset + patches_section->sh_size,
+      target_section_name, delta,
+      Begin() + target_section->sh_offset,
+      Begin() + target_section->sh_offset + target_section->sh_size)) {
+    LOG(ERROR) << target_section_name << " section not found in .oat_patches.";
+  }
+  return true;
+}
+
+// Apply .oat_patches to given section.
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::ApplyOatPatches(
+    const uint8_t* patches, const uint8_t* patches_end,
+    const char* target_section_name,
+    typename std::make_signed<Elf_Off>::type delta,
+    uint8_t* to_patch, const uint8_t* to_patch_end) {
+  // Read null-terminated section name.
+  const char* section_name;
+  while ((section_name = reinterpret_cast<const char*>(patches))[0] != '\0') {
+    patches += strlen(section_name) + 1;
+    uint32_t length = DecodeUnsignedLeb128(&patches);
+    const uint8_t* next_section = patches + length;
+    // Is it the section we want to patch?
+    if (strcmp(section_name, target_section_name) == 0) {
+      // Read LEB128 encoded list of advances.
+      while (patches < next_section) {
+        DCHECK_LT(patches, patches_end) << "Unexpected end of .oat_patches.";
+        to_patch += DecodeUnsignedLeb128(&patches);
+        DCHECK_LT(to_patch, to_patch_end) << "Patch past the end of " << section_name;
+        // TODO: 32-bit vs 64-bit.  What is the right type to use here?
+        auto* patch_loc = reinterpret_cast<typename std::make_signed<Elf_Off>::type*>(to_patch);
+        *patch_loc += delta;
+      }
+      return true;
+    }
+    patches = next_section;
+  }
+  return false;
+}
+
+template <typename ElfTypes>
+void ElfFileImpl<ElfTypes>::GdbJITSupport() {
   // We only get here if we only are mapping the program header.
   DCHECK(program_header_only_);
 
@@ -2130,15 +1470,12 @@ void ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   std::string error_msg;
   // Make it MAP_PRIVATE so we can just give it to gdb if all the necessary
   // sections are there.
-  std::unique_ptr<ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-      Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>>
-      all_ptr(Open(const_cast<File*>(file_), PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE, &error_msg));
+  std::unique_ptr<ElfFileImpl<ElfTypes>> all_ptr(
+      Open(const_cast<File*>(file_), PROT_READ | PROT_WRITE, MAP_PRIVATE, &error_msg));
   if (all_ptr.get() == nullptr) {
     return;
   }
-  ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-      Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>& all = *all_ptr;
+  ElfFileImpl<ElfTypes>& all = *all_ptr;
 
   // We need the eh_frame for gdb but debug info might be present without it.
   const Elf_Shdr* eh_frame = all.FindSectionByName(".eh_frame");
@@ -2168,12 +1505,8 @@ void ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   gdb_file_mapping_.reset(all_ptr.release());
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::Strip(std::string* error_msg) {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::Strip(std::string* error_msg) {
   // ELF files produced by MCLinker look roughly like this
   //
   // +------------+
@@ -2234,7 +1567,7 @@ bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   CHECK_NE(0U, section_headers.size());
   CHECK_EQ(section_headers.size(), section_headers_original_indexes.size());
 
-  // section 0 is the NULL section, sections start at offset of first section
+  // section 0 is the null section, sections start at offset of first section
   CHECK(GetSectionHeader(1) != nullptr);
   Elf_Off offset = GetSectionHeader(1)->sh_offset;
   for (size_t i = 1; i < section_headers.size(); i++) {
@@ -2276,12 +1609,8 @@ bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
 
 static const bool DEBUG_FIXUP = false;
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::Fixup(uintptr_t base_address) {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::Fixup(Elf_Addr base_address) {
   if (!FixupDynamic(base_address)) {
     LOG(WARNING) << "Failed to fixup .dynamic in " << file_->GetPath();
     return false;
@@ -2306,19 +1635,16 @@ bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
     LOG(WARNING) << "Failed to fixup .rel.dyn in " << file_->GetPath();
     return false;
   }
-  if (!FixupDebugSections(base_address)) {
+  static_assert(sizeof(Elf_Off) >= sizeof(base_address), "Potentially losing precision.");
+  if (!FixupDebugSections(static_cast<Elf_Off>(base_address))) {
     LOG(WARNING) << "Failed to fixup debug sections in " << file_->GetPath();
     return false;
   }
   return true;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::FixupDynamic(uintptr_t base_address) {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::FixupDynamic(Elf_Addr base_address) {
   for (Elf_Word i = 0; i < GetDynamicNum(); i++) {
     Elf_Dyn& elf_dyn = GetDynamic(i);
     Elf_Word d_tag = elf_dyn.d_tag;
@@ -2337,12 +1663,8 @@ bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return true;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::FixupSectionHeaders(uintptr_t base_address) {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::FixupSectionHeaders(Elf_Addr base_address) {
   for (Elf_Word i = 0; i < GetSectionHeaderNum(); i++) {
     Elf_Shdr* sh = GetSectionHeader(i);
     CHECK(sh != nullptr);
@@ -2361,12 +1683,8 @@ bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return true;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::FixupProgramHeaders(uintptr_t base_address) {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::FixupProgramHeaders(Elf_Addr base_address) {
   // TODO: ELFObjectFile doesn't have give to Elf_Phdr, so we do that ourselves for now.
   for (Elf_Word i = 0; i < GetProgramHeaderNum(); i++) {
     Elf_Phdr* ph = GetProgramHeader(i);
@@ -2388,12 +1706,8 @@ bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return true;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::FixupSymbols(uintptr_t base_address, bool dynamic) {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::FixupSymbols(Elf_Addr base_address, bool dynamic) {
   Elf_Word section_type = dynamic ? SHT_DYNSYM : SHT_SYMTAB;
   // TODO: Unfortunate ELFObjectFile has protected symbol access, so use ElfFile
   Elf_Shdr* symbol_section = FindSectionByType(section_type);
@@ -2418,12 +1732,8 @@ bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
   return true;
 }
 
-template <typename Elf_Ehdr, typename Elf_Phdr, typename Elf_Shdr, typename Elf_Word,
-          typename Elf_Sword, typename Elf_Addr, typename Elf_Sym, typename Elf_Rel,
-          typename Elf_Rela, typename Elf_Dyn, typename Elf_Off>
-bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
-    Elf_Sword, Elf_Addr, Elf_Sym, Elf_Rel, Elf_Rela, Elf_Dyn, Elf_Off>
-    ::FixupRelocations(uintptr_t base_address) {
+template <typename ElfTypes>
+bool ElfFileImpl<ElfTypes>::FixupRelocations(Elf_Addr base_address) {
   for (Elf_Word i = 0; i < GetSectionHeaderNum(); i++) {
     Elf_Shdr* sh = GetSectionHeader(i);
     CHECK(sh != nullptr);
@@ -2455,10 +1765,8 @@ bool ElfFileImpl<Elf_Ehdr, Elf_Phdr, Elf_Shdr, Elf_Word,
 }
 
 // Explicit instantiations
-template class ElfFileImpl<Elf32_Ehdr, Elf32_Phdr, Elf32_Shdr, Elf32_Word,
-    Elf32_Sword, Elf32_Addr, Elf32_Sym, Elf32_Rel, Elf32_Rela, Elf32_Dyn, Elf32_Off>;
-template class ElfFileImpl<Elf64_Ehdr, Elf64_Phdr, Elf64_Shdr, Elf64_Word,
-    Elf64_Sword, Elf64_Addr, Elf64_Sym, Elf64_Rel, Elf64_Rela, Elf64_Dyn, Elf64_Off>;
+template class ElfFileImpl<ElfTypes32>;
+template class ElfFileImpl<ElfTypes64>;
 
 ElfFile::ElfFile(ElfFileImpl32* elf32) : elf32_(elf32), elf64_(nullptr) {
 }
@@ -2623,7 +1931,14 @@ bool ElfFile::Strip(File* file, std::string* error_msg) {
     return elf_file->elf32_->Strip(error_msg);
 }
 
-bool ElfFile::Fixup(uintptr_t base_address) {
+bool ElfFile::Fixup(uint64_t base_address) {
+  if (elf64_.get() != nullptr) {
+    return elf64_->Fixup(static_cast<Elf64_Addr>(base_address));
+  } else {
+    DCHECK(elf32_.get() != nullptr);
+    CHECK(IsUint<32>(base_address)) << std::hex << base_address;
+    return elf32_->Fixup(static_cast<Elf32_Addr>(base_address));
+  }
   DELEGATE_TO_IMPL(Fixup, base_address);
 }
 

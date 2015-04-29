@@ -53,14 +53,14 @@ void InternTable::DumpForSigQuit(std::ostream& os) const {
   os << "Intern table: " << StrongSize() << " strong; " << WeakSize() << " weak\n";
 }
 
-void InternTable::VisitRoots(RootCallback* callback, void* arg, VisitRootFlags flags) {
+void InternTable::VisitRoots(RootVisitor* visitor, VisitRootFlags flags) {
   MutexLock mu(Thread::Current(), *Locks::intern_table_lock_);
   if ((flags & kVisitRootFlagAllRoots) != 0) {
-    strong_interns_.VisitRoots(callback, arg);
+    strong_interns_.VisitRoots(visitor);
   } else if ((flags & kVisitRootFlagNewRoots) != 0) {
     for (auto& root : new_strong_intern_roots_) {
       mirror::String* old_ref = root.Read<kWithoutReadBarrier>();
-      root.VisitRoot(callback, arg, RootInfo(kRootInternedString));
+      root.VisitRoot(visitor, RootInfo(kRootInternedString));
       mirror::String* new_ref = root.Read<kWithoutReadBarrier>();
       if (new_ref != old_ref) {
         // The GC moved a root in the log. Need to search the strong interns and update the
@@ -194,7 +194,7 @@ mirror::String* InternTable::LookupStringFromImage(mirror::String* s)
       uint32_t string_idx = dex_file->GetIndexForStringId(*string_id);
       // GetResolvedString() contains a RB.
       mirror::String* image_string = dex_cache->GetResolvedString(string_idx);
-      if (image_string != NULL) {
+      if (image_string != nullptr) {
         return image_string;
       }
     }
@@ -236,11 +236,6 @@ mirror::String* InternTable::Insert(mirror::String* s, bool is_strong) {
   if (strong != nullptr) {
     return strong;
   }
-  // Check the image for a match.
-  mirror::String* image = LookupStringFromImage(s);
-  if (image != nullptr) {
-    return is_strong ? InsertStrong(image) : InsertWeak(image);
-  }
   // There is no match in the strong table, check the weak table.
   mirror::String* weak = LookupWeak(s);
   if (weak != nullptr) {
@@ -250,6 +245,11 @@ mirror::String* InternTable::Insert(mirror::String* s, bool is_strong) {
       return InsertStrong(weak);
     }
     return weak;
+  }
+  // Check the image for a match.
+  mirror::String* image = LookupStringFromImage(s);
+  if (image != nullptr) {
+    return is_strong ? InsertStrong(image) : InsertWeak(image);
   }
   // No match in the strong table or the weak table. Insert into the strong / weak table.
   return is_strong ? InsertStrong(s) : InsertWeak(s);
@@ -335,12 +335,14 @@ void InternTable::Table::Insert(mirror::String* s) {
   post_zygote_table_.Insert(GcRoot<mirror::String>(s));
 }
 
-void InternTable::Table::VisitRoots(RootCallback* callback, void* arg) {
+void InternTable::Table::VisitRoots(RootVisitor* visitor) {
+  BufferedRootVisitor<kDefaultBufferedRootCount> buffered_visitor(
+      visitor, RootInfo(kRootInternedString));
   for (auto& intern : pre_zygote_table_) {
-    intern.VisitRoot(callback, arg, RootInfo(kRootInternedString));
+    buffered_visitor.VisitRoot(intern);
   }
   for (auto& intern : post_zygote_table_) {
-    intern.VisitRoot(callback, arg, RootInfo(kRootInternedString));
+    buffered_visitor.VisitRoot(intern);
   }
 }
 

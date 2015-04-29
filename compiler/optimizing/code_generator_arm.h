@@ -41,6 +41,25 @@ static constexpr size_t kParameterFpuRegistersLength = arraysize(kParameterFpuRe
 
 static constexpr Register kArtMethodRegister = R0;
 
+static constexpr Register kRuntimeParameterCoreRegisters[] = { R0, R1, R2, R3 };
+static constexpr size_t kRuntimeParameterCoreRegistersLength =
+    arraysize(kRuntimeParameterCoreRegisters);
+static constexpr SRegister kRuntimeParameterFpuRegisters[] = { S0, S1, S2, S3 };
+static constexpr size_t kRuntimeParameterFpuRegistersLength =
+    arraysize(kRuntimeParameterFpuRegisters);
+
+class InvokeRuntimeCallingConvention : public CallingConvention<Register, SRegister> {
+ public:
+  InvokeRuntimeCallingConvention()
+      : CallingConvention(kRuntimeParameterCoreRegisters,
+                          kRuntimeParameterCoreRegistersLength,
+                          kRuntimeParameterFpuRegisters,
+                          kRuntimeParameterFpuRegistersLength) {}
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(InvokeRuntimeCallingConvention);
+};
+
 static constexpr DRegister FromLowSToD(SRegister reg) {
   return DCHECK_CONSTEXPR(reg % 2 == 0, , D0)
       static_cast<DRegister>(reg / 2);
@@ -59,28 +78,25 @@ class InvokeDexCallingConvention : public CallingConvention<Register, SRegister>
   DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConvention);
 };
 
-class InvokeDexCallingConventionVisitor {
+class InvokeDexCallingConventionVisitorARM : public InvokeDexCallingConventionVisitor {
  public:
-  InvokeDexCallingConventionVisitor()
-      : gp_index_(0), float_index_(0), double_index_(0), stack_index_(0) {}
+  InvokeDexCallingConventionVisitorARM() {}
+  virtual ~InvokeDexCallingConventionVisitorARM() {}
 
-  Location GetNextLocation(Primitive::Type type);
+  Location GetNextLocation(Primitive::Type type) OVERRIDE;
   Location GetReturnLocation(Primitive::Type type);
 
  private:
   InvokeDexCallingConvention calling_convention;
-  uint32_t gp_index_;
-  uint32_t float_index_;
-  uint32_t double_index_;
-  uint32_t stack_index_;
+  uint32_t double_index_ = 0;
 
-  DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConventionVisitor);
+  DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConventionVisitorARM);
 };
 
-class ParallelMoveResolverARM : public ParallelMoveResolver {
+class ParallelMoveResolverARM : public ParallelMoveResolverWithSwap {
  public:
   ParallelMoveResolverARM(ArenaAllocator* allocator, CodeGeneratorARM* codegen)
-      : ParallelMoveResolver(allocator), codegen_(codegen) {}
+      : ParallelMoveResolverWithSwap(allocator), codegen_(codegen) {}
 
   void EmitMove(size_t index) OVERRIDE;
   void EmitSwap(size_t index) OVERRIDE;
@@ -132,7 +148,7 @@ class LocationsBuilderARM : public HGraphVisitor {
   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info);
 
   CodeGeneratorARM* const codegen_;
-  InvokeDexCallingConventionVisitor parameter_visitor_;
+  InvokeDexCallingConventionVisitorARM parameter_visitor_;
 
   DISALLOW_COPY_AND_ASSIGN(LocationsBuilderARM);
 };
@@ -169,6 +185,10 @@ class InstructionCodeGeneratorARM : public HGraphVisitor {
   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info);
   void GenerateImplicitNullCheck(HNullCheck* instruction);
   void GenerateExplicitNullCheck(HNullCheck* instruction);
+  void GenerateTestAndBranch(HInstruction* instruction,
+                             Label* true_target,
+                             Label* false_target,
+                             Label* always_true_target);
 
   ArmAssembler* const assembler_;
   CodeGeneratorARM* const codegen_;

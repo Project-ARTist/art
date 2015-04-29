@@ -59,19 +59,7 @@ std::ostream& operator<<(std::ostream& os, const VRegKind& rhs);
 
 // A reference from the shadow stack to a MirrorType object within the Java heap.
 template<class MirrorType>
-class MANAGED StackReference : public mirror::ObjectReference<false, MirrorType> {
- public:
-  StackReference<MirrorType>() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
-      : mirror::ObjectReference<false, MirrorType>(nullptr) {}
-
-  static StackReference<MirrorType> FromMirrorPtr(MirrorType* p)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-    return StackReference<MirrorType>(p);
-  }
-
- private:
-  StackReference<MirrorType>(MirrorType* p) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
-      : mirror::ObjectReference<false, MirrorType>(p) {}
+class MANAGED StackReference : public mirror::CompressedReference<MirrorType> {
 };
 
 // ShadowFrame has 2 possible layouts:
@@ -307,11 +295,12 @@ class ShadowFrame {
   }
 
   StackReference<mirror::Object>* References() {
-    return const_cast<StackReference<mirror::Object>*>(const_cast<const ShadowFrame*>(this)->References());
+    return const_cast<StackReference<mirror::Object>*>(
+        const_cast<const ShadowFrame*>(this)->References());
   }
 
   const uint32_t number_of_vregs_;
-  // Link to previous shadow frame or NULL.
+  // Link to previous shadow frame or null.
   ShadowFrame* link_;
   mirror::ArtMethod* method_;
   uint32_t dex_pc_;
@@ -583,7 +572,8 @@ class StackVisitor {
        * Special temporaries may have custom locations and the logic above deals with that.
        * However, non-special temporaries are placed relative to the outs.
        */
-      int temps_start = sizeof(StackReference<mirror::ArtMethod>) + code_item->outs_size_ * sizeof(uint32_t);
+      int temps_start = sizeof(StackReference<mirror::ArtMethod>) +
+          code_item->outs_size_ * sizeof(uint32_t);
       int relative_offset = (reg - (temp_threshold + max_num_special_temps)) * sizeof(uint32_t);
       return temps_start + relative_offset;
     }  else if (reg < num_regs) {
@@ -678,17 +668,11 @@ class StackVisitor {
   bool SetVRegFromQuickCode(mirror::ArtMethod* m, uint16_t vreg, uint32_t new_value,
                             VRegKind kind)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  bool SetVRegFromOptimizedCode(mirror::ArtMethod* m, uint16_t vreg, uint32_t new_value,
-                                VRegKind kind)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   bool SetRegisterIfAccessible(uint32_t reg, uint32_t new_value, VRegKind kind)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   bool SetVRegPairFromQuickCode(mirror::ArtMethod* m, uint16_t vreg, uint64_t new_value,
                                 VRegKind kind_lo, VRegKind kind_hi)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  bool SetVRegPairFromOptimizedCode(mirror::ArtMethod* m, uint16_t vreg, uint64_t new_value,
-                                    VRegKind kind_lo, VRegKind kind_hi)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   bool SetRegisterPairIfAccessible(uint32_t reg_lo, uint32_t reg_hi, uint64_t new_value,
                                    bool is_float)

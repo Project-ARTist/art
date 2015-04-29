@@ -23,6 +23,7 @@ LIBART_COMPILER_SRC_FILES := \
 	dex/global_value_numbering.cc \
 	dex/gvn_dead_code_elimination.cc \
 	dex/local_value_numbering.cc \
+	dex/type_inference.cc \
 	dex/quick/arm/assemble_arm.cc \
 	dex/quick/arm/call_arm.cc \
 	dex/quick/arm/fp_arm.cc \
@@ -41,6 +42,7 @@ LIBART_COMPILER_SRC_FILES := \
 	dex/quick/gen_common.cc \
 	dex/quick/gen_invoke.cc \
 	dex/quick/gen_loadstore.cc \
+	dex/quick/lazy_debug_frame_opcode_writer.cc \
 	dex/quick/local_optimizations.cc \
 	dex/quick/mips/assemble_mips.cc \
 	dex/quick/mips/call_mips.cc \
@@ -48,12 +50,6 @@ LIBART_COMPILER_SRC_FILES := \
 	dex/quick/mips/int_mips.cc \
 	dex/quick/mips/target_mips.cc \
 	dex/quick/mips/utility_mips.cc \
-	dex/quick/mips64/assemble_mips64.cc \
-	dex/quick/mips64/call_mips64.cc \
-	dex/quick/mips64/fp_mips64.cc \
-	dex/quick/mips64/int_mips64.cc \
-	dex/quick/mips64/target_mips64.cc \
-	dex/quick/mips64/utility_mips64.cc \
 	dex/quick/mir_to_lir.cc \
 	dex/quick/quick_compiler.cc \
 	dex/quick/ralloc_util.cc \
@@ -85,6 +81,13 @@ LIBART_COMPILER_SRC_FILES := \
 	driver/compiler_driver.cc \
 	driver/compiler_options.cc \
 	driver/dex_compilation_unit.cc \
+	linker/relative_patcher.cc \
+	linker/arm/relative_patcher_arm_base.cc \
+	linker/arm/relative_patcher_thumb2.cc \
+	linker/arm64/relative_patcher_arm64.cc \
+	linker/x86/relative_patcher_x86_base.cc \
+	linker/x86/relative_patcher_x86.cc \
+	linker/x86_64/relative_patcher_x86_64.cc \
 	jit/jit_compiler.cc \
 	jni/quick/arm/calling_convention_arm.cc \
 	jni/quick/arm64/calling_convention_arm64.cc \
@@ -94,6 +97,7 @@ LIBART_COMPILER_SRC_FILES := \
 	jni/quick/x86_64/calling_convention_x86_64.cc \
 	jni/quick/calling_convention.cc \
 	jni/quick/jni_compiler.cc \
+	optimizing/boolean_simplifier.cc \
 	optimizing/builder.cc \
 	optimizing/bounds_check_elimination.cc \
 	optimizing/code_generator.cc \
@@ -101,6 +105,7 @@ LIBART_COMPILER_SRC_FILES := \
 	optimizing/code_generator_arm64.cc \
 	optimizing/code_generator_x86.cc \
 	optimizing/code_generator_x86_64.cc \
+	optimizing/code_generator_utils.cc \
 	optimizing/constant_folding.cc \
 	optimizing/dead_code_elimination.cc \
 	optimizing/graph_checker.cc \
@@ -111,6 +116,7 @@ LIBART_COMPILER_SRC_FILES := \
 	optimizing/intrinsics.cc \
 	optimizing/intrinsics_arm.cc \
 	optimizing/intrinsics_arm64.cc \
+	optimizing/intrinsics_x86.cc \
 	optimizing/intrinsics_x86_64.cc \
 	optimizing/licm.cc \
 	optimizing/locations.cc \
@@ -119,13 +125,14 @@ LIBART_COMPILER_SRC_FILES := \
 	optimizing/optimizing_compiler.cc \
 	optimizing/parallel_move_resolver.cc \
 	optimizing/prepare_for_register_allocation.cc \
+	optimizing/primitive_type_propagation.cc \
+	optimizing/reference_type_propagation.cc \
 	optimizing/register_allocator.cc \
 	optimizing/side_effects_analysis.cc \
 	optimizing/ssa_builder.cc \
 	optimizing/ssa_liveness_analysis.cc \
 	optimizing/ssa_phi_elimination.cc \
-	optimizing/primitive_type_propagation.cc \
-	optimizing/reference_type_propagation.cc \
+	optimizing/stack_map_stream.cc \
 	trampolines/trampoline_compiler.cc \
 	utils/arena_bit_vector.cc \
 	utils/arm/assembler_arm.cc \
@@ -135,7 +142,6 @@ LIBART_COMPILER_SRC_FILES := \
 	utils/arm64/assembler_arm64.cc \
 	utils/arm64/managed_register_arm64.cc \
 	utils/assembler.cc \
-	utils/dwarf_cfi.cc \
 	utils/mips/assembler_mips.cc \
 	utils/mips/managed_register_mips.cc \
 	utils/mips64/assembler_mips64.cc \
@@ -148,6 +154,7 @@ LIBART_COMPILER_SRC_FILES := \
 	buffered_output_stream.cc \
 	compiler.cc \
 	elf_writer.cc \
+	elf_writer_debug.cc \
 	elf_writer_quick.cc \
 	file_output_stream.cc \
 	image_writer.cc \
@@ -161,7 +168,6 @@ LIBART_COMPILER_ENUM_OPERATOR_OUT_HEADER_FILES := \
   dex/quick/arm/arm_lir.h \
   dex/quick/arm64/arm64_lir.h \
   dex/quick/mips/mips_lir.h \
-  dex/quick/mips64/mips64_lir.h \
   dex/quick/resource_mask.h \
   dex/compiler_enums.h \
   dex/global_value_numbering.h \

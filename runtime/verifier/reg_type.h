@@ -25,6 +25,7 @@
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "gc_root.h"
+#include "handle_scope.h"
 #include "object_callbacks.h"
 #include "primitive.h"
 
@@ -205,6 +206,17 @@ class RegType {
   bool IsAssignableFrom(const RegType& src) const
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
+  // Can this array type potentially be assigned by src.
+  // This function is necessary as array types are valid even if their components types are not,
+  // e.g., when they component type could not be resolved. The function will return true iff the
+  // types are assignable. It will return false otherwise. In case of return=false, soft_error
+  // will be set to true iff the assignment test failure should be treated as a soft-error, i.e.,
+  // when both array types have the same 'depth' and the 'final' component types may be assignable
+  // (both are reference types).
+  bool CanAssignArray(const RegType& src, RegTypeCache& reg_types,
+                      Handle<mirror::ClassLoader> class_loader, bool* soft_error) const
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
   // Can this type be assigned by src? Variant of IsAssignableFrom that doesn't
   // allow assignment to
   // an interface from an Object.
@@ -250,7 +262,7 @@ class RegType {
 
   virtual ~RegType() {}
 
-  void VisitRoots(RootCallback* callback, void* arg, const RootInfo& root_info) const
+  void VisitRoots(RootVisitor* visitor, const RootInfo& root_info) const
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
  protected:
@@ -695,7 +707,7 @@ class UnresolvedUninitializedRefType FINAL : public UninitializedType {
   UnresolvedUninitializedRefType(const std::string& descriptor,
                                  uint32_t allocation_pc, uint16_t cache_id)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
-      : UninitializedType(NULL, descriptor, allocation_pc, cache_id) {
+      : UninitializedType(nullptr, descriptor, allocation_pc, cache_id) {
     if (kIsDebugBuild) {
       CheckInvariants();
     }
@@ -740,7 +752,7 @@ class UnresolvedUninitializedThisRefType FINAL : public UninitializedType {
   UnresolvedUninitializedThisRefType(const std::string& descriptor,
                                      uint16_t cache_id)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
-      : UninitializedType(NULL, descriptor, 0, cache_id) {
+      : UninitializedType(nullptr, descriptor, 0, cache_id) {
     if (kIsDebugBuild) {
       CheckInvariants();
     }
@@ -796,7 +808,7 @@ class UnresolvedType : public RegType {
  public:
   UnresolvedType(const std::string& descriptor, uint16_t cache_id)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
-      : RegType(NULL, descriptor, cache_id) {}
+      : RegType(nullptr, descriptor, cache_id) {}
 
   bool IsNonZeroReferenceTypes() const OVERRIDE;
 };

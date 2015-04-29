@@ -26,6 +26,30 @@
 namespace art {
 
 /**
+ * @class String Change
+ * @brief Converts calls to String.<init> to StringFactory instead.
+ */
+class StringChange : public PassME {
+ public:
+  StringChange() : PassME("StringChange", kNoNodes) {
+  }
+
+  void Start(PassDataHolder* data) const {
+    DCHECK(data != nullptr);
+    CompilationUnit* c_unit = down_cast<PassMEDataHolder*>(data)->c_unit;
+    DCHECK(c_unit != nullptr);
+    c_unit->mir_graph->StringChange();
+  }
+
+  bool Gate(const PassDataHolder* data) const {
+    DCHECK(data != nullptr);
+    CompilationUnit* c_unit = down_cast<const PassMEDataHolder*>(data)->c_unit;
+    DCHECK(c_unit != nullptr);
+    return c_unit->mir_graph->HasInvokes();
+  }
+};
+
+/**
  * @class CacheFieldLoweringInfo
  * @brief Cache the lowering info for fields used by IGET/IPUT/SGET/SPUT insns.
  */
@@ -270,7 +294,25 @@ class DeadCodeEliminationPass : public PassME {
     CompilationUnit* c_unit = down_cast<PassMEDataHolder*>(data)->c_unit;
     DCHECK(c_unit != nullptr);
     c_unit->mir_graph->EliminateDeadCodeEnd();
-    down_cast<PassMEDataHolder*>(data)->dirty = !c_unit->mir_graph->MirSsaRepUpToDate();
+  }
+};
+
+/**
+ * @class GlobalValueNumberingCleanupPass
+ * @brief Performs the cleanup after global value numbering pass and the dependent
+ *        dead code elimination pass that needs the GVN data.
+ */
+class GlobalValueNumberingCleanupPass : public PassME {
+ public:
+  GlobalValueNumberingCleanupPass()
+    : PassME("GVNCleanup", kNoNodes, "") {
+  }
+
+  void Start(PassDataHolder* data) const OVERRIDE {
+    DCHECK(data != nullptr);
+    CompilationUnit* c_unit = down_cast<const PassMEDataHolder*>(data)->c_unit;
+    DCHECK(c_unit != nullptr);
+    return c_unit->mir_graph->GlobalValueNumberingCleanup();
   }
 };
 
@@ -402,13 +444,6 @@ class SuspendCheckElimination : public PassME {
     BasicBlock* bb = pass_me_data_holder->bb;
     DCHECK(bb != nullptr);
     return c_unit->mir_graph->EliminateSuspendChecks(bb);
-  }
-
-  void End(PassDataHolder* data) const {
-    DCHECK(data != nullptr);
-    CompilationUnit* c_unit = down_cast<const PassMEDataHolder*>(data)->c_unit;
-    DCHECK(c_unit != nullptr);
-    c_unit->mir_graph->EliminateSuspendChecksEnd();
   }
 };
 

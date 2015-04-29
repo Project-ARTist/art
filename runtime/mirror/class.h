@@ -35,6 +35,7 @@
 
 namespace art {
 
+class ArtField;
 struct ClassOffsets;
 template<class T> class Handle;
 template<class T> class Handle;
@@ -44,9 +45,9 @@ template<size_t kNumReferences> class PACKED(4) StackHandleScope;
 
 namespace mirror {
 
-class ArtField;
 class ArtMethod;
 class ClassLoader;
+class Constructor;
 class DexCache;
 class IfTable;
 
@@ -140,7 +141,9 @@ class MANAGED Class FINAL : public Object {
         GetField32Volatile<kVerifyFlags>(OFFSET_OF_OBJECT_MEMBER(Class, status_)));
   }
 
-  void SetStatus(Status new_status, Thread* self) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  // This is static because 'this' may be moved by GC.
+  static void SetStatus(Handle<Class> h_this, Status new_status, Thread* self)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   static MemberOffset StatusOffset() {
     return OFFSET_OF_OBJECT_MEMBER(Class, status_);
@@ -202,6 +205,9 @@ class MANAGED Class FINAL : public Object {
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE uint32_t GetAccessFlags() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  static MemberOffset AccessFlagsOffset() {
+    return OFFSET_OF_OBJECT_MEMBER(Class, access_flags_);
+  }
 
   void SetAccessFlags(uint32_t new_access_flags) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
@@ -227,6 +233,15 @@ class MANAGED Class FINAL : public Object {
   ALWAYS_INLINE void SetFinalizable() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     uint32_t flags = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));
     SetAccessFlags(flags | kAccClassIsFinalizable);
+  }
+
+  ALWAYS_INLINE bool IsStringClass() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    return (GetField32(AccessFlagsOffset()) & kAccClassIsStringClass) != 0;
+  }
+
+  ALWAYS_INLINE void SetStringClass() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    uint32_t flags = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));
+    SetAccessFlags(flags | kAccClassIsStringClass);
   }
 
   // Returns true if the class is abstract.
@@ -394,7 +409,7 @@ class MANAGED Class FINAL : public Object {
   // Depth of class from java.lang.Object
   uint32_t Depth() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     uint32_t depth = 0;
-    for (Class* klass = this; klass->GetSuperClass() != NULL; klass = klass->GetSuperClass()) {
+    for (Class* klass = this; klass->GetSuperClass() != nullptr; klass = klass->GetSuperClass()) {
       depth++;
     }
     return depth;
@@ -403,19 +418,14 @@ class MANAGED Class FINAL : public Object {
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   bool IsArrayClass() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-    return GetComponentType<kVerifyFlags, kReadBarrierOption>() != NULL;
+    return GetComponentType<kVerifyFlags, kReadBarrierOption>() != nullptr;
   }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   bool IsClassClass() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  bool IsStringClass() const SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
   bool IsThrowableClass() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
-  template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  bool IsArtFieldClass() const SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   bool IsArtMethodClass() const SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
@@ -434,8 +444,8 @@ class MANAGED Class FINAL : public Object {
   }
 
   void SetComponentType(Class* new_component_type) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-    DCHECK(GetComponentType() == NULL);
-    DCHECK(new_component_type != NULL);
+    DCHECK(GetComponentType() == nullptr);
+    DCHECK(new_component_type != nullptr);
     // Component type is invariant: use non-transactional mode without check.
     SetFieldObject<false, false>(ComponentTypeOffset(), new_component_type);
   }
@@ -451,7 +461,7 @@ class MANAGED Class FINAL : public Object {
   }
 
   bool IsObjectClass() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-    return !IsPrimitive() && GetSuperClass() == NULL;
+    return !IsPrimitive() && GetSuperClass() == nullptr;
   }
 
   bool IsInstantiableNonArray() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
@@ -481,10 +491,10 @@ class MANAGED Class FINAL : public Object {
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   bool IsVariableSize() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-    // Classes and arrays vary in size, and so the object_size_ field cannot
+    // Classes, arrays, and strings vary in size, and so the object_size_ field cannot
     // be used to Get their instance size
     return IsClassClass<kVerifyFlags, kReadBarrierOption>() ||
-        IsArrayClass<kVerifyFlags, kReadBarrierOption>();
+        IsArrayClass<kVerifyFlags, kReadBarrierOption>() || IsStringClass();
   }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
@@ -525,6 +535,9 @@ class MANAGED Class FINAL : public Object {
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   uint32_t GetObjectSize() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  static MemberOffset ObjectSizeOffset() {
+    return OFFSET_OF_OBJECT_MEMBER(Class, object_size_);
+  }
 
   void SetObjectSize(uint32_t new_object_size) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     DCHECK(!IsVariableSize());
@@ -605,7 +618,7 @@ class MANAGED Class FINAL : public Object {
   // that extends) another can be assigned to its parent, but not vice-versa. All Classes may assign
   // to themselves. Classes for primitive types may not assign to each other.
   ALWAYS_INLINE bool IsAssignableFrom(Class* src) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-    DCHECK(src != NULL);
+    DCHECK(src != nullptr);
     if (this == src) {
       // Can always assign to things of the same type.
       return true;
@@ -632,7 +645,7 @@ class MANAGED Class FINAL : public Object {
   }
 
   bool HasSuperClass() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-    return GetSuperClass() != NULL;
+    return GetSuperClass() != nullptr;
   }
 
   static MemberOffset SuperClassOffset() {
@@ -815,17 +828,22 @@ class MANAGED Class FINAL : public Object {
   ALWAYS_INLINE void SetIfTable(IfTable* new_iftable) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Get instance fields of the class (See also GetSFields).
-  ObjectArray<ArtField>* GetIFields() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  ArtField* GetIFields() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  void SetIFields(ObjectArray<ArtField>* new_ifields) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  void SetIFields(ArtField* new_ifields) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  uint32_t NumInstanceFields() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  // Unchecked edition has no verification flags.
+  void SetIFieldsUnchecked(ArtField* new_sfields) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  ArtField* GetInstanceField(uint32_t i)  // TODO: uint16_t
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  uint32_t NumInstanceFields() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    return GetField32(OFFSET_OF_OBJECT_MEMBER(Class, num_instance_fields_));
+  }
 
-  void SetInstanceField(uint32_t i, ArtField* f)  // TODO: uint16_t
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  void SetNumInstanceFields(uint32_t num) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    return SetField32<false>(OFFSET_OF_OBJECT_MEMBER(Class, num_instance_fields_), num);
+  }
+
+  ArtField* GetInstanceField(uint32_t i) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Returns the number of instance fields containing reference types.
   uint32_t NumReferenceInstanceFields() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
@@ -876,17 +894,23 @@ class MANAGED Class FINAL : public Object {
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Gets the static fields of the class.
-  ObjectArray<ArtField>* GetSFields() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  ArtField* GetSFields() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  void SetSFields(ObjectArray<ArtField>* new_sfields) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  void SetSFields(ArtField* new_sfields) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  uint32_t NumStaticFields() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  // Unchecked edition has no verification flags.
+  void SetSFieldsUnchecked(ArtField* new_sfields) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  uint32_t NumStaticFields() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    return GetField32(OFFSET_OF_OBJECT_MEMBER(Class, num_static_fields_));
+  }
+
+  void SetNumStaticFields(uint32_t num) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    return SetField32<false>(OFFSET_OF_OBJECT_MEMBER(Class, num_static_fields_), num);
+  }
 
   // TODO: uint16_t
   ArtField* GetStaticField(uint32_t i) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
-  // TODO: uint16_t
-  void SetStaticField(uint32_t i, ArtField* f) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Find a static or instance field using the JLS resolution order
   static ArtField* FindField(Thread* self, Handle<Class> klass, const StringPiece& name,
@@ -963,8 +987,12 @@ class MANAGED Class FINAL : public Object {
   // Can't call this SetClass or else gets called instead of Object::SetClass in places.
   static void SetClassClass(Class* java_lang_Class) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   static void ResetClass();
-  static void VisitRoots(RootCallback* callback, void* arg)
+  static void VisitRoots(RootVisitor* visitor)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  template<class Visitor>
+  // Visit field roots.
+  void VisitFieldRoots(Visitor& visitor) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // When class is verified, set the kAccPreverified flag on each method.
   void SetPreverifiedFlagOnAllMethods() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
@@ -1032,6 +1060,11 @@ class MANAGED Class FINAL : public Object {
     return OFFSET_OF_OBJECT_MEMBER(Class, dex_cache_strings_);
   }
 
+  // May cause thread suspension due to EqualParameters.
+  mirror::ArtMethod* GetDeclaredConstructor(
+      Thread* self, Handle<mirror::ObjectArray<mirror::Class>> args)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
   // Used to initialize a class in the allocation code path to ensure it is guarded by a StoreStore
   // fence.
   class InitializeClassVisitor {
@@ -1071,14 +1104,20 @@ class MANAGED Class FINAL : public Object {
 
   void CheckObjectAlloc() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  // defining class loader, or NULL for the "bootstrap" system loader
+  // Unchecked editions is for root visiting.
+  ArtField* GetSFieldsUnchecked() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  ArtField* GetIFieldsUnchecked() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  bool ProxyDescriptorEquals(const char* match) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  // Defining class loader, or null for the "bootstrap" system loader.
   HeapReference<ClassLoader> class_loader_;
 
   // For array classes, the component class object for instanceof/checkcast
-  // (for String[][][], this will be String[][]). NULL for non-array classes.
+  // (for String[][][], this will be String[][]). null for non-array classes.
   HeapReference<Class> component_type_;
 
-  // DexCache of resolved constant pool entries (will be NULL for classes generated by the
+  // DexCache of resolved constant pool entries (will be null for classes generated by the
   // runtime such as arrays and primitive classes).
   HeapReference<DexCache> dex_cache_;
 
@@ -1087,18 +1126,6 @@ class MANAGED Class FINAL : public Object {
 
   // static, private, and <init> methods
   HeapReference<ObjectArray<ArtMethod>> direct_methods_;
-
-  // instance fields
-  //
-  // These describe the layout of the contents of an Object.
-  // Note that only the fields directly declared by this class are
-  // listed in ifields; fields declared by a superclass are listed in
-  // the superclass's Class.ifields.
-  //
-  // All instance fields that refer to objects are guaranteed to be at
-  // the beginning of the field list.  num_reference_instance_fields_
-  // specifies the number of reference fields.
-  HeapReference<ObjectArray<ArtField>> ifields_;
 
   // The interface table (iftable_) contains pairs of a interface class and an array of the
   // interface methods. There is one pair per interface supported by this class.  That means one
@@ -1116,10 +1143,7 @@ class MANAGED Class FINAL : public Object {
   // Descriptor for the class such as "java.lang.Class" or "[C". Lazily initialized by ComputeName
   HeapReference<String> name_;
 
-  // Static fields
-  HeapReference<ObjectArray<ArtField>> sfields_;
-
-  // The superclass, or NULL if this is java.lang.Object, an interface or primitive type.
+  // The superclass, or null if this is java.lang.Object, an interface or primitive type.
   HeapReference<Class> super_class_;
 
   // If class verify fails, we must return same error on subsequent tries.
@@ -1135,7 +1159,21 @@ class MANAGED Class FINAL : public Object {
   HeapReference<ObjectArray<ArtMethod>> vtable_;
 
   // Access flags; low 16 bits are defined by VM spec.
+  // Note: Shuffled back.
   uint32_t access_flags_;
+
+  // instance fields
+  //
+  // These describe the layout of the contents of an Object.
+  // Note that only the fields directly declared by this class are
+  // listed in ifields; fields declared by a superclass are listed in
+  // the superclass's Class.ifields.
+  //
+  // ArtField arrays are allocated as an array of fields, and not an array of fields pointers.
+  uint64_t ifields_;
+
+  // Static fields
+  uint64_t sfields_;
 
   // Total size of the Class instance; used when allocating storage on gc heap.
   // See also object_size_.
@@ -1152,11 +1190,17 @@ class MANAGED Class FINAL : public Object {
   // TODO: really 16bits
   int32_t dex_type_idx_;
 
+  // Number of static fields.
+  uint32_t num_instance_fields_;
+
   // Number of instance fields that are object refs.
   uint32_t num_reference_instance_fields_;
 
   // Number of static fields that are object refs,
   uint32_t num_reference_static_fields_;
+
+  // Number of static fields.
+  uint32_t num_static_fields_;
 
   // Total object size; used when allocating storage on gc heap.
   // (For interfaces and abstract classes this will be zero.)
