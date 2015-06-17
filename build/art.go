@@ -1,6 +1,7 @@
 package art
 
 import (
+	"android/soong"
 	"android/soong/cc"
 	"android/soong/common"
 	"runtime"
@@ -17,6 +18,11 @@ type artModule struct{}
 
 type artCCLibrary struct {
 	cc.CCLibrary
+}
+
+func init() {
+	soong.RegisterModuleType("art_cc_library", ArtCCLibraryFactory)
+	soong.RegisterModuleType("art_cc_binary", ArtCCBinaryFactory)
 }
 
 func ArtCCLibraryFactory() (blueprint.Module, []interface{}) {

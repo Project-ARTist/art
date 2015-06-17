@@ -14,6 +14,7 @@ bootstrap_go_package {
     name: "soong-art",
     pkgPath: "android/soong/art",
     deps: [
+        "soong",
         "soong-cc",
     ],
     srcs: [
