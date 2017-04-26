@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2011 The Android Open Source Project
+ * Copyright (C) 2014 The Android Open Source Project
+ *
+ * Changes Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -79,6 +81,8 @@
 #include "verifier/method_verifier.h"
 #include "verifier/verifier_deps.h"
 #include "verifier/verifier_enums.h"
+
+#include "optimizing/artist/env/codelib_environment.h"
 
 namespace art {
 
@@ -415,6 +419,12 @@ INTRINSICS_LIST(SETUP_INTRINSICS)
   // Compile:
   // 1) Compile all classes and methods enabled for compilation. May fall back to dex-to-dex
   //    compilation.
+
+  // <PreInit all Environments>
+  CodeLibEnvironment& env = CodeLibEnvironment::GetInstance();
+  env.PreInitializeEnvironmentCodeLib(class_loader, this, dex_files);
+  // </PreInit all Environments>
+
   if (GetCompilerOptions().IsAnyCompilationEnabled()) {
     Compile(class_loader, dex_files, timings);
   }

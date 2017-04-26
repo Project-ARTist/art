@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2011 The Android Open Source Project
+ * Copyright (C) 2014 The Android Open Source Project
+ *
+ * Changes Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1290,6 +1292,10 @@ class ClassLinker {
 
   friend class AppImageClassLoadersAndDexCachesHelper;
   friend struct CompilationHelper;  // For Compile in ImageTest.
+
+  // artist changes
+  friend class CodeLibEnvironment;
+  // artist changes
   friend class ImageDumper;  // for DexLock
   friend class ImageWriter;  // for GetClassRoots
   friend class JniCompilerTest;  // for GetRuntimeQuickGenericJniStub

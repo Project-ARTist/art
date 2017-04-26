@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2011 The Android Open Source Project
+ * Copyright (C) 2014 The Android Open Source Project
+ *
+ * Changes Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -311,12 +313,14 @@ class OatWriter::OatDexFile {
   DCHECK_EQ(static_cast<off_t>(file_offset + offset_), out->Seek(0, kSeekCurrent)) \
     << "file_offset=" << file_offset << " offset_=" << offset_
 
-OatWriter::OatWriter(bool compiling_boot_image, TimingLogger* timings, ProfileCompilationInfo* info)
+OatWriter::OatWriter(bool compiling_boot_image, TimingLogger* timings, ProfileCompilationInfo* info,
+        std::vector<const char*>* dex_locations)
   : write_state_(WriteState::kAddingDexFileSources),
     timings_(timings),
     raw_dex_files_(),
     zip_archives_(),
     zipped_dex_files_(),
+    dex_locations_(dex_locations),
     zipped_dex_file_locations_(),
     compiler_driver_(nullptr),
     image_writer_(nullptr),
@@ -2552,10 +2556,49 @@ size_t OatWriter::WriteMethodBssMappings(OutputStream* out,
 size_t OatWriter::WriteOatDexFiles(OutputStream* out, size_t file_offset, size_t relative_offset) {
   TimingLogger::ScopedTiming split("WriteOatDexFiles", timings_);
 
+  VLOG(artistd) << "WriteOatDexFiles()";
+
+  // Probe Dex Checksums
+  std::vector<uint32_t> dex_checksums;
+  if (dex_locations_ != nullptr && dex_locations_->size() > 0) {
+    std::vector<std::unique_ptr<const DexFile>> temp_dex_files;
+    for (auto && dexLoc : *dex_locations_) {
+      VLOG(artistd) << "WriteOatDexFiles() DexLocation: " << dexLoc;
+      std::string openErrors;
+      bool openSuccess = DexFile::Open(dexLoc, dexLoc, &openErrors, &temp_dex_files);
+      if (openSuccess) {
+        VLOG(artistd) << "WriteOatDexFiles() DexLocation: " << dexLoc << " SUCCESS! [Files: " << temp_dex_files.size() << "]";
+      } else {
+        VLOG(artist) << "WriteOatDexFiles() DexLocation: " << dexLoc << " FAILED: " << openErrors;
+      }
+    }
+    for (auto && tmpDexFile : temp_dex_files) {
+      const DexFile* dexPointer = tmpDexFile.get();
+      VLOG(artist) << "WriteOatDexFiles() DexFile Location: " << dexPointer->GetLocation() << " ["
+                   << std::hex << dexPointer->GetLocationChecksum() << "]";
+      dex_checksums.push_back(dexPointer->GetLocationChecksum());
+      tmpDexFile.release();
+    }
+  }
+
+  // Rewrite Dex Checksums
   for (size_t i = 0, size = oat_dex_files_.size(); i != size; ++i) {
     OatDexFile* oat_dex_file = &oat_dex_files_[i];
     DCHECK_EQ(relative_offset, oat_dex_file->offset_);
     DCHECK_OFFSET();
+
+    if (dex_locations_ != nullptr && dex_locations_->size() > 0) {
+      VLOG(artist) << "WriteOatDexFiles() Rewrite DexLocationChecksum old: " << std::hex
+                   << oat_dex_file->dex_file_location_checksum_;
+
+      if (i < dex_checksums.size()) {
+        oat_dex_file->dex_file_location_checksum_ = dex_checksums.at(i);
+      } else {
+        oat_dex_file->dex_file_location_checksum_ = dex_checksums.back();
+      }
+      VLOG(artist) << "WriteOatDexFiles() Rewrite DexLocationChecksum new: " << std::hex
+                   << oat_dex_file->dex_file_location_checksum_;
+    }
 
     // Write OatDexFile.
     if (!oat_dex_file->Write(this, out)) {
@@ -2564,6 +2607,7 @@ size_t OatWriter::WriteOatDexFiles(OutputStream* out, size_t file_offset, size_t
     relative_offset += oat_dex_file->SizeOf();
   }
 
+  VLOG(artistd) << "WriteOatDexFiles() DONE";
   return relative_offset;
 }
 
@@ -3009,6 +3053,30 @@ bool OatWriter::WriteDexFile(OutputStream* out,
   // Note: For vdex, the checksum is copied from the existing vdex file.
   oat_dex_file->dex_file_size_ = header->file_size_;
   oat_dex_file->class_offsets_.resize(header->class_defs_size_);
+  return true;
+}
+
+bool OatWriter::ExtendForTypeLookupTables(OutputStream* rodata, File* file, size_t offset) {
+  TimingLogger::ScopedTiming split("ExtendForTypeLookupTables", timings_);
+
+  int64_t new_length = oat_data_offset_ + dchecked_integral_cast<int64_t>(offset);
+  if (file->SetLength(new_length) != 0) {
+    PLOG(ERROR) << "Failed to extend file for type lookup tables. new_length: " << new_length
+        << "File: " << file->GetPath();
+    return false;
+  }
+  off_t actual_offset = rodata->Seek(new_length, kSeekSet);
+  if (actual_offset != static_cast<off_t>(new_length)) {
+    PLOG(ERROR) << "Failed to seek stream after extending file for type lookup tables."
+                << " Actual: " << actual_offset << " Expected: " << new_length
+                << " File: " << rodata->GetLocation();
+    return false;
+  }
+  if (!rodata->Flush()) {
+    PLOG(ERROR) << "Failed to flush stream after extending for type lookup tables."
+                << " File: " << rodata->GetLocation();
+    return false;
+  }
   return true;
 }
 

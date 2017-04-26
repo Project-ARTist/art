@@ -1,2 +1,5 @@
+.idea
+cmake-build-debug
 JIT_ART
 **/__pycache__/**
+make.sh

@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2014 The Android Open Source Project
  *
+ * Changes Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -96,6 +98,13 @@
 #include "ssa_phi_elimination.h"
 #include "utils/assembler.h"
 #include "verifier/verifier_compiler_binding.h"
+
+// Artist Includes ///////////////////////////////////////////
+#include "optimizing/artist/artist.h"
+#include "optimizing/artist/modules/generic/universal_artist.h"
+#include "optimizing/artist/modules/method-tracing/trace_artist.h"
+#include "optimizing/artist/modules/analyzer/logtimization.h"
+// Artist Includes End ///////////////////////////////////////
 
 namespace art {
 
@@ -791,6 +800,12 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
   CHAGuardOptimization* cha_guard = new (arena) CHAGuardOptimization(graph);
   CodeSinking* code_sinking = new (arena) CodeSinking(graph, stats);
 
+  // artist optimization passes //////////////////////////////////////////////
+  HUniversalArtist* universalArtist = new (arena) HUniversalArtist(graph, dex_compilation_unit, driver);
+  // HTraceArtist* traceLogging = new (arena) HTraceArtist(graph, dex_compilation_unit, driver);
+  // HLogtimization* logtimization = new (arena) HLogtimization(graph, dex_compilation_unit, driver);
+  // artist optimization passes //////////////////////////////////////////////
+
   HOptimization* optimizations1[] = {
     intrinsics,
     sharpening,
@@ -827,6 +842,9 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
     // can satisfy. For example, the code generator does not expect to see a
     // HTypeConversion from a type to the same type.
     simplify4,
+    universalArtist,
+    // traceLogging,
+    // logtimization
   };
   RunOptimizations(optimizations2, arraysize(optimizations2), pass_observer);
 
@@ -1143,6 +1161,8 @@ bool OptimizingCompiler::JitCompile(Thread* self,
                                     ArtMethod* method,
                                     bool osr,
                                     jit::JitLogger* jit_logger) {
+    VLOG(artistd) << "OptimizingCompiler::JitCompile()";
+
   StackHandleScope<3> hs(self);
   Handle<mirror::ClassLoader> class_loader(hs.NewHandle(
       method->GetDeclaringClass()->GetClassLoader()));
@@ -1281,6 +1301,8 @@ bool OptimizingCompiler::JitCompile(Thread* self,
   if (jit_logger != nullptr) {
     jit_logger->WriteLog(code, code_allocator.GetSize(), method);
   }
+
+  VLOG(artistd) << "OptimizingCompiler::JitCompile() done.";
 
   return true;
 }
