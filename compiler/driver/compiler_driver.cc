@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2011 The Android Open Source Project
  *
+ * Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -71,6 +73,8 @@
 #include "utils/swap_space.h"
 #include "verifier/method_verifier.h"
 #include "verifier/method_verifier-inl.h"
+
+#include "optimizing/artist/env/codelib_environment.h"
 
 namespace art {
 
@@ -502,6 +506,9 @@ void CompilerDriver::CompileAll(jobject class_loader,
       new ThreadPool("Compiler driver thread pool", thread_count_ - 1));
   VLOG(compiler) << "Before precompile " << GetMemoryUsageString(false);
   PreCompile(class_loader, dex_files, thread_pool.get(), timings);
+  // <PreInit all Environments>
+  CodeLibEnvironment::PreInitializeEnvironmentCodeLib(class_loader, this, dex_files);
+  // </PreInit all Environments>
   Compile(class_loader, dex_files, thread_pool.get(), timings);
   if (dump_stats_) {
     stats_->Dump();

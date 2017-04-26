@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2011 The Android Open Source Project
  *
+ * Changes Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -88,7 +90,8 @@ class OatWriter {
             const CompilerDriver* compiler,
             ImageWriter* image_writer,
             TimingLogger* timings,
-            SafeMap<std::string, std::string>* key_value_store);
+            SafeMap<std::string, std::string>* key_value_store,
+            std::vector<const char*>* dex_locations);
 
   const OatHeader& GetOatHeader() const {
     return *oat_header_;
@@ -265,6 +268,8 @@ class OatWriter {
 
   // note OatFile does not take ownership of the DexFiles
   const std::vector<const DexFile*>* dex_files_;
+
+  std::vector<const char*>* dex_locations_;
 
   // Size required for Oat data structures.
   size_t size_;

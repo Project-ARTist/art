@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2011 The Android Open Source Project
  *
+ * Changes Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -1508,7 +1510,8 @@ class Dex2Oat FINAL {
                                      driver_,
                                      image_writer_.get(),
                                      timings_,
-                                     key_value_store_.get()));
+                                     key_value_store_.get(),
+                                     &dex_locations_));
     }
 
     if (image_) {

@@ -163,7 +163,10 @@ LIBART_COMPILER_SRC_FILES := \
 	output_stream.cc \
 	vector_output_stream.cc
 
-LIBART_COMPILER_CFLAGS :=
+# Append Artist SubModule
+include art/compiler/optimizing/artist/Android.mk
+
+LIBART_COMPILER_CFLAGS := -DBUILD_MARSHMALLOW
 
 LIBART_COMPILER_ENUM_OPERATOR_OUT_HEADER_FILES := \
   dex/quick/arm/arm_lir.h \

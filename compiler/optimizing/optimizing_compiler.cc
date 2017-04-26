@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2014 The Android Open Source Project
  *
+ * Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -54,6 +56,12 @@
 #include "ssa_phi_elimination.h"
 #include "ssa_liveness_analysis.h"
 #include "utils/assembler.h"
+// Artist Includes ///////////////////////////////////////////
+#include "optimizing/artist/artist.h"
+#include "optimizing/artist/modules/analyzer/logtimization.h"
+#include "optimizing/artist/modules/generic/universal_artist.h"
+#include "optimizing/artist/modules/method-tracing/trace_artist.h"
+// Artist Includes End ///////////////////////////////////////
 
 namespace art {
 
@@ -342,6 +350,12 @@ static void RunOptimizations(HGraph* graph,
 
   IntrinsicsRecognizer intrinsics(graph, dex_compilation_unit.GetDexFile(), driver);
 
+  // artist optimization passes //////////////////////////////////////////////
+  HUniversalArtist universalArtist(graph, dex_compilation_unit, driver);
+  // HTraceArtist traceLogging(graph, dex_compilation_unit, driver);
+  // HLogtimization logtimization(graph, dex_compilation_unit, driver);
+  // /artist optimization passes //////////////////////////////////////////////
+
   HOptimization* optimizations[] = {
     &intrinsics,
     &fold1,
@@ -363,6 +377,10 @@ static void RunOptimizations(HGraph* graph,
     // satisfy. For example, the code generator does not expect to see a
     // HTypeConversion from a type to the same type.
     &simplify3,
+    // Artist Optimization and Instrumentation Passes
+    &universalArtist,
+    // &traceLogging,
+    // &logtimization,
   };
 
   RunOptimizations(optimizations, arraysize(optimizations), pass_info_printer);

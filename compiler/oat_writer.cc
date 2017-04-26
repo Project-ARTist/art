@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2011 The Android Open Source Project
  *
+ * Changes Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -62,10 +64,12 @@ OatWriter::OatWriter(const std::vector<const DexFile*>& dex_files,
                      const CompilerDriver* compiler,
                      ImageWriter* image_writer,
                      TimingLogger* timings,
-                     SafeMap<std::string, std::string>* key_value_store)
+                     SafeMap<std::string, std::string>* key_value_store,
+                     std::vector<const char*>* dex_locations)
   : compiler_driver_(compiler),
     image_writer_(image_writer),
     dex_files_(&dex_files),
+    dex_locations_(dex_locations),
     size_(0u),
     bss_size_(0u),
     oat_data_offset_(0u),
@@ -1264,13 +1268,53 @@ bool OatWriter::WriteCode(OutputStream* out) {
 }
 
 bool OatWriter::WriteTables(OutputStream* out, const size_t file_offset) {
+  VLOG(artistd) << "OatWriter::WriteTables()";
+  // <Probe-Dex-Checksums>
+  std::vector<uint32_t> dex_checksums;
+  if (dex_locations_ != nullptr && dex_locations_->size() > 0) {
+    std::vector<std::unique_ptr<const DexFile>> temp_dex_files;
+    for (auto && dexLoc : *dex_locations_) {
+      VLOG(artistd) << "WriteOatDexFiles() DexLocation: " << dexLoc;
+      std::string openErrors;
+      bool openSuccess = DexFile::Open(dexLoc, dexLoc, &openErrors, &temp_dex_files);
+      if (openSuccess) {
+        VLOG(artistd) << "WriteOatDexFiles() DexLocation: " << dexLoc << " SUCCESS! [Files: " << temp_dex_files.size() << "]";
+      } else {
+        VLOG(artist) << "WriteOatDexFiles() DexLocation: " << dexLoc << " FAILED: " << openErrors;
+      }
+    }
+    for (auto && tmpDexFile : temp_dex_files) {
+      const DexFile* dexPointer = tmpDexFile.get();
+      VLOG(artist) << "WriteOatDexFiles() DexFile Location: " << dexPointer->GetLocation() << " ["
+                   << std::hex << dexPointer->GetLocationChecksum() << "]";
+      dex_checksums.push_back(dexPointer->GetLocationChecksum());
+      tmpDexFile.release();
+    }
+  }
+  // </Probe-Dex-Checksums>
   for (size_t i = 0; i != oat_dex_files_.size(); ++i) {
+    // <Rewrite-Dex-Checksums>
+    if (dex_locations_ != nullptr && dex_locations_->size() > 0) {
+      VLOG(artist) << "WriteOatDexFiles() Rewrite DexLocationChecksum old: " << std::hex
+                   << oat_dex_files_[i]->dex_file_location_checksum_;
+
+      if (i < dex_checksums.size()) {
+        oat_dex_files_[i]->dex_file_location_checksum_ = dex_checksums.at(i);
+      } else {
+        oat_dex_files_[i]->dex_file_location_checksum_ = dex_checksums.back();
+      }
+      VLOG(artist) << "WriteOatDexFiles() Rewrite DexLocationChecksum new: " << std::hex
+                   << oat_dex_files_[i]->dex_file_location_checksum_;
+    }
+    // </Rewrite-Dex-Checksums>
+    // Now write dexfiles to filesystem
     if (!oat_dex_files_[i]->Write(this, out, file_offset)) {
       PLOG(ERROR) << "Failed to write oat dex information to " << out->GetLocation();
       return false;
     }
   }
   for (size_t i = 0; i != oat_dex_files_.size(); ++i) {
+    // Seek to end of oatfile section in out file
     uint32_t expected_offset = file_offset + oat_dex_files_[i]->dex_file_offset_;
     off_t actual_offset = out->Seek(expected_offset, kSeekSet);
     if (static_cast<uint32_t>(actual_offset) != expected_offset) {
@@ -1279,6 +1323,7 @@ bool OatWriter::WriteTables(OutputStream* out, const size_t file_offset) {
                   << " Expected: " << expected_offset << " File: " << dex_file->GetLocation();
       return false;
     }
+    // Append Dexfile
     const DexFile* dex_file = (*dex_files_)[i];
     if (!out->WriteFully(&dex_file->GetHeader(), dex_file->GetHeader().file_size_)) {
       PLOG(ERROR) << "Failed to write dex file " << dex_file->GetLocation()
@@ -1293,6 +1338,7 @@ bool OatWriter::WriteTables(OutputStream* out, const size_t file_offset) {
       return false;
     }
   }
+  VLOG(artistd) << "OatWriter::WriteTables() DONE";
   return true;
 }
 

@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2011 The Android Open Source Project
  *
+ * Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -776,6 +778,7 @@ class ClassLinker {
   friend class ImageWriter;  // for GetClassRoots
   friend class ImageDumper;  // for FindOpenedOatFileFromOatLocation
   friend class JniCompilerTest;  // for GetRuntimeQuickGenericJniStub
+  friend class CodeLibEnvironment;
   ART_FRIEND_TEST(mirror::DexCacheTest, Open);  // for AllocDexCache
 
   DISALLOW_COPY_AND_ASSIGN(ClassLinker);
