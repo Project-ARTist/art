@@ -1,6 +1,4 @@
-# art (dex2oat) with ARTist's branches
+# art (dex2oat)
 
-- Origin: `git clone https://android.googlesource.com/platform/art`
-- Branch: `marshmallow-dr1.6-release`
-- Tag:    `android_6.0.1_r62`
-
+Using android Tag: aosp_6.0.1_r62 Variant: arm-eng 64bit
+with art branch: `remotes/aosp/marshmallow-dr1.6-release` 
