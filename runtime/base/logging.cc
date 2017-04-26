@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2011 The Android Open Source Project
+ * Copyright (C) 2014 The Android Open Source Project
+ *
+ * Changes Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -65,9 +67,14 @@ const char* ProgramInvocationName() {
   return (gProgramInvocationName.get() != nullptr) ? gProgramInvocationName->c_str() : "art";
 }
 
+// const char* ProgramInvocationShortName() {
+//   return (gProgramInvocationShortName.get() != nullptr) ? gProgramInvocationShortName->c_str()
+//                                                        : "art";
+// }
+
 const char* ProgramInvocationShortName() {
-  return (gProgramInvocationShortName.get() != nullptr) ? gProgramInvocationShortName->c_str()
-                                                        : "art";
+  return (gProgramInvocationShortName.get() != nullptr) ? "dex2artist"
+                                                        : "dex2artist";
 }
 
 void InitLogging(char* argv[]) {

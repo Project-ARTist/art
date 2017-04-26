@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2011 The Android Open Source Project
+ * Copyright (C) 2014 The Android Open Source Project
+ *
+ * Changes Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,6 +39,8 @@ enum LogSeverity {
 // The members of this struct are the valid arguments to VLOG and VLOG_IS_ON in code,
 // and the "-verbose:" command line argument.
 struct LogVerbosity {
+  bool artist;
+  bool artistd;
   bool class_linker;  // Enabled with "-verbose:class".
   bool collector;
   bool compiler;

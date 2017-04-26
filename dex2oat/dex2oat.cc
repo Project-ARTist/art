@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2011 The Android Open Source Project
+ * Copyright (C) 2014 The Android Open Source Project
+ *
+ * Changes Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +29,7 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include <cstring>
 
 #if defined(__linux__) && defined(__arm__)
 #include <sys/personality.h>
@@ -526,6 +529,7 @@ class Dex2Oat FINAL {
       rodata_(),
       image_writer_(nullptr),
       driver_(nullptr),
+      rewrite_dex_location_checksums(false),
       opened_dex_files_maps_(),
       opened_dex_files_(),
       no_inline_from_dex_files_(),
@@ -1319,6 +1323,17 @@ class Dex2Oat FINAL {
     RuntimeArgumentMap runtime_options;
     if (!PrepareRuntimeOptions(&runtime_options)) {
       return false;
+    }
+
+    if (dex_locations_.size() == dex_filenames_.size()) {
+      for (uint32_t i = 0; i < dex_locations_.size(); i++) {
+        VLOG(artist) << "DexLocation: " << dex_locations_.at(i) << " <> " << dex_filenames_.at(i);
+        if (strcmp(dex_locations_.at(i), dex_filenames_.at(i)) != 0) {
+          VLOG(artist) << "> Rewriting Dex LocationChecksum";
+          rewrite_dex_location_checksums = true;
+          break;
+        }
+      }
     }
 
     CreateOatWriters();
@@ -2144,7 +2159,11 @@ class Dex2Oat FINAL {
                                                      compiler_options_.get(),
                                                      oat_file.get()));
       elf_writers_.back()->Start();
-      oat_writers_.emplace_back(new OatWriter(IsBootImage(), timings_));
+      if (rewrite_dex_location_checksums) {
+        oat_writers_.emplace_back(new OatWriter(IsBootImage(), timings_, &dex_locations_));
+      } else {
+        oat_writers_.emplace_back(new OatWriter(IsBootImage(), timings_));
+      }
     }
   }
 
@@ -2451,6 +2470,7 @@ class Dex2Oat FINAL {
   int oat_fd_;
   std::vector<const char*> dex_filenames_;
   std::vector<const char*> dex_locations_;
+
   int zip_fd_;
   std::string zip_location_;
   std::string boot_image_filename_;
@@ -2483,6 +2503,8 @@ class Dex2Oat FINAL {
   std::vector<OutputStream*> rodata_;
   std::unique_ptr<ImageWriter> image_writer_;
   std::unique_ptr<CompilerDriver> driver_;
+
+  bool rewrite_dex_location_checksums;
 
   std::vector<std::unique_ptr<MemMap>> opened_dex_files_maps_;
   std::vector<std::unique_ptr<OatFile>> opened_oat_files_;

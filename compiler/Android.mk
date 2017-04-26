@@ -146,8 +146,10 @@ LIBART_COMPILER_SRC_FILES_x86_64 := \
 	utils/x86_64/assembler_x86_64.cc \
 	utils/x86_64/managed_register_x86_64.cc \
 
+# Append Artist SubModule
+include art/compiler/optimizing/artist/Android.mk
 
-LIBART_COMPILER_CFLAGS :=
+LIBART_COMPILER_CFLAGS := -DBUILD_NOUGAT
 
 LIBART_COMPILER_ENUM_OPERATOR_OUT_HEADER_FILES := \
   compiled_method.h \
