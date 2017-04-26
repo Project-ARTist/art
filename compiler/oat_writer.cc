@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2011 The Android Open Source Project
  *
+ * Changes Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -265,12 +267,13 @@ class OatWriter::OatDexFile {
   DCHECK_EQ(static_cast<off_t>(file_offset + offset_), out->Seek(0, kSeekCurrent)) \
     << "file_offset=" << file_offset << " offset_=" << offset_
 
-OatWriter::OatWriter(bool compiling_boot_image, TimingLogger* timings)
+OatWriter::OatWriter(bool compiling_boot_image, TimingLogger* timings, std::vector<const char*>* dex_locations)
   : write_state_(WriteState::kAddingDexFileSources),
     timings_(timings),
     raw_dex_files_(),
     zip_archives_(),
     zipped_dex_files_(),
+    dex_locations_(dex_locations),
     zipped_dex_file_locations_(),
     compiler_driver_(nullptr),
     image_writer_(nullptr),
@@ -2066,7 +2069,7 @@ bool OatWriter::WriteDexFile(OutputStream* rodata,
 
 bool OatWriter::WriteOatDexFiles(OutputStream* rodata) {
   TimingLogger::ScopedTiming split("WriteOatDexFiles", timings_);
-
+  VLOG(artistd) << "WriteOatDexFiles()";
   // Seek to the start of OatDexFiles, i.e. to the end of the OatHeader.  If there are
   // no OatDexFiles, no data is actually written to .rodata before WriteHeader() and
   // this Seek() ensures that we reserve the space for OatHeader in .rodata.
@@ -2078,20 +2081,54 @@ bool OatWriter::WriteOatDexFiles(OutputStream* rodata) {
                 << " Expected: " << expected_offset << " File: " << rodata->GetLocation();
     return false;
   }
-
+  // Probe Dex Checksums
+  std::vector<uint32_t> dex_checksums;
+  if (dex_locations_ != nullptr && dex_locations_->size() > 0) {
+    std::vector<std::unique_ptr<const DexFile>> temp_dex_files;
+    for (auto && dexLoc : *dex_locations_) {
+      VLOG(artistd) << "WriteOatDexFiles() DexLocation: " << dexLoc;
+      std::string openErrors;
+      bool openSuccess = DexFile::Open(dexLoc, dexLoc, &openErrors, &temp_dex_files);
+      if (openSuccess) {
+        VLOG(artistd) << "WriteOatDexFiles() DexLocation: " << dexLoc << " SUCCESS! [Files: " << temp_dex_files.size() << "]";
+      } else {
+        VLOG(artist) << "WriteOatDexFiles() DexLocation: " << dexLoc << " FAILED: " << openErrors;
+      }
+    }
+    for (auto && tmpDexFile : temp_dex_files) {
+      const DexFile* dexPointer = tmpDexFile.get();
+      VLOG(artist) << "WriteOatDexFiles() DexFile Location: " << dexPointer->GetLocation() << " ["
+                   << std::hex << dexPointer->GetLocationChecksum() << "]";
+      dex_checksums.push_back(dexPointer->GetLocationChecksum());
+      tmpDexFile.release();
+    }
+  }
+  // Rewrite Dex Checksums
   for (size_t i = 0, size = oat_dex_files_.size(); i != size; ++i) {
     OatDexFile* oat_dex_file = &oat_dex_files_[i];
 
     DCHECK_EQ(oat_data_offset_ + oat_dex_file->offset_,
               static_cast<size_t>(rodata->Seek(0, kSeekCurrent)));
 
+    if (dex_locations_ != nullptr && dex_locations_->size() > 0) {
+      VLOG(artist) << "WriteOatDexFiles() Rewrite DexLocationChecksum old: " << std::hex
+                   << oat_dex_file->dex_file_location_checksum_;
+
+      if (i < dex_checksums.size()) {
+        oat_dex_file->dex_file_location_checksum_ = dex_checksums.at(i);
+      } else {
+        oat_dex_file->dex_file_location_checksum_ = dex_checksums.back();
+      }
+      VLOG(artist) << "WriteOatDexFiles() Rewrite DexLocationChecksum new: " << std::hex
+                   << oat_dex_file->dex_file_location_checksum_;
+    }
     // Write OatDexFile.
     if (!oat_dex_file->Write(this, rodata)) {
       PLOG(ERROR) << "Failed to write oat dex information to " << rodata->GetLocation();
       return false;
     }
   }
-
+  VLOG(artistd) << "WriteOatDexFiles() DONE";
   return true;
 }
 

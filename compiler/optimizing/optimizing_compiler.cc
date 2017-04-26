@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2014 The Android Open Source Project
  *
+ * Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -81,6 +83,13 @@
 #include "ssa_phi_elimination.h"
 #include "utils/assembler.h"
 #include "verifier/method_verifier.h"
+
+// Artist Includes ///////////////////////////////////////////
+#include "optimizing/artist/artist.h"
+#include "optimizing/artist/modules/analyzer/logtimization.h"
+#include "optimizing/artist/modules/generic/universal_artist.h"
+#include "optimizing/artist/modules/method-tracing/trace_artist.h"
+// Artist Includes End ///////////////////////////////////////
 
 namespace art {
 
@@ -506,6 +515,7 @@ static void RunOptimizations(HGraph* graph,
                              PassObserver* pass_observer,
                              StackHandleScopeCollection* handles) {
   ArenaAllocator* arena = graph->GetArena();
+
   HDeadCodeElimination* dce1 = new (arena) HDeadCodeElimination(
       graph, stats, HDeadCodeElimination::kInitialDeadCodeEliminationPassName);
   HDeadCodeElimination* dce2 = new (arena) HDeadCodeElimination(
@@ -527,6 +537,12 @@ static void RunOptimizations(HGraph* graph,
   InstructionSimplifier* simplify3 = new (arena) InstructionSimplifier(
       graph, stats, "instruction_simplifier_before_codegen");
   IntrinsicsRecognizer* intrinsics = new (arena) IntrinsicsRecognizer(graph, driver, stats);
+
+  // artist optimization passes //////////////////////////////////////////////
+  HUniversalArtist* universalArtist = new (arena) HUniversalArtist(graph, dex_compilation_unit, driver);
+  // HTraceArtist* traceLogging = new (arena) HTraceArtist(graph, dex_compilation_unit, driver);
+  // HLogtimization* logtimization = new (arena) HLogtimization(graph, dex_compilation_unit, driver);
+  // artist optimization passes //////////////////////////////////////////////
 
   HOptimization* optimizations1[] = {
     intrinsics,
@@ -557,6 +573,9 @@ static void RunOptimizations(HGraph* graph,
     // can satisfy. For example, the code generator does not expect to see a
     // HTypeConversion from a type to the same type.
     simplify3,
+    universalArtist,
+    // traceLogging,
+    // logtimization
   };
   RunOptimizations(optimizations2, arraysize(optimizations2), pass_observer);
 
@@ -869,6 +888,7 @@ bool OptimizingCompiler::JitCompile(Thread* self,
                                     jit::JitCodeCache* code_cache,
                                     ArtMethod* method,
                                     bool osr) {
+  VLOG(artistd) << "OptimizingCompiler::JitCompile()";
   StackHandleScope<2> hs(self);
   Handle<mirror::ClassLoader> class_loader(hs.NewHandle(
       method->GetDeclaringClass()->GetClassLoader()));
@@ -966,6 +986,8 @@ bool OptimizingCompiler::JitCompile(Thread* self,
   }
 
   Runtime::Current()->GetJit()->AddMemoryUsage(method, arena.BytesUsed());
+
+  VLOG(artistd) << "OptimizingCompiler::JitCompile() done.";
 
   return true;
 }

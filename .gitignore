@@ -1,2 +1,6 @@
+.idea
+cmake-build-debug
+compiler/optimizing/artist.bak
 JIT_ART
 **/__pycache__/**
+make.sh
