@@ -1,3 +1,3 @@
 [submodule "compiler/optimizing/artist"]
 	path = compiler/optimizing/artist
-	url = git@github.com:Project-ARTist/ARTist.git
+	url = https://github.com/Project-ARTist/ARTist.git	
