@@ -23,9 +23,9 @@ Replaced LogTag with dex2artist.gitignore
 
 ## Changed/Touched Files
 
-compiler/Android.mk
-compiler/driver/compiler_driver.cc
-compiler/optimizing/optimizing_compiler.cc
-runtime/base/logging.cc
-runtime/base/logging.h
-runtime/class_linker.h
+compiler/Android.mk  
+compiler/driver/compiler_driver.cc  
+compiler/optimizing/optimizing_compiler.cc  
+runtime/base/logging.cc  
+runtime/base/logging.h  
+runtime/class_linker.h  
