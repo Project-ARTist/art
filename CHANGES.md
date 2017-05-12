@@ -23,13 +23,13 @@ Replaced LogTag with dex2artist.gitignore
 
 ## Changed/Touched Files
 
-compiler/Android.mk
-compiler/driver/compiler_driver.cc
-compiler/oat_writer.cc
-compiler/oat_writer.h
-compiler/optimizing/optimizing_compiler.cc
-dex2oat/dex2oat.cc
-runtime/base/logging.cc
-runtime/base/logging.h
-runtime/class_linker.h
-runtime/parsed_options.cc
+compiler/Android.mk  
+compiler/driver/compiler_driver.cc  
+compiler/oat_writer.cc  
+compiler/oat_writer.h  
+compiler/optimizing/optimizing_compiler.cc  
+dex2oat/dex2oat.cc  
+runtime/base/logging.cc  
+runtime/base/logging.h  
+runtime/class_linker.h  
+runtime/parsed_options.cc  
