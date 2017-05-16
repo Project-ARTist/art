@@ -255,6 +255,10 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("  --compile-pic: Force indirect use of code, methods, and classes");
   UsageError("      Default: disabled");
   UsageError("");
+  UsageError("  --checksum-rewriting: Force dex2oat to write a fake location checksum (write the original");
+  UsageError("      checksum instead of the correct location checksum of the modified APK file)");
+  UsageError("      Default: disabled");
+  UsageError("");
   UsageError("  --compiler-backend=(Quick|Optimizing): select compiler backend");
   UsageError("      set.");
   UsageError("      Example: --compiler-backend=Optimizing");
@@ -529,7 +533,7 @@ class Dex2Oat FINAL {
       rodata_(),
       image_writer_(nullptr),
       driver_(nullptr),
-      rewrite_dex_location_checksums(false),
+      rewrite_dex_location_checksums_(false),
       opened_dex_files_maps_(),
       opened_dex_files_(),
       no_inline_from_dex_files_(),
@@ -1174,6 +1178,8 @@ class Dex2Oat FINAL {
           Usage("Cannot use --force-determinism with read barriers or non-CMS garbage collector");
         }
         force_determinism_ = true;
+      } else if (option == "--checksum-rewriting") {
+        rewrite_dex_location_checksums_ = true;
       } else if (!compiler_options_->ParseCompilerOption(option, Usage)) {
         Usage("Unknown argument %s", option.data());
       }
@@ -1328,9 +1334,13 @@ class Dex2Oat FINAL {
     if (dex_locations_.size() == dex_filenames_.size()) {
       for (uint32_t i = 0; i < dex_locations_.size(); i++) {
         VLOG(artist) << "DexLocation: " << dex_locations_.at(i) << " <> " << dex_filenames_.at(i);
-        if (strcmp(dex_locations_.at(i), dex_filenames_.at(i)) != 0) {
-          VLOG(artist) << "> Rewriting Dex LocationChecksum";
-          rewrite_dex_location_checksums = true;
+        if (rewrite_dex_location_checksums_) {
+          if (strcmp(dex_locations_.at(i), dex_filenames_.at(i)) != 0) {
+            VLOG(artist) << "> Rewriting Dex LocationChecksum";
+            rewrite_dex_location_checksums_ = true;
+          } else {
+            VLOG(artist) << "> NOT Rewriting Dex LocationChecksum";
+          }
           break;
         }
       }
@@ -2159,7 +2169,7 @@ class Dex2Oat FINAL {
                                                      compiler_options_.get(),
                                                      oat_file.get()));
       elf_writers_.back()->Start();
-      if (rewrite_dex_location_checksums) {
+      if (rewrite_dex_location_checksums_) {
         oat_writers_.emplace_back(new OatWriter(IsBootImage(), timings_, &dex_locations_));
       } else {
         oat_writers_.emplace_back(new OatWriter(IsBootImage(), timings_));
@@ -2504,7 +2514,7 @@ class Dex2Oat FINAL {
   std::unique_ptr<ImageWriter> image_writer_;
   std::unique_ptr<CompilerDriver> driver_;
 
-  bool rewrite_dex_location_checksums;
+  bool rewrite_dex_location_checksums_;
 
   std::vector<std::unique_ptr<MemMap>> opened_dex_files_maps_;
   std::vector<std::unique_ptr<OatFile>> opened_oat_files_;
