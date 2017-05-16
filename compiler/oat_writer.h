@@ -257,6 +257,7 @@ class OatWriter {
 
   bool RecordOatDataOffset(OutputStream* out);
   bool ReadDexFileHeader(File* file, OatDexFile* oat_dex_file);
+  bool RewriteLocationChecksum();
   bool ValidateDexFileHeader(const uint8_t* raw_header, const char* location);
   bool WriteDexFiles(OutputStream* rodata, File* file);
   bool WriteDexFile(OutputStream* rodata, File* file, OatDexFile* oat_dex_file);
