@@ -423,6 +423,7 @@ INTRINSICS_LIST(SETUP_INTRINSICS)
   // <PreInit all Environments>
   CodeLibEnvironment& env = CodeLibEnvironment::GetInstance();
   env.PreInitializeEnvironmentCodeLib(class_loader, this, dex_files);
+  VLOG(compiler) << "CodeLib available: " << env.IsCodeLibAvailable();
   // </PreInit all Environments>
 
   if (GetCompilerOptions().IsAnyCompilationEnabled()) {

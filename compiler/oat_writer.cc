@@ -2553,14 +2553,34 @@ size_t OatWriter::WriteMethodBssMappings(OutputStream* out,
   return relative_offset;
 }
 
+bool OatWriter::RewriteLocationChecksum() {
+    // const bool rewrite_location_checksum = GetCompilerDriver()->GetCompilerOptions().GetRewriteLocationChecksum();
+    if (dex_locations_ != nullptr
+        && dex_locations_->size() > 0) {
+        VLOG(artistd) << "RewriteLocationChecksum() true";
+        return true;
+    } else {
+        VLOG(artistd) << "RewriteLocationChecksum() false";
+        return false;
+    }
+}
+
 size_t OatWriter::WriteOatDexFiles(OutputStream* out, size_t file_offset, size_t relative_offset) {
   TimingLogger::ScopedTiming split("WriteOatDexFiles", timings_);
 
   VLOG(artistd) << "WriteOatDexFiles()";
+  VLOG(artistd) << "WriteOatDexFiles() " << reinterpret_cast<const void*>(GetCompilerDriver()) << std::flush;
+  VLOG(artist) << "WriteOatDexFiles() BootImage: " << this->compiling_boot_image_;
+  if (dex_locations_ != nullptr) {
+      VLOG(artist) << "WriteOatDexFiles() BootImage: " << this->dex_locations_->size();
+  } else {
+      VLOG(artist) << "WriteOatDexFiles() BootImage: 0";
+  }
 
   // Probe Dex Checksums
   std::vector<uint32_t> dex_checksums;
-  if (dex_locations_ != nullptr && dex_locations_->size() > 0) {
+  if (RewriteLocationChecksum()) {
+    VLOG(artist) << "Rewriting DexLocation Checksum";
     std::vector<std::unique_ptr<const DexFile>> temp_dex_files;
     for (auto && dexLoc : *dex_locations_) {
       VLOG(artistd) << "WriteOatDexFiles() DexLocation: " << dexLoc;
@@ -2581,13 +2601,15 @@ size_t OatWriter::WriteOatDexFiles(OutputStream* out, size_t file_offset, size_t
     }
   }
 
-  // Rewrite Dex Checksums
+  // /Probe Dex Checksums
   for (size_t i = 0, size = oat_dex_files_.size(); i != size; ++i) {
     OatDexFile* oat_dex_file = &oat_dex_files_[i];
     DCHECK_EQ(relative_offset, oat_dex_file->offset_);
     DCHECK_OFFSET();
 
-    if (dex_locations_ != nullptr && dex_locations_->size() > 0) {
+    // Rewrite Dex Checksums
+    if (RewriteLocationChecksum()) {
+      VLOG(artist) << "Rewriting DexLocation Checksum";
       VLOG(artist) << "WriteOatDexFiles() Rewrite DexLocationChecksum old: " << std::hex
                    << oat_dex_file->dex_file_location_checksum_;
 
@@ -2600,6 +2622,7 @@ size_t OatWriter::WriteOatDexFiles(OutputStream* out, size_t file_offset, size_t
                    << oat_dex_file->dex_file_location_checksum_;
     }
 
+    // /Rewrite Dex Checksums
     // Write OatDexFile.
     if (!oat_dex_file->Write(this, out)) {
       return 0u;
