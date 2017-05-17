@@ -421,7 +421,7 @@
     SETUP_SAVE_EVERYTHING_FRAME_DECREMENTED_SP
 .endm
 
-.macro RESTORE_SAVE_EVERYTHING_FRAME
+.macro RESTORE_SAVE_EVERYTHING_FRAME restore_a0=1
     addiu  $sp, $sp, ARG_SLOT_SIZE                # remove argument slots on the stack
     .cfi_adjust_cfa_offset -ARG_SLOT_SIZE
 
@@ -490,8 +490,10 @@
     .cfi_restore 6
     lw     $a1, 160($sp)
     .cfi_restore 5
+    .if \restore_a0
     lw     $a0, 156($sp)
     .cfi_restore 4
+    .endif
     lw     $v1, 152($sp)
     .cfi_restore 3
     lw     $v0, 148($sp)
@@ -507,14 +509,24 @@
 .endm
 
     /*
-     * Macro that set calls through to artDeliverPendingExceptionFromCode, where the pending
-     * exception is Thread::Current()->exception_
+     * Macro that calls through to artDeliverPendingExceptionFromCode, where the pending
+     * exception is Thread::Current()->exception_ when the runtime method frame is ready.
+     * Requires $gp properly set up.
      */
-.macro DELIVER_PENDING_EXCEPTION
-    SETUP_SAVE_ALL_CALLEE_SAVES_FRAME    # save callee saves for throw
+.macro DELIVER_PENDING_EXCEPTION_FRAME_READY
     la      $t9, artDeliverPendingExceptionFromCode
     jalr    $zero, $t9                   # artDeliverPendingExceptionFromCode(Thread*)
     move    $a0, rSELF                   # pass Thread::Current
+.endm
+
+    /*
+     * Macro that calls through to artDeliverPendingExceptionFromCode, where the pending
+     * exception is Thread::Current()->exception_.
+     * Requires $gp properly set up.
+     */
+.macro DELIVER_PENDING_EXCEPTION
+    SETUP_SAVE_ALL_CALLEE_SAVES_FRAME    # save callee saves for throw
+    DELIVER_PENDING_EXCEPTION_FRAME_READY
 .endm
 
 .macro RETURN_IF_NO_EXCEPTION
@@ -1660,30 +1672,51 @@ ART_QUICK_ALLOC_OBJECT_ROSALLOC art_quick_alloc_object_initialized_rosalloc, art
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_tlab, TLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_region_tlab, RegionTLAB)
 
+// Macro for string and type resolution and initialization.
+// $a0 is both input and output.
+.macro ONE_ARG_SAVE_EVERYTHING_DOWNCALL name, entrypoint
+    .extern \entrypoint
+ENTRY_NO_GP \name
+    SETUP_SAVE_EVERYTHING_FRAME       # Save everything in case of GC.
+    move    $s2, $gp                  # Preserve $gp across the call for exception delivery.
+    la      $t9, \entrypoint
+    jalr    $t9                       # (uint32_t index, Thread*)
+    move    $a1, rSELF                # Pass Thread::Current (in delay slot).
+    beqz    $v0, 1f                   # Success?
+    move    $a0, $v0                  # Move result to $a0 (in delay slot).
+    RESTORE_SAVE_EVERYTHING_FRAME 0   # Restore everything except $a0.
+    jalr    $zero, $ra                # Return on success.
+    nop
+1:
+    move    $gp, $s2
+    DELIVER_PENDING_EXCEPTION_FRAME_READY
+END \name
+.endm
+
     /*
      * Entry from managed code to resolve a string, this stub will allocate a String and deliver an
      * exception on error. On success the String is returned. A0 holds the string index. The fast
      * path check for hit in strings cache has already been performed.
      */
-ONE_ARG_DOWNCALL art_quick_resolve_string, artResolveStringFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_string, artResolveStringFromCode
 
     /*
      * Entry from managed code when uninitialized static storage, this stub will run the class
      * initializer and deliver the exception on error. On success the static storage base is
      * returned.
      */
-ONE_ARG_DOWNCALL art_quick_initialize_static_storage, artInitializeStaticStorageFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_initialize_static_storage, artInitializeStaticStorageFromCode
 
     /*
      * Entry from managed code when dex cache misses for a type_idx.
      */
-ONE_ARG_DOWNCALL art_quick_initialize_type, artInitializeTypeFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_initialize_type, artInitializeTypeFromCode
 
     /*
      * Entry from managed code when type_idx needs to be checked for access and dex cache may also
      * miss.
      */
-ONE_ARG_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode, RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode
 
     /*
      * Called by managed code when the value in rSUSPEND has been decremented to 0.
@@ -1854,7 +1887,8 @@ ENTRY art_quick_generic_jni_trampoline
     nop
 
 2:
-    lw $sp, THREAD_TOP_QUICK_FRAME_OFFSET(rSELF)
+    lw      $sp, THREAD_TOP_QUICK_FRAME_OFFSET(rSELF)
+    move    $gp, $s3               # restore $gp from $s3
     # This will create a new save-all frame, required by the runtime.
     DELIVER_PENDING_EXCEPTION
 END art_quick_generic_jni_trampoline
@@ -1944,8 +1978,7 @@ END art_quick_instrumentation_exit
 ENTRY art_quick_deoptimize
     SETUP_SAVE_ALL_CALLEE_SAVES_FRAME
     la       $t9, artDeoptimize
-    jalr     $t9            # artDeoptimize(Thread*)
-                            # Returns caller method's frame size.
+    jalr     $t9            # (Thread*)
     move     $a0, rSELF     # pass Thread::current
 END art_quick_deoptimize
 
@@ -1957,9 +1990,8 @@ END art_quick_deoptimize
 ENTRY art_quick_deoptimize_from_compiled_code
     SETUP_SAVE_EVERYTHING_FRAME
     la       $t9, artDeoptimizeFromCompiledCode
-    jalr     $t9                            # artDeoptimizeFromCompiledCode(Thread*)
-                                            # Returns caller method's frame size.
-    move     $a0, rSELF                     # pass Thread::current
+    jalr     $t9                            # (DeoptimizationKind, Thread*)
+    move     $a1, rSELF                     # pass Thread::current
 END art_quick_deoptimize_from_compiled_code
 
     /*
@@ -2213,8 +2245,32 @@ END art_quick_string_compareto
      */
 .macro READ_BARRIER_MARK_REG name, reg
 ENTRY \name
-    /* TODO: optimizations: mark bit, forwarding. */
-    addiu   $sp, $sp, -160      # includes 16 bytes of space for argument registers a0-a3
+    // Null check so that we can load the lock word.
+    bnez    \reg, .Lnot_null_\name
+    nop
+.Lret_rb_\name:
+    jalr    $zero, $ra
+    nop
+.Lnot_null_\name:
+    // Check lock word for mark bit, if marked return.
+    lw      $t9, MIRROR_OBJECT_LOCK_WORD_OFFSET(\reg)
+    .set push
+    .set noat
+    sll     $at, $t9, 31 - LOCK_WORD_MARK_BIT_SHIFT     # Move mark bit to sign bit.
+    bltz    $at, .Lret_rb_\name
+#if (LOCK_WORD_STATE_SHIFT != 30) || (LOCK_WORD_STATE_FORWARDING_ADDRESS != 3)
+    // The below code depends on the lock word state being in the highest bits
+    // and the "forwarding address" state having all bits set.
+#error "Unexpected lock word state shift or forwarding address state value."
+#endif
+    // Test that both the forwarding state bits are 1.
+    sll     $at, $t9, 1
+    and     $at, $at, $t9                               # Sign bit = 1 IFF both bits are 1.
+    bltz    $at, .Lret_forwarding_address\name
+    nop
+    .set pop
+
+    addiu   $sp, $sp, -160      # Includes 16 bytes of space for argument registers a0-a3.
     .cfi_adjust_cfa_offset 160
 
     sw      $ra, 156($sp)
@@ -2319,6 +2375,12 @@ ENTRY \name
     jalr    $zero, $ra
     addiu   $sp, $sp, 160
     .cfi_adjust_cfa_offset -160
+
+.Lret_forwarding_address\name:
+    jalr    $zero, $ra
+    // Shift left by the forwarding address shift. This clears out the state bits since they are
+    // in the top 2 bits of the lock word.
+    sll     \reg, $t9, LOCK_WORD_STATE_FORWARDING_ADDRESS_SHIFT
 END \name
 .endm
 

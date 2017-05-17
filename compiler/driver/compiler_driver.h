@@ -56,7 +56,6 @@ class VerifierDepsTest;
 }  // namespace verifier
 
 class BitVector;
-class CompiledClass;
 class CompiledMethod;
 class CompilerOptions;
 class DexCompilationUnit;
@@ -164,7 +163,7 @@ class CompilerDriver {
   std::unique_ptr<const std::vector<uint8_t>> CreateQuickResolutionTrampoline() const;
   std::unique_ptr<const std::vector<uint8_t>> CreateQuickToInterpreterBridge() const;
 
-  CompiledClass* GetCompiledClass(ClassReference ref) const
+  bool GetCompiledClass(ClassReference ref, mirror::Class::Status* status) const
       REQUIRES(!compiled_classes_lock_);
 
   CompiledMethod* GetCompiledMethod(MethodReference ref) const;
@@ -179,6 +178,40 @@ class CompilerDriver {
                                      uint16_t class_def_index,
                                      bool requires)
       REQUIRES(!requires_constructor_barrier_lock_);
+
+  // Do the <init> methods for this class require a constructor barrier (prior to the return)?
+  // The answer is "yes", if and only if this class has any instance final fields.
+  // (This must not be called for any non-<init> methods; the answer would be "no").
+  //
+  // ---
+  //
+  // JLS 17.5.1 "Semantics of final fields" mandates that all final fields are frozen at the end
+  // of the invoked constructor. The constructor barrier is a conservative implementation means of
+  // enforcing the freezes happen-before the object being constructed is observable by another
+  // thread.
+  //
+  // Note: This question only makes sense for instance constructors;
+  // static constructors (despite possibly having finals) never need
+  // a barrier.
+  //
+  // JLS 12.4.2 "Detailed Initialization Procedure" approximately describes
+  // class initialization as:
+  //
+  //   lock(class.lock)
+  //     class.state = initializing
+  //   unlock(class.lock)
+  //
+  //   invoke <clinit>
+  //
+  //   lock(class.lock)
+  //     class.state = initialized
+  //   unlock(class.lock)              <-- acts as a release
+  //
+  // The last operation in the above example acts as an atomic release
+  // for any stores in <clinit>, which ends up being stricter
+  // than what a constructor barrier needs.
+  //
+  // See also QuasiAtomic::ThreadFenceForConstructor().
   bool RequiresConstructorBarrier(Thread* self,
                                   const DexFile* dex_file,
                                   uint16_t class_def_index)
@@ -471,10 +504,10 @@ class CompilerDriver {
   std::map<ClassReference, bool> requires_constructor_barrier_
       GUARDED_BY(requires_constructor_barrier_lock_);
 
-  typedef SafeMap<const ClassReference, CompiledClass*> ClassTable;
+  using ClassStateTable = SafeMap<const ClassReference, mirror::Class::Status>;
   // All class references that this compiler has compiled.
   mutable Mutex compiled_classes_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
-  ClassTable compiled_classes_ GUARDED_BY(compiled_classes_lock_);
+  ClassStateTable compiled_classes_ GUARDED_BY(compiled_classes_lock_);
 
   typedef AtomicMethodRefMap<CompiledMethod*> MethodTable;
 

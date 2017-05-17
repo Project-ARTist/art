@@ -25,6 +25,15 @@
 
 namespace art {
 
+// A scoped file-lock implemented using flock. The file is locked by calling the Init function and
+// is released during destruction. Note that failing to unlock the file only causes a warning to be
+// printed. Users should take care that this does not cause potential deadlocks.
+//
+// Only printing a warning on unlock failure is okay since this is only used with either:
+// 1) a non-blocking Init call, or
+// 2) as a part of a seperate binary (eg dex2oat) which has it's own timeout logic to prevent
+//    deadlocks.
+// This means we can be sure that the warning won't cause a deadlock.
 class ScopedFlock {
  public:
   ScopedFlock();
@@ -38,7 +47,16 @@ class ScopedFlock {
   // locking will be retried if the file changed. In non-blocking mode, false
   // is returned and no attempt is made to re-acquire the lock.
   //
+  // The argument `flush_on_close` controls whether or not the file
+  // will be explicitly flushed before close.
+  //
   // The file is opened with the provided flags.
+  bool Init(const char* filename,
+            int flags,
+            bool block,
+            bool flush_on_close,
+            std::string* error_msg);
+  // Calls Init(filename, flags, block, true, error_msg);
   bool Init(const char* filename, int flags, bool block, std::string* error_msg);
   // Calls Init(filename, O_CREAT | O_RDWR, true, errror_msg)
   bool Init(const char* filename, std::string* error_msg);
@@ -57,6 +75,7 @@ class ScopedFlock {
 
  private:
   std::unique_ptr<File> file_;
+  bool flush_on_close_;
   DISALLOW_COPY_AND_ASSIGN(ScopedFlock);
 };
 

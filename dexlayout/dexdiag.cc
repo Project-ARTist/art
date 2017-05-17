@@ -15,6 +15,7 @@
  */
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,15 +31,15 @@
 #include "dex_file.h"
 #include "dex_ir.h"
 #include "dex_ir_builder.h"
+#ifdef ART_TARGET_ANDROID
 #include "pagemap/pagemap.h"
+#endif
 #include "runtime.h"
 #include "vdex_file.h"
 
 namespace art {
 
 using android::base::StringPrintf;
-
-static constexpr size_t kLineLength = 32;
 
 static bool g_verbose = false;
 
@@ -164,6 +165,7 @@ static void PrintLetterKey() {
   std::cout << ". (Mapped page not resident)" << std::endl;
 }
 
+#ifdef ART_TARGET_ANDROID
 static char PageTypeChar(uint16_t type) {
   if (kDexSectionInfoMap.find(type) == kDexSectionInfoMap.end()) {
     return '-';
@@ -194,10 +196,12 @@ static void ProcessPageMap(uint64_t* pagemap,
                            size_t end,
                            const std::vector<dex_ir::DexFileSection>& sections,
                            PageCount* page_counts) {
+  static constexpr size_t kLineLength = 32;
   for (size_t page = start; page < end; ++page) {
     char type_char = '.';
     if (PM_PAGEMAP_PRESENT(pagemap[page])) {
-      uint16_t type = FindSectionTypeForPage(page, sections);
+      const size_t dex_page_offset = page - start;
+      uint16_t type = FindSectionTypeForPage(dex_page_offset, sections);
       page_counts->Increment(type);
       type_char = PageTypeChar(type);
     }
@@ -228,7 +232,8 @@ static void DisplayDexStatistics(size_t start,
     return;
   }
   for (size_t page = start; page < end; ++page) {
-    mapped_pages.Increment(FindSectionTypeForPage(page, sections));
+    const size_t dex_page_offset = page - start;
+    mapped_pages.Increment(FindSectionTypeForPage(dex_page_offset, sections));
   }
   size_t total_resident_pages = 0;
   printer->PrintHeader();
@@ -268,7 +273,7 @@ static void ProcessOneDexMapping(uint64_t* pagemap,
     std::cerr << "Dex file start offset for "
               << dex_file->GetLocation().c_str()
               << " is incorrect: map start "
-              << StringPrintf("%zx > dex start %zx\n", map_start, dex_file_start)
+              << StringPrintf("%" PRIx64 " > dex start %" PRIx64 "\n", map_start, dex_file_start)
               << std::endl;
     return;
   }
@@ -277,7 +282,7 @@ static void ProcessOneDexMapping(uint64_t* pagemap,
   uint64_t end_page = RoundUp(start_address + dex_file_size, kPageSize) / kPageSize;
   std::cout << "DEX "
             << dex_file->GetLocation().c_str()
-            << StringPrintf(": %zx-%zx",
+            << StringPrintf(": %" PRIx64 "-%" PRIx64,
                             map_start + start_page * kPageSize,
                             map_start + end_page * kPageSize)
             << std::endl;
@@ -293,21 +298,20 @@ static void ProcessOneDexMapping(uint64_t* pagemap,
   DisplayDexStatistics(start_page, end_page, section_resident_pages, sections, printer);
 }
 
-static bool DisplayMappingIfFromVdexFile(pm_map_t* map, Printer* printer) {
+static bool IsVdexFileMapping(const std::string& mapped_name) {
   // Confirm that the map is from a vdex file.
   static const char* suffixes[] = { ".vdex" };
-  std::string vdex_name;
-  bool found = false;
-  for (size_t j = 0; j < sizeof(suffixes) / sizeof(suffixes[0]); ++j) {
-    if (strstr(pm_map_name(map), suffixes[j]) != nullptr) {
-      vdex_name = pm_map_name(map);
-      found = true;
-      break;
+  for (const char* suffix : suffixes) {
+    size_t match_loc = mapped_name.find(suffix);
+    if (match_loc != std::string::npos && mapped_name.length() == match_loc + strlen(suffix)) {
+      return true;
     }
   }
-  if (!found) {
-    return true;
-  }
+  return false;
+}
+
+static bool DisplayMappingIfFromVdexFile(pm_map_t* map, Printer* printer) {
+  std::string vdex_name = pm_map_name(map);
   // Extract all the dex files from the vdex file.
   std::string error_msg;
   std::unique_ptr<VdexFile> vdex(VdexFile::Open(vdex_name,
@@ -331,6 +335,7 @@ static bool DisplayMappingIfFromVdexFile(pm_map_t* map, Printer* printer) {
               << ": error "
               << error_msg
               << std::endl;
+    return false;
   }
   // Open the page mapping (one uint64_t per page) for the entire vdex mapping.
   uint64_t* pagemap;
@@ -342,7 +347,7 @@ static bool DisplayMappingIfFromVdexFile(pm_map_t* map, Printer* printer) {
   // Process the dex files.
   std::cout << "MAPPING "
             << pm_map_name(map)
-            << StringPrintf(": %zx-%zx", pm_map_start(map), pm_map_end(map))
+            << StringPrintf(": %" PRIx64 "-%" PRIx64, pm_map_start(map), pm_map_end(map))
             << std::endl;
   for (const auto& dex_file : dex_files) {
     ProcessOneDexMapping(pagemap,
@@ -356,6 +361,7 @@ static bool DisplayMappingIfFromVdexFile(pm_map_t* map, Printer* printer) {
 }
 
 static void ProcessOneOatMapping(uint64_t* pagemap, size_t size, Printer* printer) {
+  static constexpr size_t kLineLength = 32;
   size_t resident_page_count = 0;
   for (size_t page = 0; page < size; ++page) {
     char type_char = '.';
@@ -381,21 +387,19 @@ static void ProcessOneOatMapping(uint64_t* pagemap, size_t size, Printer* printe
   printer->PrintSkipLine();
 }
 
-static bool DisplayMappingIfFromOatFile(pm_map_t* map, Printer* printer) {
-  // Confirm that the map is from a vdex file.
+static bool IsOatFileMapping(const std::string& mapped_name) {
+  // Confirm that the map is from an oat file.
   static const char* suffixes[] = { ".odex", ".oat" };
-  std::string vdex_name;
-  bool found = false;
-  for (size_t j = 0; j < sizeof(suffixes) / sizeof(suffixes[0]); ++j) {
-    if (strstr(pm_map_name(map), suffixes[j]) != nullptr) {
-      vdex_name = pm_map_name(map);
-      found = true;
-      break;
+  for (const char* suffix : suffixes) {
+    size_t match_loc = mapped_name.find(suffix);
+    if (match_loc != std::string::npos && mapped_name.length() == match_loc + strlen(suffix)) {
+      return true;
     }
   }
-  if (!found) {
-    return true;
-  }
+  return false;
+}
+
+static bool DisplayMappingIfFromOatFile(pm_map_t* map, Printer* printer) {
   // Open the page mapping (one uint64_t per page) for the entire vdex mapping.
   uint64_t* pagemap;
   size_t len;
@@ -406,7 +410,7 @@ static bool DisplayMappingIfFromOatFile(pm_map_t* map, Printer* printer) {
   // Process the dex files.
   std::cout << "MAPPING "
             << pm_map_name(map)
-            << StringPrintf(": %zx-%zx", pm_map_start(map), pm_map_end(map))
+            << StringPrintf(": %" PRIx64 "-%" PRIx64, pm_map_start(map), pm_map_end(map))
             << std::endl;
   ProcessOneOatMapping(pagemap, len, printer);
   free(pagemap);
@@ -426,9 +430,10 @@ static bool FilterByNameContains(const std::string& mapped_file_name,
   }
   return false;
 }
+#endif
 
 static void Usage(const char* cmd) {
-  std::cerr << "Usage: " << cmd << " [options] pid" << std::endl
+  std::cout << "Usage: " << cmd << " [options] pid" << std::endl
             << "    --contains=<string>:  Display sections containing string." << std::endl
             << "    --help:               Shows this message." << std::endl
             << "    --verbose:            Makes displays verbose." << std::endl;
@@ -463,6 +468,7 @@ static int DexDiagMain(int argc, char* argv[]) {
   InitLogging(argv, Runtime::Aborter);
   MemMap::Init();
 
+#ifdef ART_TARGET_ANDROID
   pid_t pid;
   char* endptr;
   pid = (pid_t)strtol(argv[argc - 1], &endptr, 10);
@@ -496,7 +502,8 @@ static int DexDiagMain(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  // Process the mappings that are due to DEX files.
+  bool match_found = false;
+  // Process the mappings that are due to vdex or oat files.
   Printer printer;
   for (size_t i = 0; i < num_maps; ++i) {
     std::string mapped_file_name = pm_map_name(maps[i]);
@@ -504,12 +511,23 @@ static int DexDiagMain(int argc, char* argv[]) {
     if (!FilterByNameContains(mapped_file_name, name_filters)) {
       continue;
     }
-    if (!DisplayMappingIfFromVdexFile(maps[i], &printer)) {
-      return EXIT_FAILURE;
-    } else if (!DisplayMappingIfFromOatFile(maps[i], &printer)) {
-      return EXIT_FAILURE;
+    if (IsVdexFileMapping(mapped_file_name)) {
+      if (!DisplayMappingIfFromVdexFile(maps[i], &printer)) {
+        return EXIT_FAILURE;
+      }
+      match_found = true;
+    } else if (IsOatFileMapping(mapped_file_name)) {
+      if (!DisplayMappingIfFromOatFile(maps[i], &printer)) {
+        return EXIT_FAILURE;
+      }
+      match_found = true;
     }
   }
+  if (!match_found) {
+    std::cerr << "No relevant memory maps were found." << std::endl;
+    return EXIT_FAILURE;
+  }
+#endif
 
   return EXIT_SUCCESS;
 }

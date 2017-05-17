@@ -32,7 +32,7 @@ namespace art {
 namespace mips {
 
 IntrinsicLocationsBuilderMIPS::IntrinsicLocationsBuilderMIPS(CodeGeneratorMIPS* codegen)
-  : arena_(codegen->GetGraph()->GetArena()) {
+  : codegen_(codegen), arena_(codegen->GetGraph()->GetArena()) {
 }
 
 MipsAssembler* IntrinsicCodeGeneratorMIPS::GetAssembler() {
@@ -1525,6 +1525,9 @@ static void CreateIntIntIntToIntLocations(ArenaAllocator* arena,
                                                                 ? LocationSummary::kCallOnSlowPath
                                                                 : LocationSummary::kNoCall),
                                                            kIntrinsified);
+  if (can_call && kUseBakerReadBarrier) {
+    locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
+  }
   locations->SetInAt(0, Location::NoLocation());        // Unused receiver.
   locations->SetInAt(1, Location::RequiresRegister());
   locations->SetInAt(2, Location::RequiresRegister());
@@ -2552,101 +2555,110 @@ void IntrinsicCodeGeneratorMIPS::VisitMathRoundFloat(HInvoke* invoke) {
   Register out = locations->Out().AsRegister<Register>();
 
   MipsLabel done;
-  MipsLabel finite;
-  MipsLabel add;
 
-  // if (in.isNaN) {
-  //   return 0;
-  // }
-  //
-  // out = floor.w.s(in);
-  //
-  // /*
-  //  * This "if" statement is only needed for the pre-R6 version of floor.w.s
-  //  * which outputs Integer.MAX_VALUE for negative numbers with magnitudes
-  //  * too large to fit in a 32-bit integer.
-  //  *
-  //  * Starting with MIPSR6, which always sets FCSR.NAN2008=1, negative
-  //  * numbers which are too large to be represented in a 32-bit signed
-  //  * integer will be processed by floor.w.s to output Integer.MIN_VALUE,
-  //  * and will no longer be processed by this "if" statement.
-  //  */
-  // if (out == Integer.MAX_VALUE) {
-  //   TMP = (in < 0.0f) ? 1 : 0;
-  //   /*
-  //    * If TMP is 1, then adding it to out will wrap its value from
-  //    * Integer.MAX_VALUE to Integer.MIN_VALUE.
-  //    */
-  //   return out += TMP;
-  // }
-  //
-  // /*
-  //  * For negative values not handled by the previous "if" statement the
-  //  * test here will correctly set the value of TMP.
-  //  */
-  // TMP = ((in - out) >= 0.5f) ? 1 : 0;
-  // return out += TMP;
-
-  // Test for NaN.
   if (IsR6()) {
-    __ CmpUnS(FTMP, in, in);
-  } else {
-    __ CunS(in, in);
-  }
+    // out = floor(in);
+    //
+    // if (out != MAX_VALUE && out != MIN_VALUE) {
+    //     TMP = ((in - out) >= 0.5) ? 1 : 0;
+    //     return out += TMP;
+    // }
+    // return out;
 
-  // Return zero for NaN.
-  __ Move(out, ZERO);
-  if (IsR6()) {
-    __ Bc1nez(FTMP, &done);
-  } else {
-    __ Bc1t(&done);
-  }
+    // out = floor(in);
+    __ FloorWS(FTMP, in);
+    __ Mfc1(out, FTMP);
 
-  // out = floor(in);
-  __ FloorWS(FTMP, in);
-  __ Mfc1(out, FTMP);
+    // if (out != MAX_VALUE && out != MIN_VALUE)
+    __ Addiu(TMP, out, 1);
+    __ Aui(TMP, TMP, 0x8000);  // TMP = out + 0x8000 0001
+                               // or    out - 0x7FFF FFFF.
+                               // IOW, TMP = 1 if out = Int.MIN_VALUE
+                               // or   TMP = 0 if out = Int.MAX_VALUE.
+    __ Srl(TMP, TMP, 1);       // TMP = 0 if out = Int.MIN_VALUE
+                               //         or out = Int.MAX_VALUE.
+    __ Beqz(TMP, &done);
 
-  if (!IsR6()) {
-    __ LoadConst32(TMP, -1);
-  }
+    // TMP = (0.5f <= (in - out)) ? -1 : 0;
+    __ Cvtsw(FTMP, FTMP);      // Convert output of floor.w.s back to "float".
+    __ LoadConst32(AT, bit_cast<int32_t, float>(0.5f));
+    __ SubS(FTMP, in, FTMP);
+    __ Mtc1(AT, half);
 
-  // TMP = (out = java.lang.Integer.MAX_VALUE) ? -1 : 0;
-  __ LoadConst32(AT, std::numeric_limits<int32_t>::max());
-  __ Bne(AT, out, &finite);
-
-  __ Mtc1(ZERO, FTMP);
-  if (IsR6()) {
-    __ CmpLtS(FTMP, in, FTMP);
-    __ Mfc1(TMP, FTMP);
-  } else {
-    __ ColtS(in, FTMP);
-  }
-
-  __ B(&add);
-
-  __ Bind(&finite);
-
-  // TMP = (0.5f <= (in - out)) ? -1 : 0;
-  __ Cvtsw(FTMP, FTMP);  // Convert output of floor.w.s back to "float".
-  __ LoadConst32(AT, bit_cast<int32_t, float>(0.5f));
-  __ SubS(FTMP, in, FTMP);
-  __ Mtc1(AT, half);
-  if (IsR6()) {
     __ CmpLeS(FTMP, half, FTMP);
     __ Mfc1(TMP, FTMP);
+
+    // Return out -= TMP.
+    __ Subu(out, out, TMP);
   } else {
+    // if (in.isNaN) {
+    //   return 0;
+    // }
+    //
+    // out = floor.w.s(in);
+    //
+    // /*
+    //  * This "if" statement is only needed for the pre-R6 version of floor.w.s
+    //  * which outputs Integer.MAX_VALUE for negative numbers with magnitudes
+    //  * too large to fit in a 32-bit integer.
+    //  */
+    // if (out == Integer.MAX_VALUE) {
+    //   TMP = (in < 0.0f) ? 1 : 0;
+    //   /*
+    //    * If TMP is 1, then adding it to out will wrap its value from
+    //    * Integer.MAX_VALUE to Integer.MIN_VALUE.
+    //    */
+    //   return out += TMP;
+    // }
+    //
+    // /*
+    //  * For negative values not handled by the previous "if" statement the
+    //  * test here will correctly set the value of TMP.
+    //  */
+    // TMP = ((in - out) >= 0.5f) ? 1 : 0;
+    // return out += TMP;
+
+    MipsLabel finite;
+    MipsLabel add;
+
+    // Test for NaN.
+    __ CunS(in, in);
+
+    // Return zero for NaN.
+    __ Move(out, ZERO);
+    __ Bc1t(&done);
+
+    // out = floor(in);
+    __ FloorWS(FTMP, in);
+    __ Mfc1(out, FTMP);
+
+    __ LoadConst32(TMP, -1);
+
+    // TMP = (out = java.lang.Integer.MAX_VALUE) ? -1 : 0;
+    __ LoadConst32(AT, std::numeric_limits<int32_t>::max());
+    __ Bne(AT, out, &finite);
+
+    __ Mtc1(ZERO, FTMP);
+    __ ColtS(in, FTMP);
+
+    __ B(&add);
+
+    __ Bind(&finite);
+
+    // TMP = (0.5f <= (in - out)) ? -1 : 0;
+    __ Cvtsw(FTMP, FTMP);  // Convert output of floor.w.s back to "float".
+    __ LoadConst32(AT, bit_cast<int32_t, float>(0.5f));
+    __ SubS(FTMP, in, FTMP);
+    __ Mtc1(AT, half);
     __ ColeS(half, FTMP);
-  }
 
-  __ Bind(&add);
+    __ Bind(&add);
 
-  if (!IsR6()) {
     __ Movf(TMP, ZERO);
+
+    // Return out -= TMP.
+    __ Subu(out, out, TMP);
   }
-
-  // Return out -= TMP.
-  __ Subu(out, out, TMP);
-
   __ Bind(&done);
 }
 
@@ -3133,6 +3145,89 @@ void IntrinsicCodeGeneratorMIPS::VisitSystemArrayCopyChar(HInvoke* invoke) {
   __ Bind(slow_path->GetExitLabel());
 }
 
+// long java.lang.Integer.valueOf(long)
+void IntrinsicLocationsBuilderMIPS::VisitIntegerValueOf(HInvoke* invoke) {
+  InvokeRuntimeCallingConvention calling_convention;
+  IntrinsicVisitor::ComputeIntegerValueOfLocations(
+      invoke,
+      codegen_,
+      calling_convention.GetReturnLocation(Primitive::kPrimNot),
+      Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
+}
+
+void IntrinsicCodeGeneratorMIPS::VisitIntegerValueOf(HInvoke* invoke) {
+  IntrinsicVisitor::IntegerValueOfInfo info = IntrinsicVisitor::ComputeIntegerValueOfInfo();
+  LocationSummary* locations = invoke->GetLocations();
+  MipsAssembler* assembler = GetAssembler();
+  InstructionCodeGeneratorMIPS* icodegen =
+      down_cast<InstructionCodeGeneratorMIPS*>(codegen_->GetInstructionVisitor());
+
+  Register out = locations->Out().AsRegister<Register>();
+  InvokeRuntimeCallingConvention calling_convention;
+  if (invoke->InputAt(0)->IsConstant()) {
+    int32_t value = invoke->InputAt(0)->AsIntConstant()->GetValue();
+    if (value >= info.low && value <= info.high) {
+      // Just embed the j.l.Integer in the code.
+      ScopedObjectAccess soa(Thread::Current());
+      mirror::Object* boxed = info.cache->Get(value + (-info.low));
+      DCHECK(boxed != nullptr && Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(boxed));
+      uint32_t address = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(boxed));
+      __ LoadConst32(out, address);
+    } else {
+      // Allocate and initialize a new j.l.Integer.
+      // TODO: If we JIT, we could allocate the j.l.Integer now, and store it in the
+      // JIT object table.
+      uint32_t address =
+          dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(info.integer));
+      __ LoadConst32(calling_convention.GetRegisterAt(0), address);
+      codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
+      CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+      __ StoreConstToOffset(kStoreWord, value, out, info.value_offset, TMP);
+      // `value` is a final field :-( Ideally, we'd merge this memory barrier with the allocation
+      // one.
+      icodegen->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
+    }
+  } else {
+    Register in = locations->InAt(0).AsRegister<Register>();
+    MipsLabel allocate, done;
+    int32_t count = static_cast<uint32_t>(info.high) - info.low + 1;
+
+    // Is (info.low <= in) && (in <= info.high)?
+    __ Addiu32(out, in, -info.low);
+    // As unsigned quantities is out < (info.high - info.low + 1)?
+    if (IsInt<16>(count)) {
+      __ Sltiu(AT, out, count);
+    } else {
+      __ LoadConst32(AT, count);
+      __ Sltu(AT, out, AT);
+    }
+    // Branch if out >= (info.high - info.low + 1).
+    // This means that "in" is outside of the range [info.low, info.high].
+    __ Beqz(AT, &allocate);
+
+    // If the value is within the bounds, load the j.l.Integer directly from the array.
+    uint32_t data_offset = mirror::Array::DataOffset(kHeapReferenceSize).Uint32Value();
+    uint32_t address = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(info.cache));
+    __ LoadConst32(TMP, data_offset + address);
+    __ ShiftAndAdd(out, out, TMP, TIMES_4);
+    __ Lw(out, out, 0);
+    __ MaybeUnpoisonHeapReference(out);
+    __ B(&done);
+
+    __ Bind(&allocate);
+    // Otherwise allocate and initialize a new j.l.Integer.
+    address = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(info.integer));
+    __ LoadConst32(calling_convention.GetRegisterAt(0), address);
+    codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
+    CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+    __ StoreToOffset(kStoreWord, in, out, info.value_offset);
+    // `value` is a final field :-( Ideally, we'd merge this memory barrier with the allocation
+    // one.
+    icodegen->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
+    __ Bind(&done);
+  }
+}
+
 // Unimplemented intrinsics.
 
 UNIMPLEMENTED_INTRINSIC(MIPS, MathCeil)
@@ -3161,8 +3256,6 @@ UNIMPLEMENTED_INTRINSIC(MIPS, UnsafeGetAndAddLong)
 UNIMPLEMENTED_INTRINSIC(MIPS, UnsafeGetAndSetInt)
 UNIMPLEMENTED_INTRINSIC(MIPS, UnsafeGetAndSetLong)
 UNIMPLEMENTED_INTRINSIC(MIPS, UnsafeGetAndSetObject)
-
-UNIMPLEMENTED_INTRINSIC(MIPS, IntegerValueOf)
 
 UNREACHABLE_INTRINSICS(MIPS)
 

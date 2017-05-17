@@ -262,6 +262,9 @@ Runtime::Runtime()
   std::fill(callee_save_methods_, callee_save_methods_ + arraysize(callee_save_methods_), 0u);
   interpreter::CheckInterpreterAsmConstants();
   callbacks_.reset(new RuntimeCallbacks());
+  for (size_t i = 0; i <= static_cast<size_t>(DeoptimizationKind::kLast); ++i) {
+    deoptimization_counts_[i] = 0u;
+  }
 }
 
 Runtime::~Runtime() {
@@ -336,6 +339,16 @@ Runtime::~Runtime() {
     jit_->DeleteThreadPool();
   }
 
+  // Make sure our internal threads are dead before we start tearing down things they're using.
+  Dbg::StopJdwp();
+  delete signal_catcher_;
+
+  // Make sure all other non-daemon threads have terminated, and all daemon threads are suspended.
+  {
+    ScopedTrace trace2("Delete thread list");
+    thread_list_->ShutDown();
+  }
+
   // TODO Maybe do some locking.
   for (auto& agent : agents_) {
     agent.Unload();
@@ -346,15 +359,9 @@ Runtime::~Runtime() {
     plugin.Unload();
   }
 
-  // Make sure our internal threads are dead before we start tearing down things they're using.
-  Dbg::StopJdwp();
-  delete signal_catcher_;
+  // Finally delete the thread list.
+  delete thread_list_;
 
-  // Make sure all other non-daemon threads have terminated, and all daemon threads are suspended.
-  {
-    ScopedTrace trace2("Delete thread list");
-    delete thread_list_;
-  }
   // Delete the JIT after thread list to ensure that there is no remaining threads which could be
   // accessing the instrumentation when we delete it.
   if (jit_ != nullptr) {
@@ -1178,12 +1185,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   if (!no_sig_chain_) {
     // Dex2Oat's Runtime does not need the signal chain or the fault handler.
-
-    // Initialize the signal chain so that any calls to sigaction get
-    // correctly routed to the next in the chain regardless of whether we
-    // have claimed the signal or not.
-    InitializeSignalChain();
-
     if (implicit_null_checks_ || implicit_so_checks_ || implicit_suspend_checks_) {
       fault_manager.Init();
 
@@ -1571,6 +1572,23 @@ void Runtime::RegisterRuntimeNativeMethods(JNIEnv* env) {
   register_sun_misc_Unsafe(env);
 }
 
+std::ostream& operator<<(std::ostream& os, const DeoptimizationKind& kind) {
+  os << GetDeoptimizationKindName(kind);
+  return os;
+}
+
+void Runtime::DumpDeoptimizations(std::ostream& os) {
+  for (size_t i = 0; i <= static_cast<size_t>(DeoptimizationKind::kLast); ++i) {
+    if (deoptimization_counts_[i] != 0) {
+      os << "Number of "
+         << GetDeoptimizationKindName(static_cast<DeoptimizationKind>(i))
+         << " deoptimizations: "
+         << deoptimization_counts_[i]
+         << "\n";
+    }
+  }
+}
+
 void Runtime::DumpForSigQuit(std::ostream& os) {
   GetClassLinker()->DumpForSigQuit(os);
   GetInternTable()->DumpForSigQuit(os);
@@ -1582,6 +1600,7 @@ void Runtime::DumpForSigQuit(std::ostream& os) {
   } else {
     os << "Running non JIT\n";
   }
+  DumpDeoptimizations(os);
   TrackedAllocators::Dump(os);
   os << "\n";
 
@@ -1791,11 +1810,6 @@ void Runtime::VisitThreadRoots(RootVisitor* visitor, VisitRootFlags flags) {
   thread_list_->VisitRoots(visitor, flags);
 }
 
-size_t Runtime::FlipThreadRoots(Closure* thread_flip_visitor, Closure* flip_callback,
-                                gc::collector::GarbageCollector* collector) {
-  return thread_list_->FlipThreadRoots(thread_flip_visitor, flip_callback, collector);
-}
-
 void Runtime::VisitRoots(RootVisitor* visitor, VisitRootFlags flags) {
   VisitNonConcurrentRoots(visitor, flags);
   VisitConcurrentRoots(visitor, flags);
@@ -1963,10 +1977,21 @@ void Runtime::SetInstructionSet(InstructionSet instruction_set) {
   }
 }
 
+void Runtime::ClearInstructionSet() {
+  instruction_set_ = InstructionSet::kNone;
+}
+
 void Runtime::SetCalleeSaveMethod(ArtMethod* method, CalleeSaveType type) {
   DCHECK_LT(static_cast<int>(type), static_cast<int>(kLastCalleeSaveType));
   CHECK(method != nullptr);
   callee_save_methods_[type] = reinterpret_cast<uintptr_t>(method);
+}
+
+void Runtime::ClearCalleeSaveMethods() {
+  for (size_t i = 0; i < static_cast<size_t>(kLastCalleeSaveType); ++i) {
+    CalleeSaveType type = static_cast<CalleeSaveType>(i);
+    callee_save_methods_[type] = reinterpret_cast<uintptr_t>(nullptr);
+  }
 }
 
 void Runtime::RegisterAppInfo(const std::vector<std::string>& code_paths,

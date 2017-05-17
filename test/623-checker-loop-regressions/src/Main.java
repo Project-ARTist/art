@@ -280,7 +280,17 @@ public class Main {
     }
   }
 
-  // If vectorized, string encoding should be dealt with.
+  /// CHECK-START: void Main.string2Bytes(char[], java.lang.String) loop_optimization (before)
+  /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: ArraySet loop:<<Loop>>      outer_loop:none
+  //
+  /// CHECK-START-ARM64: void Main.string2Bytes(char[], java.lang.String) loop_optimization (after)
+  /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: VecLoad  loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: VecStore loop:<<Loop>>      outer_loop:none
+  //
+  // NOTE: should correctly deal with compressed and uncompressed cases.
   private static void string2Bytes(char[] a, String b) {
     int min = Math.min(a.length, b.length());
     for (int i = 0; i < min; i++) {
@@ -307,6 +317,37 @@ public class Main {
     boolean x = false;
     for (int i = 0; !(x = i >= 1); i++) {
       $noinline$foo(true, i);
+    }
+  }
+
+  /// CHECK-START: void Main.oneBoth(short[], char[]) loop_optimization (before)
+  /// CHECK-DAG: <<One:i\d+>>  IntConstant 1                       loop:none
+  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                 loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi>>,<<One>>] loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi>>,<<One>>] loop:<<Loop>>      outer_loop:none
+  //
+  /// CHECK-START-ARM64: void Main.oneBoth(short[], char[]) loop_optimization (after)
+  /// CHECK-DAG: <<One:i\d+>>  IntConstant 1                        loop:none
+  /// CHECK-DAG: <<Repl:d\d+>> VecReplicateScalar [<<One>>]         loop:none
+  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                  loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG:               VecStore [{{l\d+}},<<Phi>>,<<Repl>>] loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG:               VecStore [{{l\d+}},<<Phi>>,<<Repl>>] loop:<<Loop>>      outer_loop:none
+  //
+  // Bug b/37764324: integral same-length packed types can be mixed freely.
+  private static void oneBoth(short[] a, char[] b) {
+    for (int i = 0; i < Math.min(a.length, b.length); i++) {
+      a[i] = 1;
+      b[i] = 1;
+    }
+  }
+
+  // Bug b/37768917: potential dynamic BCE vs. loop optimizations
+  // case should be deal with correctly (used to DCHECK fail).
+  private static void arrayInTripCount(int[] a, byte[] b, int n) {
+    for (int k = 0; k < n; k++) {
+      for (int i = 0, u = a[0]; i < u; i++) {
+        b[i] += 2;
+      }
     }
   }
 
@@ -390,8 +431,27 @@ public class Main {
     for (int i = 0; i < aa.length; i++) {
       expectEquals(aa[i], bb.charAt(i));
     }
+    String cc = "\u1010\u2020llo world how are y\u3030\u4040";
+    string2Bytes(aa, cc);
+    for (int i = 0; i < aa.length; i++) {
+      expectEquals(aa[i], cc.charAt(i));
+    }
 
     envUsesInCond();
+
+    short[] dd = new short[23];
+    oneBoth(dd, aa);
+    for (int i = 0; i < aa.length; i++) {
+      expectEquals(aa[i], 1);
+      expectEquals(dd[i], 1);
+    }
+
+    xx[0] = 10;
+    byte[] bt = new byte[10];
+    arrayInTripCount(xx, bt, 20);
+    for (int i = 0; i < bt.length; i++) {
+      expectEquals(40, bt[i]);
+    }
 
     System.out.println("passed");
   }

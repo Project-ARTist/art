@@ -16,6 +16,7 @@
 
 #include "code_generator_arm.h"
 
+#include "arch/arm/asm_support_arm.h"
 #include "arch/arm/instruction_set_features_arm.h"
 #include "art_method.h"
 #include "code_generator_utils.h"
@@ -25,6 +26,7 @@
 #include "gc/accounting/card_table.h"
 #include "intrinsics.h"
 #include "intrinsics_arm.h"
+#include "linker/arm/relative_patcher_thumb2.h"
 #include "mirror/array-inl.h"
 #include "mirror/class-inl.h"
 #include "thread.h"
@@ -60,9 +62,44 @@ static constexpr DRegister DTMP = D31;
 
 static constexpr uint32_t kPackedSwitchCompareJumpThreshold = 7;
 
+// Reference load (except object array loads) is using LDR Rt, [Rn, #offset] which can handle
+// offset < 4KiB. For offsets >= 4KiB, the load shall be emitted as two or more instructions.
+// For the Baker read barrier implementation using link-generated thunks we need to split
+// the offset explicitly.
+constexpr uint32_t kReferenceLoadMinFarOffset = 4 * KB;
+
+// Flags controlling the use of link-time generated thunks for Baker read barriers.
+constexpr bool kBakerReadBarrierLinkTimeThunksEnableForFields = true;
+constexpr bool kBakerReadBarrierLinkTimeThunksEnableForArrays = true;
+constexpr bool kBakerReadBarrierLinkTimeThunksEnableForGcRoots = true;
+
+// The reserved entrypoint register for link-time generated thunks.
+const Register kBakerCcEntrypointRegister = R4;
+
 // NOLINT on __ macro to suppress wrong warning/fix (misc-macro-parentheses) from clang-tidy.
 #define __ down_cast<ArmAssembler*>(codegen->GetAssembler())->  // NOLINT
 #define QUICK_ENTRY_POINT(x) QUICK_ENTRYPOINT_OFFSET(kArmPointerSize, x).Int32Value()
+
+static inline void CheckLastTempIsBakerCcEntrypointRegister(HInstruction* instruction) {
+  DCHECK_EQ(static_cast<uint32_t>(kBakerCcEntrypointRegister),
+            linker::Thumb2RelativePatcher::kBakerCcEntrypointRegister);
+  DCHECK_NE(instruction->GetLocations()->GetTempCount(), 0u);
+  DCHECK_EQ(kBakerCcEntrypointRegister,
+            instruction->GetLocations()->GetTemp(
+                instruction->GetLocations()->GetTempCount() - 1u).AsRegister<Register>());
+}
+
+static inline void EmitPlaceholderBne(CodeGeneratorARM* codegen, Label* bne_label) {
+  ScopedForce32Bit force_32bit(down_cast<Thumb2Assembler*>(codegen->GetAssembler()));
+  __ BindTrackedLabel(bne_label);
+  Label placeholder_label;
+  __ b(&placeholder_label, NE);  // Placeholder, patched at link-time.
+  __ Bind(&placeholder_label);
+}
+
+static inline bool CanEmitNarrowLdr(Register rt, Register rn, uint32_t offset) {
+  return ArmAssembler::IsLowRegister(rt) && ArmAssembler::IsLowRegister(rn) && offset < 32u;
+}
 
 static constexpr int kRegListThreshold = 4;
 
@@ -585,8 +622,13 @@ class DeoptimizationSlowPathARM : public SlowPathCodeARM {
   void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
     CodeGeneratorARM* arm_codegen = down_cast<CodeGeneratorARM*>(codegen);
     __ Bind(GetEntryLabel());
+    LocationSummary* locations = instruction_->GetLocations();
+    SaveLiveRegisters(codegen, locations);
+    InvokeRuntimeCallingConvention calling_convention;
+    __ LoadImmediate(calling_convention.GetRegisterAt(0),
+                     static_cast<uint32_t>(instruction_->AsDeoptimize()->GetDeoptimizationKind()));
     arm_codegen->InvokeRuntime(kQuickDeoptimize, instruction_, instruction_->GetDexPc(), this);
-    CheckEntrypointTypes<kQuickDeoptimize, void, void>();
+    CheckEntrypointTypes<kQuickDeoptimize, void, DeoptimizationKind>();
   }
 
   const char* GetDescription() const OVERRIDE { return "DeoptimizationSlowPathARM"; }
@@ -819,7 +861,7 @@ class LoadReferenceWithBakerReadBarrierSlowPathARM : public ReadBarrierMarkSlowP
     // Baker's read barriers, we need to perform the load of
     // mirror::Object::monitor_ *before* the original reference load.
     // This load-load ordering is required by the read barrier.
-    // The fast path/slow path (for Baker's algorithm) should look like:
+    // The slow path (for Baker's algorithm) should look like:
     //
     //   uint32_t rb_state = Lockword(obj->monitor_).ReadBarrierState();
     //   lfence;  // Load fence or artificial data dependency to prevent load-load reordering
@@ -953,6 +995,18 @@ class LoadReferenceWithBakerReadBarrierAndUpdateFieldSlowPathARM
     DCHECK(field_offset.IsRegisterPair()) << field_offset;
 
     __ Bind(GetEntryLabel());
+
+    // The implementation is similar to LoadReferenceWithBakerReadBarrierSlowPathARM's:
+    //
+    //   uint32_t rb_state = Lockword(obj->monitor_).ReadBarrierState();
+    //   lfence;  // Load fence or artificial data dependency to prevent load-load reordering
+    //   HeapReference<mirror::Object> ref = *src;  // Original reference load.
+    //   bool is_gray = (rb_state == ReadBarrier::GrayState());
+    //   if (is_gray) {
+    //     old_ref = ref;
+    //     ref = entrypoint(ref);  // ref = ReadBarrier::Mark(ref);  // Runtime entry point call.
+    //     compareAndSwapObject(obj, field_offset, old_ref, ref);
+    //   }
 
     // /* int32_t */ monitor = obj->monitor_
     uint32_t monitor_offset = mirror::Object::MonitorOffset().Int32Value();
@@ -1955,13 +2009,10 @@ CodeGeneratorARM::CodeGeneratorARM(HGraph* graph,
       uint32_literals_(std::less<uint32_t>(),
                        graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
       pc_relative_dex_cache_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
-      boot_image_string_patches_(StringReferenceValueComparator(),
-                                 graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
       pc_relative_string_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
-      boot_image_type_patches_(TypeReferenceValueComparator(),
-                               graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
       pc_relative_type_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
       type_bss_entry_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
+      baker_read_barrier_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
       jit_string_patches_(StringReferenceValueComparator(),
                           graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
       jit_class_patches_(TypeReferenceValueComparator(),
@@ -2672,7 +2723,10 @@ void InstructionCodeGeneratorARM::VisitIf(HIf* if_instr) {
 void LocationsBuilderARM::VisitDeoptimize(HDeoptimize* deoptimize) {
   LocationSummary* locations = new (GetGraph()->GetArena())
       LocationSummary(deoptimize, LocationSummary::kCallOnSlowPath);
-  locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
+  InvokeRuntimeCallingConvention calling_convention;
+  RegisterSet caller_saves = RegisterSet::Empty();
+  caller_saves.Add(Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
+  locations->SetCustomSlowPathCallerSaves(caller_saves);
   if (IsBooleanValueOrMaterializedCondition(deoptimize->InputAt(0))) {
     locations->SetInAt(0, Location::RequiresRegister());
   }
@@ -3065,6 +3119,15 @@ void LocationsBuilderARM::VisitDoubleConstant(HDoubleConstant* constant) {
 
 void InstructionCodeGeneratorARM::VisitDoubleConstant(HDoubleConstant* constant ATTRIBUTE_UNUSED) {
   // Will be generated at use site.
+}
+
+void LocationsBuilderARM::VisitConstructorFence(HConstructorFence* constructor_fence) {
+  constructor_fence->SetLocations(nullptr);
+}
+
+void InstructionCodeGeneratorARM::VisitConstructorFence(
+    HConstructorFence* constructor_fence ATTRIBUTE_UNUSED) {
+  codegen_->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
 }
 
 void LocationsBuilderARM::VisitMemoryBarrier(HMemoryBarrier* memory_barrier) {
@@ -5272,7 +5335,18 @@ void LocationsBuilderARM::HandleFieldGet(HInstruction* instruction, const FieldI
   } else if (object_field_get_with_read_barrier && kUseBakerReadBarrier) {
     // We need a temporary register for the read barrier marking slow
     // path in CodeGeneratorARM::GenerateFieldLoadWithBakerReadBarrier.
-    locations->AddTemp(Location::RequiresRegister());
+    if (kBakerReadBarrierLinkTimeThunksEnableForFields &&
+        !Runtime::Current()->UseJitCompilation()) {
+      // If link-time thunks for the Baker read barrier are enabled, for AOT
+      // loads we need a temporary only if the offset is too big.
+      if (field_info.GetFieldOffset().Uint32Value() >= kReferenceLoadMinFarOffset) {
+        locations->AddTemp(Location::RequiresRegister());
+      }
+      // And we always need the reserved entrypoint register.
+      locations->AddTemp(Location::RegisterLocation(kBakerCcEntrypointRegister));
+    } else {
+      locations->AddTemp(Location::RequiresRegister());
+    }
   }
 }
 
@@ -5738,11 +5812,35 @@ void LocationsBuilderARM::VisitArrayGet(HArrayGet* instruction) {
         Location::RequiresRegister(),
         object_array_get_with_read_barrier ? Location::kOutputOverlap : Location::kNoOutputOverlap);
   }
-  // We need a temporary register for the read barrier marking slow
-  // path in CodeGeneratorARM::GenerateArrayLoadWithBakerReadBarrier.
-  // Also need for String compression feature.
-  if ((object_array_get_with_read_barrier && kUseBakerReadBarrier)
-      || (mirror::kUseStringCompression && instruction->IsStringCharAt())) {
+  if (object_array_get_with_read_barrier && kUseBakerReadBarrier) {
+    // We need a temporary register for the read barrier marking slow
+    // path in CodeGeneratorARM::GenerateArrayLoadWithBakerReadBarrier.
+    if (kBakerReadBarrierLinkTimeThunksEnableForFields &&
+        !Runtime::Current()->UseJitCompilation() &&
+        instruction->GetIndex()->IsConstant()) {
+      // Array loads with constant index are treated as field loads.
+      // If link-time thunks for the Baker read barrier are enabled, for AOT
+      // constant index loads we need a temporary only if the offset is too big.
+      uint32_t offset = CodeGenerator::GetArrayDataOffset(instruction);
+      uint32_t index = instruction->GetIndex()->AsIntConstant()->GetValue();
+      offset += index << Primitive::ComponentSizeShift(Primitive::kPrimNot);
+      if (offset >= kReferenceLoadMinFarOffset) {
+        locations->AddTemp(Location::RequiresRegister());
+      }
+      // And we always need the reserved entrypoint register.
+      locations->AddTemp(Location::RegisterLocation(kBakerCcEntrypointRegister));
+    } else if (kBakerReadBarrierLinkTimeThunksEnableForArrays &&
+               !Runtime::Current()->UseJitCompilation() &&
+               !instruction->GetIndex()->IsConstant()) {
+      // We need a non-scratch temporary for the array data pointer.
+      locations->AddTemp(Location::RequiresRegister());
+      // And we always need the reserved entrypoint register.
+      locations->AddTemp(Location::RegisterLocation(kBakerCcEntrypointRegister));
+    } else {
+      locations->AddTemp(Location::RequiresRegister());
+    }
+  } else if (mirror::kUseStringCompression && instruction->IsStringCharAt()) {
+    // Also need a temporary for String compression feature.
     locations->AddTemp(Location::RequiresRegister());
   }
 }
@@ -5854,8 +5952,20 @@ void InstructionCodeGeneratorARM::VisitArrayGet(HArrayGet* instruction) {
         Location temp = locations->GetTemp(0);
         // Note that a potential implicit null check is handled in this
         // CodeGeneratorARM::GenerateArrayLoadWithBakerReadBarrier call.
-        codegen_->GenerateArrayLoadWithBakerReadBarrier(
-            instruction, out_loc, obj, data_offset, index, temp, /* needs_null_check */ true);
+        DCHECK(!instruction->CanDoImplicitNullCheckOn(instruction->InputAt(0)));
+        if (index.IsConstant()) {
+          // Array load with a constant index can be treated as a field load.
+          data_offset += helpers::Int32ConstantFrom(index) << Primitive::ComponentSizeShift(type);
+          codegen_->GenerateFieldLoadWithBakerReadBarrier(instruction,
+                                                          out_loc,
+                                                          obj,
+                                                          data_offset,
+                                                          locations->GetTemp(0),
+                                                          /* needs_null_check */ false);
+        } else {
+          codegen_->GenerateArrayLoadWithBakerReadBarrier(
+              instruction, out_loc, obj, data_offset, index, temp, /* needs_null_check */ false);
+        }
       } else {
         Register out = out_loc.AsRegister<Register>();
         if (index.IsConstant()) {
@@ -6260,6 +6370,15 @@ void InstructionCodeGeneratorARM::VisitIntermediateAddress(HIntermediateAddress*
   }
 }
 
+void LocationsBuilderARM::VisitIntermediateAddressIndex(HIntermediateAddressIndex* instruction) {
+  LOG(FATAL) << "Unreachable " << instruction->GetId();
+}
+
+void InstructionCodeGeneratorARM::VisitIntermediateAddressIndex(
+    HIntermediateAddressIndex* instruction) {
+  LOG(FATAL) << "Unreachable " << instruction->GetId();
+}
+
 void LocationsBuilderARM::VisitBoundsCheck(HBoundsCheck* instruction) {
   RegisterSet caller_saves = RegisterSet::Empty();
   InvokeRuntimeCallingConvention calling_convention;
@@ -6630,20 +6749,14 @@ HLoadClass::LoadKind CodeGeneratorARM::GetSupportedLoadClassKind(
       UNREACHABLE();
     case HLoadClass::LoadKind::kReferrersClass:
       break;
-    case HLoadClass::LoadKind::kBootImageLinkTimeAddress:
-      DCHECK(!GetCompilerOptions().GetCompilePic());
-      break;
     case HLoadClass::LoadKind::kBootImageLinkTimePcRelative:
-      DCHECK(GetCompilerOptions().GetCompilePic());
-      break;
-    case HLoadClass::LoadKind::kBootImageAddress:
-      break;
     case HLoadClass::LoadKind::kBssEntry:
       DCHECK(!Runtime::Current()->UseJitCompilation());
       break;
     case HLoadClass::LoadKind::kJitTableAddress:
       DCHECK(Runtime::Current()->UseJitCompilation());
       break;
+    case HLoadClass::LoadKind::kBootImageAddress:
     case HLoadClass::LoadKind::kDexCacheViaMethod:
       break;
   }
@@ -6692,6 +6805,13 @@ void LocationsBuilderARM::VisitLoadClass(HLoadClass* cls) {
       // For non-Baker read barrier we have a temp-clobbering call.
     }
   }
+  if (kUseBakerReadBarrier && kBakerReadBarrierLinkTimeThunksEnableForGcRoots) {
+    if (load_kind == HLoadClass::LoadKind::kBssEntry ||
+        (load_kind == HLoadClass::LoadKind::kReferrersClass &&
+            !Runtime::Current()->UseJitCompilation())) {
+      locations->AddTemp(Location::RegisterLocation(kBakerCcEntrypointRegister));
+    }
+  }
 }
 
 // NO_THREAD_SAFETY_ANALYSIS as we manipulate handles whose internal object we know does not
@@ -6723,13 +6843,6 @@ void InstructionCodeGeneratorARM::VisitLoadClass(HLoadClass* cls) NO_THREAD_SAFE
                               current_method,
                               ArtMethod::DeclaringClassOffset().Int32Value(),
                               read_barrier_option);
-      break;
-    }
-    case HLoadClass::LoadKind::kBootImageLinkTimeAddress: {
-      DCHECK(codegen_->GetCompilerOptions().IsBootImage());
-      DCHECK_EQ(read_barrier_option, kWithoutReadBarrier);
-      __ LoadLiteral(out, codegen_->DeduplicateBootImageTypeLiteral(cls->GetDexFile(),
-                                                                    cls->GetTypeIndex()));
       break;
     }
     case HLoadClass::LoadKind::kBootImageLinkTimePcRelative: {
@@ -6831,20 +6944,14 @@ void InstructionCodeGeneratorARM::GenerateClassInitializationCheck(
 HLoadString::LoadKind CodeGeneratorARM::GetSupportedLoadStringKind(
     HLoadString::LoadKind desired_string_load_kind) {
   switch (desired_string_load_kind) {
-    case HLoadString::LoadKind::kBootImageLinkTimeAddress:
-      DCHECK(!GetCompilerOptions().GetCompilePic());
-      break;
     case HLoadString::LoadKind::kBootImageLinkTimePcRelative:
-      DCHECK(GetCompilerOptions().GetCompilePic());
-      break;
-    case HLoadString::LoadKind::kBootImageAddress:
-      break;
     case HLoadString::LoadKind::kBssEntry:
       DCHECK(!Runtime::Current()->UseJitCompilation());
       break;
     case HLoadString::LoadKind::kJitTableAddress:
       DCHECK(Runtime::Current()->UseJitCompilation());
       break;
+    case HLoadString::LoadKind::kBootImageAddress:
     case HLoadString::LoadKind::kDexCacheViaMethod:
       break;
   }
@@ -6871,6 +6978,9 @@ void LocationsBuilderARM::VisitLoadString(HLoadString* load) {
         // TODO: Add GetReturnLocation() to the calling convention so that we can DCHECK()
         // that the the kPrimNot result register is the same as the first argument register.
         locations->SetCustomSlowPathCallerSaves(caller_saves);
+        if (kUseBakerReadBarrier && kBakerReadBarrierLinkTimeThunksEnableForGcRoots) {
+          locations->AddTemp(Location::RegisterLocation(kBakerCcEntrypointRegister));
+        }
       } else {
         // For non-Baker read barrier we have a temp-clobbering call.
       }
@@ -6887,12 +6997,6 @@ void InstructionCodeGeneratorARM::VisitLoadString(HLoadString* load) NO_THREAD_S
   HLoadString::LoadKind load_kind = load->GetLoadKind();
 
   switch (load_kind) {
-    case HLoadString::LoadKind::kBootImageLinkTimeAddress: {
-      DCHECK(codegen_->GetCompilerOptions().IsBootImage());
-      __ LoadLiteral(out, codegen_->DeduplicateBootImageStringLiteral(load->GetDexFile(),
-                                                                      load->GetStringIndex()));
-      return;  // No dex cache slow path.
-    }
     case HLoadString::LoadKind::kBootImageLinkTimePcRelative: {
       DCHECK(codegen_->GetCompilerOptions().IsBootImage());
       CodeGeneratorARM::PcRelativePatchInfo* labels =
@@ -7041,6 +7145,9 @@ void LocationsBuilderARM::VisitInstanceOf(HInstanceOf* instruction) {
   // Note that TypeCheckSlowPathARM uses this register too.
   locations->SetOut(Location::RequiresRegister(), Location::kOutputOverlap);
   locations->AddRegisterTemps(NumberOfInstanceOfTemps(type_check_kind));
+  if (kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
+    codegen_->MaybeAddBakerCcEntrypointTempForFields(locations);
+  }
 }
 
 void InstructionCodeGeneratorARM::VisitInstanceOf(HInstanceOf* instruction) {
@@ -7914,48 +8021,96 @@ void InstructionCodeGeneratorARM::GenerateGcRootFieldLoad(HInstruction* instruct
     if (kUseBakerReadBarrier) {
       // Fast path implementation of art::ReadBarrier::BarrierForRoot when
       // Baker's read barrier are used.
-      //
-      // Note that we do not actually check the value of
-      // `GetIsGcMarking()` to decide whether to mark the loaded GC
-      // root or not.  Instead, we load into `temp` the read barrier
-      // mark entry point corresponding to register `root`. If `temp`
-      // is null, it means that `GetIsGcMarking()` is false, and vice
-      // versa.
-      //
-      //   temp = Thread::Current()->pReadBarrierMarkReg ## root.reg()
-      //   GcRoot<mirror::Object> root = *(obj+offset);  // Original reference load.
-      //   if (temp != nullptr) {  // <=> Thread::Current()->GetIsGcMarking()
-      //     // Slow path.
-      //     root = temp(root);  // root = ReadBarrier::Mark(root);  // Runtime entry point call.
-      //   }
+      if (kBakerReadBarrierLinkTimeThunksEnableForGcRoots &&
+          !Runtime::Current()->UseJitCompilation()) {
+        // Note that we do not actually check the value of `GetIsGcMarking()`
+        // to decide whether to mark the loaded GC root or not.  Instead, we
+        // load into `temp` (actually kBakerCcEntrypointRegister) the read
+        // barrier mark introspection entrypoint. If `temp` is null, it means
+        // that `GetIsGcMarking()` is false, and vice versa.
+        //
+        // We use link-time generated thunks for the slow path. That thunk
+        // checks the reference and jumps to the entrypoint if needed.
+        //
+        //     temp = Thread::Current()->pReadBarrierMarkIntrospection
+        //     lr = &return_address;
+        //     GcRoot<mirror::Object> root = *(obj+offset);  // Original reference load.
+        //     if (temp != nullptr) {
+        //        goto gc_root_thunk<root_reg>(lr)
+        //     }
+        //   return_address:
 
-      // Slow path marking the GC root `root`. The entrypoint will already be loaded in `temp`.
-      Location temp = Location::RegisterLocation(LR);
-      SlowPathCodeARM* slow_path = new (GetGraph()->GetArena()) ReadBarrierMarkSlowPathARM(
-          instruction, root, /* entrypoint */ temp);
-      codegen_->AddSlowPath(slow_path);
+        CheckLastTempIsBakerCcEntrypointRegister(instruction);
+        bool narrow = CanEmitNarrowLdr(root_reg, obj, offset);
+        uint32_t custom_data =
+            linker::Thumb2RelativePatcher::EncodeBakerReadBarrierGcRootData(root_reg, narrow);
+        Label* bne_label = codegen_->NewBakerReadBarrierPatch(custom_data);
 
-      // temp = Thread::Current()->pReadBarrierMarkReg ## root.reg()
-      const int32_t entry_point_offset =
-          CodeGenerator::GetReadBarrierMarkEntryPointsOffset<kArmPointerSize>(root.reg());
-      // Loading the entrypoint does not require a load acquire since it is only changed when
-      // threads are suspended or running a checkpoint.
-      __ LoadFromOffset(kLoadWord, temp.AsRegister<Register>(), TR, entry_point_offset);
+        // entrypoint_reg =
+        //     Thread::Current()->pReadBarrierMarkReg12, i.e. pReadBarrierMarkIntrospection.
+        DCHECK_EQ(IP, 12);
+        const int32_t entry_point_offset =
+            CodeGenerator::GetReadBarrierMarkEntryPointsOffset<kArmPointerSize>(IP);
+        __ LoadFromOffset(kLoadWord, kBakerCcEntrypointRegister, TR, entry_point_offset);
 
-      // /* GcRoot<mirror::Object> */ root = *(obj + offset)
-      __ LoadFromOffset(kLoadWord, root_reg, obj, offset);
-      static_assert(
-          sizeof(mirror::CompressedReference<mirror::Object>) == sizeof(GcRoot<mirror::Object>),
-          "art::mirror::CompressedReference<mirror::Object> and art::GcRoot<mirror::Object> "
-          "have different sizes.");
-      static_assert(sizeof(mirror::CompressedReference<mirror::Object>) == sizeof(int32_t),
-                    "art::mirror::CompressedReference<mirror::Object> and int32_t "
-                    "have different sizes.");
+        Label return_address;
+        __ AdrCode(LR, &return_address);
+        __ CmpConstant(kBakerCcEntrypointRegister, 0);
+        // Currently the offset is always within range. If that changes,
+        // we shall have to split the load the same way as for fields.
+        DCHECK_LT(offset, kReferenceLoadMinFarOffset);
+        DCHECK(!down_cast<Thumb2Assembler*>(GetAssembler())->IsForced32Bit());
+        ScopedForce32Bit maybe_force_32bit(down_cast<Thumb2Assembler*>(GetAssembler()), !narrow);
+        int old_position = GetAssembler()->GetBuffer()->GetPosition();
+        __ LoadFromOffset(kLoadWord, root_reg, obj, offset);
+        EmitPlaceholderBne(codegen_, bne_label);
+        __ Bind(&return_address);
+        DCHECK_EQ(old_position - GetAssembler()->GetBuffer()->GetPosition(),
+                  narrow ? BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_NARROW_OFFSET
+                         : BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_WIDE_OFFSET);
+      } else {
+        // Note that we do not actually check the value of
+        // `GetIsGcMarking()` to decide whether to mark the loaded GC
+        // root or not.  Instead, we load into `temp` the read barrier
+        // mark entry point corresponding to register `root`. If `temp`
+        // is null, it means that `GetIsGcMarking()` is false, and vice
+        // versa.
+        //
+        //   temp = Thread::Current()->pReadBarrierMarkReg ## root.reg()
+        //   GcRoot<mirror::Object> root = *(obj+offset);  // Original reference load.
+        //   if (temp != nullptr) {  // <=> Thread::Current()->GetIsGcMarking()
+        //     // Slow path.
+        //     root = temp(root);  // root = ReadBarrier::Mark(root);  // Runtime entry point call.
+        //   }
 
-      // The entrypoint is null when the GC is not marking, this prevents one load compared to
-      // checking GetIsGcMarking.
-      __ CompareAndBranchIfNonZero(temp.AsRegister<Register>(), slow_path->GetEntryLabel());
-      __ Bind(slow_path->GetExitLabel());
+        // Slow path marking the GC root `root`. The entrypoint will already be loaded in `temp`.
+        Location temp = Location::RegisterLocation(LR);
+        SlowPathCodeARM* slow_path = new (GetGraph()->GetArena()) ReadBarrierMarkSlowPathARM(
+            instruction, root, /* entrypoint */ temp);
+        codegen_->AddSlowPath(slow_path);
+
+        // temp = Thread::Current()->pReadBarrierMarkReg ## root.reg()
+        const int32_t entry_point_offset =
+            CodeGenerator::GetReadBarrierMarkEntryPointsOffset<kArmPointerSize>(root.reg());
+        // Loading the entrypoint does not require a load acquire since it is only changed when
+        // threads are suspended or running a checkpoint.
+        __ LoadFromOffset(kLoadWord, temp.AsRegister<Register>(), TR, entry_point_offset);
+
+        // /* GcRoot<mirror::Object> */ root = *(obj + offset)
+        __ LoadFromOffset(kLoadWord, root_reg, obj, offset);
+        static_assert(
+            sizeof(mirror::CompressedReference<mirror::Object>) == sizeof(GcRoot<mirror::Object>),
+            "art::mirror::CompressedReference<mirror::Object> and art::GcRoot<mirror::Object> "
+            "have different sizes.");
+        static_assert(sizeof(mirror::CompressedReference<mirror::Object>) == sizeof(int32_t),
+                      "art::mirror::CompressedReference<mirror::Object> and int32_t "
+                      "have different sizes.");
+
+        // The entrypoint is null when the GC is not marking, this prevents one load compared to
+        // checking GetIsGcMarking.
+        __ CompareAndBranchIfNonZero(temp.AsRegister<Register>(), slow_path->GetEntryLabel());
+        __ Bind(slow_path->GetExitLabel());
+      }
     } else {
       // GC root loaded through a slow path for read barriers other
       // than Baker's.
@@ -7973,6 +8128,16 @@ void InstructionCodeGeneratorARM::GenerateGcRootFieldLoad(HInstruction* instruct
   }
 }
 
+void CodeGeneratorARM::MaybeAddBakerCcEntrypointTempForFields(LocationSummary* locations) {
+  DCHECK(kEmitCompilerReadBarrier);
+  DCHECK(kUseBakerReadBarrier);
+  if (kBakerReadBarrierLinkTimeThunksEnableForFields) {
+    if (!Runtime::Current()->UseJitCompilation()) {
+      locations->AddTemp(Location::RegisterLocation(kBakerCcEntrypointRegister));
+    }
+  }
+}
+
 void CodeGeneratorARM::GenerateFieldLoadWithBakerReadBarrier(HInstruction* instruction,
                                                              Location ref,
                                                              Register obj,
@@ -7981,6 +8146,76 @@ void CodeGeneratorARM::GenerateFieldLoadWithBakerReadBarrier(HInstruction* instr
                                                              bool needs_null_check) {
   DCHECK(kEmitCompilerReadBarrier);
   DCHECK(kUseBakerReadBarrier);
+
+  if (kBakerReadBarrierLinkTimeThunksEnableForFields &&
+      !Runtime::Current()->UseJitCompilation()) {
+    // Note that we do not actually check the value of `GetIsGcMarking()`
+    // to decide whether to mark the loaded reference or not.  Instead, we
+    // load into `temp` (actually kBakerCcEntrypointRegister) the read
+    // barrier mark introspection entrypoint. If `temp` is null, it means
+    // that `GetIsGcMarking()` is false, and vice versa.
+    //
+    // We use link-time generated thunks for the slow path. That thunk checks
+    // the holder and jumps to the entrypoint if needed. If the holder is not
+    // gray, it creates a fake dependency and returns to the LDR instruction.
+    //
+    //     temp = Thread::Current()->pReadBarrierMarkIntrospection
+    //     lr = &gray_return_address;
+    //     if (temp != nullptr) {
+    //        goto field_thunk<holder_reg, base_reg>(lr)
+    //     }
+    //   not_gray_return_address:
+    //     // Original reference load. If the offset is too large to fit
+    //     // into LDR, we use an adjusted base register here.
+    //     HeapReference<mirror::Object> reference = *(obj+offset);
+    //   gray_return_address:
+
+    DCHECK_ALIGNED(offset, sizeof(mirror::HeapReference<mirror::Object>));
+    Register ref_reg = ref.AsRegister<Register>();
+    bool narrow = CanEmitNarrowLdr(ref_reg, obj, offset);
+    Register base = obj;
+    if (offset >= kReferenceLoadMinFarOffset) {
+      base = temp.AsRegister<Register>();
+      DCHECK_NE(base, kBakerCcEntrypointRegister);
+      static_assert(IsPowerOfTwo(kReferenceLoadMinFarOffset), "Expecting a power of 2.");
+      __ AddConstant(base, obj, offset & ~(kReferenceLoadMinFarOffset - 1u));
+      offset &= (kReferenceLoadMinFarOffset - 1u);
+      // Use narrow LDR only for small offsets. Generating narrow encoding LDR for the large
+      // offsets with `(offset & (kReferenceLoadMinFarOffset - 1u)) < 32u` would most likely
+      // increase the overall code size when taking the generated thunks into account.
+      DCHECK(!narrow);
+    }
+    CheckLastTempIsBakerCcEntrypointRegister(instruction);
+    uint32_t custom_data =
+        linker::Thumb2RelativePatcher::EncodeBakerReadBarrierFieldData(base, obj, narrow);
+    Label* bne_label = NewBakerReadBarrierPatch(custom_data);
+
+    // entrypoint_reg =
+    //     Thread::Current()->pReadBarrierMarkReg12, i.e. pReadBarrierMarkIntrospection.
+    DCHECK_EQ(IP, 12);
+    const int32_t entry_point_offset =
+        CodeGenerator::GetReadBarrierMarkEntryPointsOffset<kArmPointerSize>(IP);
+    __ LoadFromOffset(kLoadWord, kBakerCcEntrypointRegister, TR, entry_point_offset);
+
+    Label return_address;
+    __ AdrCode(LR, &return_address);
+    __ CmpConstant(kBakerCcEntrypointRegister, 0);
+    EmitPlaceholderBne(this, bne_label);
+    DCHECK_LT(offset, kReferenceLoadMinFarOffset);
+    DCHECK(!down_cast<Thumb2Assembler*>(GetAssembler())->IsForced32Bit());
+    ScopedForce32Bit maybe_force_32bit(down_cast<Thumb2Assembler*>(GetAssembler()), !narrow);
+    int old_position = GetAssembler()->GetBuffer()->GetPosition();
+    __ LoadFromOffset(kLoadWord, ref_reg, base, offset);
+    if (needs_null_check) {
+      MaybeRecordImplicitNullCheck(instruction);
+    }
+    GetAssembler()->MaybeUnpoisonHeapReference(ref_reg);
+    __ Bind(&return_address);
+    DCHECK_EQ(old_position - GetAssembler()->GetBuffer()->GetPosition(),
+              narrow ? BAKER_MARK_INTROSPECTION_FIELD_LDR_NARROW_OFFSET
+                     : BAKER_MARK_INTROSPECTION_FIELD_LDR_WIDE_OFFSET);
+    return;
+  }
 
   // /* HeapReference<Object> */ ref = *(obj + offset)
   Location no_index = Location::NoLocation();
@@ -8002,9 +8237,67 @@ void CodeGeneratorARM::GenerateArrayLoadWithBakerReadBarrier(HInstruction* instr
   static_assert(
       sizeof(mirror::HeapReference<mirror::Object>) == sizeof(int32_t),
       "art::mirror::HeapReference<art::mirror::Object> and int32_t have different sizes.");
+  ScaleFactor scale_factor = TIMES_4;
+
+  if (kBakerReadBarrierLinkTimeThunksEnableForArrays &&
+      !Runtime::Current()->UseJitCompilation()) {
+    // Note that we do not actually check the value of `GetIsGcMarking()`
+    // to decide whether to mark the loaded reference or not.  Instead, we
+    // load into `temp` (actually kBakerCcEntrypointRegister) the read
+    // barrier mark introspection entrypoint. If `temp` is null, it means
+    // that `GetIsGcMarking()` is false, and vice versa.
+    //
+    // We use link-time generated thunks for the slow path. That thunk checks
+    // the holder and jumps to the entrypoint if needed. If the holder is not
+    // gray, it creates a fake dependency and returns to the LDR instruction.
+    //
+    //     temp = Thread::Current()->pReadBarrierMarkIntrospection
+    //     lr = &gray_return_address;
+    //     if (temp != nullptr) {
+    //        goto field_thunk<holder_reg, base_reg>(lr)
+    //     }
+    //   not_gray_return_address:
+    //     // Original reference load. If the offset is too large to fit
+    //     // into LDR, we use an adjusted base register here.
+    //     HeapReference<mirror::Object> reference = data[index];
+    //   gray_return_address:
+
+    DCHECK(index.IsValid());
+    Register index_reg = index.AsRegister<Register>();
+    Register ref_reg = ref.AsRegister<Register>();
+    Register data_reg = temp.AsRegister<Register>();
+    DCHECK_NE(data_reg, kBakerCcEntrypointRegister);
+
+    CheckLastTempIsBakerCcEntrypointRegister(instruction);
+    uint32_t custom_data =
+        linker::Thumb2RelativePatcher::EncodeBakerReadBarrierArrayData(data_reg);
+    Label* bne_label = NewBakerReadBarrierPatch(custom_data);
+
+    // entrypoint_reg =
+    //     Thread::Current()->pReadBarrierMarkReg16, i.e. pReadBarrierMarkIntrospection.
+    DCHECK_EQ(IP, 12);
+    const int32_t entry_point_offset =
+        CodeGenerator::GetReadBarrierMarkEntryPointsOffset<kArmPointerSize>(IP);
+    __ LoadFromOffset(kLoadWord, kBakerCcEntrypointRegister, TR, entry_point_offset);
+    __ AddConstant(data_reg, obj, data_offset);
+
+    Label return_address;
+    __ AdrCode(LR, &return_address);
+    __ CmpConstant(kBakerCcEntrypointRegister, 0);
+    EmitPlaceholderBne(this, bne_label);
+    ScopedForce32Bit maybe_force_32bit(down_cast<Thumb2Assembler*>(GetAssembler()));
+    int old_position = GetAssembler()->GetBuffer()->GetPosition();
+    __ ldr(ref_reg, Address(data_reg, index_reg, LSL, scale_factor));
+    DCHECK(!needs_null_check);  // The thunk cannot handle the null check.
+    GetAssembler()->MaybeUnpoisonHeapReference(ref_reg);
+    __ Bind(&return_address);
+    DCHECK_EQ(old_position - GetAssembler()->GetBuffer()->GetPosition(),
+              BAKER_MARK_INTROSPECTION_ARRAY_LDR_OFFSET);
+    return;
+  }
+
   // /* HeapReference<Object> */ ref =
   //     *(obj + data_offset + index * sizeof(HeapReference<Object>))
-  ScaleFactor scale_factor = TIMES_4;
   GenerateReferenceLoadWithBakerReadBarrier(
       instruction, ref, obj, data_offset, index, scale_factor, temp, needs_null_check);
 }
@@ -8016,9 +8309,7 @@ void CodeGeneratorARM::GenerateReferenceLoadWithBakerReadBarrier(HInstruction* i
                                                                  Location index,
                                                                  ScaleFactor scale_factor,
                                                                  Location temp,
-                                                                 bool needs_null_check,
-                                                                 bool always_update_field,
-                                                                 Register* temp2) {
+                                                                 bool needs_null_check) {
   DCHECK(kEmitCompilerReadBarrier);
   DCHECK(kUseBakerReadBarrier);
 
@@ -8027,6 +8318,73 @@ void CodeGeneratorARM::GenerateReferenceLoadWithBakerReadBarrier(HInstruction* i
   // Then, in the slow path, check the gray bit in the lock word of
   // the reference's holder (`obj`) to decide whether to mark `ref` or
   // not.
+  //
+  // Note that we do not actually check the value of `GetIsGcMarking()`;
+  // instead, we load into `temp2` the read barrier mark entry point
+  // corresponding to register `ref`. If `temp2` is null, it means
+  // that `GetIsGcMarking()` is false, and vice versa.
+  //
+  //   temp2 = Thread::Current()->pReadBarrierMarkReg ## root.reg()
+  //   if (temp2 != nullptr) {  // <=> Thread::Current()->GetIsGcMarking()
+  //     // Slow path.
+  //     uint32_t rb_state = Lockword(obj->monitor_).ReadBarrierState();
+  //     lfence;  // Load fence or artificial data dependency to prevent load-load reordering
+  //     HeapReference<mirror::Object> ref = *src;  // Original reference load.
+  //     bool is_gray = (rb_state == ReadBarrier::GrayState());
+  //     if (is_gray) {
+  //       ref = temp2(ref);  // ref = ReadBarrier::Mark(ref);  // Runtime entry point call.
+  //     }
+  //   } else {
+  //     HeapReference<mirror::Object> ref = *src;  // Original reference load.
+  //   }
+
+  Register temp_reg = temp.AsRegister<Register>();
+
+  // Slow path marking the object `ref` when the GC is marking. The
+  // entrypoint will already be loaded in `temp2`.
+  Location temp2 = Location::RegisterLocation(LR);
+  SlowPathCodeARM* slow_path =
+      new (GetGraph()->GetArena()) LoadReferenceWithBakerReadBarrierSlowPathARM(
+          instruction,
+          ref,
+          obj,
+          offset,
+          index,
+          scale_factor,
+          needs_null_check,
+          temp_reg,
+          /* entrypoint */ temp2);
+  AddSlowPath(slow_path);
+
+  // temp2 = Thread::Current()->pReadBarrierMarkReg ## ref.reg()
+  const int32_t entry_point_offset =
+      CodeGenerator::GetReadBarrierMarkEntryPointsOffset<kArmPointerSize>(ref.reg());
+  // Loading the entrypoint does not require a load acquire since it is only changed when
+  // threads are suspended or running a checkpoint.
+  __ LoadFromOffset(kLoadWord, temp2.AsRegister<Register>(), TR, entry_point_offset);
+  // The entrypoint is null when the GC is not marking, this prevents one load compared to
+  // checking GetIsGcMarking.
+  __ CompareAndBranchIfNonZero(temp2.AsRegister<Register>(), slow_path->GetEntryLabel());
+  // Fast path: the GC is not marking: just load the reference.
+  GenerateRawReferenceLoad(instruction, ref, obj, offset, index, scale_factor, needs_null_check);
+  __ Bind(slow_path->GetExitLabel());
+}
+
+void CodeGeneratorARM::UpdateReferenceFieldWithBakerReadBarrier(HInstruction* instruction,
+                                                                Location ref,
+                                                                Register obj,
+                                                                Location field_offset,
+                                                                Location temp,
+                                                                bool needs_null_check,
+                                                                Register temp2) {
+  DCHECK(kEmitCompilerReadBarrier);
+  DCHECK(kUseBakerReadBarrier);
+
+  // Query `art::Thread::Current()->GetIsGcMarking()` to decide
+  // whether we need to enter the slow path to update the reference
+  // field within `obj`.  Then, in the slow path, check the gray bit
+  // in the lock word of the reference's holder (`obj`) to decide
+  // whether to mark `ref` and update the field or not.
   //
   // Note that we do not actually check the value of `GetIsGcMarking()`;
   // instead, we load into `temp3` the read barrier mark entry point
@@ -8041,52 +8399,30 @@ void CodeGeneratorARM::GenerateReferenceLoadWithBakerReadBarrier(HInstruction* i
   //     HeapReference<mirror::Object> ref = *src;  // Original reference load.
   //     bool is_gray = (rb_state == ReadBarrier::GrayState());
   //     if (is_gray) {
+  //       old_ref = ref;
   //       ref = temp3(ref);  // ref = ReadBarrier::Mark(ref);  // Runtime entry point call.
+  //       compareAndSwapObject(obj, field_offset, old_ref, ref);
   //     }
-  //   } else {
-  //     HeapReference<mirror::Object> ref = *src;  // Original reference load.
   //   }
 
   Register temp_reg = temp.AsRegister<Register>();
 
-  // Slow path marking the object `ref` when the GC is marking. The
-  // entrypoint will already be loaded in `temp3`.
+  // Slow path updating the object reference at address `obj +
+  // field_offset` when the GC is marking. The entrypoint will already
+  // be loaded in `temp3`.
   Location temp3 = Location::RegisterLocation(LR);
-  SlowPathCodeARM* slow_path;
-  if (always_update_field) {
-    DCHECK(temp2 != nullptr);
-    // LoadReferenceWithBakerReadBarrierAndUpdateFieldSlowPathARM only
-    // supports address of the form `obj + field_offset`, where `obj`
-    // is a register and `field_offset` is a register pair (of which
-    // only the lower half is used). Thus `offset` and `scale_factor`
-    // above are expected to be null in this code path.
-    DCHECK_EQ(offset, 0u);
-    DCHECK_EQ(scale_factor, ScaleFactor::TIMES_1);
-    Location field_offset = index;
-    slow_path =
-        new (GetGraph()->GetArena()) LoadReferenceWithBakerReadBarrierAndUpdateFieldSlowPathARM(
-            instruction,
-            ref,
-            obj,
-            offset,
-            /* index */ field_offset,
-            scale_factor,
-            needs_null_check,
-            temp_reg,
-            *temp2,
-            /* entrypoint */ temp3);
-  } else {
-    slow_path = new (GetGraph()->GetArena()) LoadReferenceWithBakerReadBarrierSlowPathARM(
-        instruction,
-        ref,
-        obj,
-        offset,
-        index,
-        scale_factor,
-        needs_null_check,
-        temp_reg,
-        /* entrypoint */ temp3);
-  }
+  SlowPathCodeARM* slow_path =
+      new (GetGraph()->GetArena()) LoadReferenceWithBakerReadBarrierAndUpdateFieldSlowPathARM(
+          instruction,
+          ref,
+          obj,
+          /* offset */ 0u,
+          /* index */ field_offset,
+          /* scale_factor */ ScaleFactor::TIMES_1,
+          needs_null_check,
+          temp_reg,
+          temp2,
+          /* entrypoint */ temp3);
   AddSlowPath(slow_path);
 
   // temp3 = Thread::Current()->pReadBarrierMarkReg ## ref.reg()
@@ -8098,8 +8434,8 @@ void CodeGeneratorARM::GenerateReferenceLoadWithBakerReadBarrier(HInstruction* i
   // The entrypoint is null when the GC is not marking, this prevents one load compared to
   // checking GetIsGcMarking.
   __ CompareAndBranchIfNonZero(temp3.AsRegister<Register>(), slow_path->GetEntryLabel());
-  // Fast path: just load the reference.
-  GenerateRawReferenceLoad(instruction, ref, obj, offset, index, scale_factor, needs_null_check);
+  // Fast path: the GC is not marking: nothing to do (the field is
+  // up-to-date, and we don't need to load the reference).
   __ Bind(slow_path->GetExitLabel());
 }
 
@@ -8370,18 +8706,9 @@ CodeGeneratorARM::PcRelativePatchInfo* CodeGeneratorARM::NewPcRelativePatch(
   return &patches->back();
 }
 
-Literal* CodeGeneratorARM::DeduplicateBootImageStringLiteral(const DexFile& dex_file,
-                                                             dex::StringIndex string_index) {
-  return boot_image_string_patches_.GetOrCreate(
-      StringReference(&dex_file, string_index),
-      [this]() { return __ NewLiteral<uint32_t>(/* placeholder */ 0u); });
-}
-
-Literal* CodeGeneratorARM::DeduplicateBootImageTypeLiteral(const DexFile& dex_file,
-                                                           dex::TypeIndex type_index) {
-  return boot_image_type_patches_.GetOrCreate(
-      TypeReference(&dex_file, type_index),
-      [this]() { return __ NewLiteral<uint32_t>(/* placeholder */ 0u); });
+Label* CodeGeneratorARM::NewBakerReadBarrierPatch(uint32_t custom_data) {
+  baker_read_barrier_patches_.emplace_back(custom_data);
+  return &baker_read_barrier_patches_.back().label;
 }
 
 Literal* CodeGeneratorARM::DeduplicateBootImageAddressLiteral(uint32_t address) {
@@ -8432,23 +8759,13 @@ void CodeGeneratorARM::EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_patche
   DCHECK(linker_patches->empty());
   size_t size =
       /* MOVW+MOVT for each entry */ 2u * pc_relative_dex_cache_patches_.size() +
-      boot_image_string_patches_.size() +
       /* MOVW+MOVT for each entry */ 2u * pc_relative_string_patches_.size() +
-      boot_image_type_patches_.size() +
       /* MOVW+MOVT for each entry */ 2u * pc_relative_type_patches_.size() +
-      /* MOVW+MOVT for each entry */ 2u * type_bss_entry_patches_.size();
+      /* MOVW+MOVT for each entry */ 2u * type_bss_entry_patches_.size() +
+      baker_read_barrier_patches_.size();
   linker_patches->reserve(size);
   EmitPcRelativeLinkerPatches<LinkerPatch::DexCacheArrayPatch>(pc_relative_dex_cache_patches_,
                                                                linker_patches);
-  for (const auto& entry : boot_image_string_patches_) {
-    const StringReference& target_string = entry.first;
-    Literal* literal = entry.second;
-    DCHECK(literal->GetLabel()->IsBound());
-    uint32_t literal_offset = literal->GetLabel()->Position();
-    linker_patches->push_back(LinkerPatch::StringPatch(literal_offset,
-                                                       target_string.dex_file,
-                                                       target_string.string_index.index_));
-  }
   if (!GetCompilerOptions().IsBootImage()) {
     DCHECK(pc_relative_type_patches_.empty());
     EmitPcRelativeLinkerPatches<LinkerPatch::StringBssEntryPatch>(pc_relative_string_patches_,
@@ -8461,14 +8778,9 @@ void CodeGeneratorARM::EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_patche
   }
   EmitPcRelativeLinkerPatches<LinkerPatch::TypeBssEntryPatch>(type_bss_entry_patches_,
                                                               linker_patches);
-  for (const auto& entry : boot_image_type_patches_) {
-    const TypeReference& target_type = entry.first;
-    Literal* literal = entry.second;
-    DCHECK(literal->GetLabel()->IsBound());
-    uint32_t literal_offset = literal->GetLabel()->Position();
-    linker_patches->push_back(LinkerPatch::TypePatch(literal_offset,
-                                                     target_type.dex_file,
-                                                     target_type.type_index.index_));
+  for (const BakerReadBarrierPatchInfo& info : baker_read_barrier_patches_) {
+    linker_patches->push_back(LinkerPatch::BakerReadBarrierBranchPatch(info.label.Position(),
+                                                                       info.custom_data));
   }
   DCHECK_EQ(size, linker_patches->size());
 }
@@ -8477,13 +8789,6 @@ Literal* CodeGeneratorARM::DeduplicateUint32Literal(uint32_t value, Uint32ToLite
   return map->GetOrCreate(
       value,
       [this, value]() { return __ NewLiteral<uint32_t>(value); });
-}
-
-Literal* CodeGeneratorARM::DeduplicateMethodLiteral(MethodReference target_method,
-                                                    MethodToLiteralMap* map) {
-  return map->GetOrCreate(
-      target_method,
-      [this]() { return __ NewLiteral<uint32_t>(/* placeholder */ 0u); });
 }
 
 void LocationsBuilderARM::VisitMultiplyAccumulate(HMultiplyAccumulate* instr) {
@@ -8701,14 +9006,20 @@ static void PatchJitRootUse(uint8_t* code,
 
 void CodeGeneratorARM::EmitJitRootPatches(uint8_t* code, const uint8_t* roots_data) {
   for (const auto& entry : jit_string_patches_) {
-    const auto& it = jit_string_roots_.find(entry.first);
+    const StringReference& string_reference = entry.first;
+    Literal* table_entry_literal = entry.second;
+    const auto it = jit_string_roots_.find(string_reference);
     DCHECK(it != jit_string_roots_.end());
-    PatchJitRootUse(code, roots_data, entry.second, it->second);
+    uint64_t index_in_table = it->second;
+    PatchJitRootUse(code, roots_data, table_entry_literal, index_in_table);
   }
   for (const auto& entry : jit_class_patches_) {
-    const auto& it = jit_class_roots_.find(entry.first);
+    const TypeReference& type_reference = entry.first;
+    Literal* table_entry_literal = entry.second;
+    const auto it = jit_class_roots_.find(type_reference);
     DCHECK(it != jit_class_roots_.end());
-    PatchJitRootUse(code, roots_data, entry.second, it->second);
+    uint64_t index_in_table = it->second;
+    PatchJitRootUse(code, roots_data, table_entry_literal, index_in_table);
   }
 }
 

@@ -17,6 +17,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "arch/arm/asm_support_arm.h"
 #include "entrypoints/jni/jni_entrypoints.h"
 #include "entrypoints/quick/quick_alloc_entrypoints.h"
 #include "entrypoints/quick/quick_default_externs.h"
@@ -51,6 +52,13 @@ extern "C" mirror::Object* art_quick_read_barrier_mark_reg10(mirror::Object*);
 extern "C" mirror::Object* art_quick_read_barrier_mark_reg11(mirror::Object*);
 extern "C" mirror::Object* art_quick_read_barrier_mark_reg12(mirror::Object*);
 
+extern "C" mirror::Object* art_quick_read_barrier_mark_introspection(mirror::Object*);
+extern "C" mirror::Object* art_quick_read_barrier_mark_introspection_narrow(mirror::Object*);
+extern "C" mirror::Object* art_quick_read_barrier_mark_introspection_arrays(mirror::Object*);
+extern "C" mirror::Object* art_quick_read_barrier_mark_introspection_gc_roots_wide(mirror::Object*);
+extern "C" mirror::Object* art_quick_read_barrier_mark_introspection_gc_roots_narrow(
+    mirror::Object*);
+
 // Used by soft float.
 // Single-precision FP arithmetics.
 extern "C" float fmodf(float a, float b);              // REM_FLOAT[_2ADDR]
@@ -67,19 +75,44 @@ extern "C" int __aeabi_idivmod(int32_t, int32_t);  // [DIV|REM]_INT[_2ADDR|_LIT8
 // Long long arithmetics - REM_LONG[_2ADDR] and DIV_LONG[_2ADDR]
 extern "C" int64_t __aeabi_ldivmod(int64_t, int64_t);
 
-void UpdateReadBarrierEntrypoints(QuickEntryPoints* qpoints, bool is_marking) {
-  qpoints->pReadBarrierMarkReg00 = is_marking ? art_quick_read_barrier_mark_reg00 : nullptr;
-  qpoints->pReadBarrierMarkReg01 = is_marking ? art_quick_read_barrier_mark_reg01 : nullptr;
-  qpoints->pReadBarrierMarkReg02 = is_marking ? art_quick_read_barrier_mark_reg02 : nullptr;
-  qpoints->pReadBarrierMarkReg03 = is_marking ? art_quick_read_barrier_mark_reg03 : nullptr;
-  qpoints->pReadBarrierMarkReg04 = is_marking ? art_quick_read_barrier_mark_reg04 : nullptr;
-  qpoints->pReadBarrierMarkReg05 = is_marking ? art_quick_read_barrier_mark_reg05 : nullptr;
-  qpoints->pReadBarrierMarkReg06 = is_marking ? art_quick_read_barrier_mark_reg06 : nullptr;
-  qpoints->pReadBarrierMarkReg07 = is_marking ? art_quick_read_barrier_mark_reg07 : nullptr;
-  qpoints->pReadBarrierMarkReg08 = is_marking ? art_quick_read_barrier_mark_reg08 : nullptr;
-  qpoints->pReadBarrierMarkReg09 = is_marking ? art_quick_read_barrier_mark_reg09 : nullptr;
-  qpoints->pReadBarrierMarkReg10 = is_marking ? art_quick_read_barrier_mark_reg10 : nullptr;
-  qpoints->pReadBarrierMarkReg11 = is_marking ? art_quick_read_barrier_mark_reg11 : nullptr;
+void UpdateReadBarrierEntrypoints(QuickEntryPoints* qpoints, bool is_active) {
+  qpoints->pReadBarrierMarkReg00 = is_active ? art_quick_read_barrier_mark_reg00 : nullptr;
+  qpoints->pReadBarrierMarkReg01 = is_active ? art_quick_read_barrier_mark_reg01 : nullptr;
+  qpoints->pReadBarrierMarkReg02 = is_active ? art_quick_read_barrier_mark_reg02 : nullptr;
+  qpoints->pReadBarrierMarkReg03 = is_active ? art_quick_read_barrier_mark_reg03 : nullptr;
+  qpoints->pReadBarrierMarkReg04 = is_active ? art_quick_read_barrier_mark_reg04 : nullptr;
+  qpoints->pReadBarrierMarkReg05 = is_active ? art_quick_read_barrier_mark_reg05 : nullptr;
+  qpoints->pReadBarrierMarkReg06 = is_active ? art_quick_read_barrier_mark_reg06 : nullptr;
+  qpoints->pReadBarrierMarkReg07 = is_active ? art_quick_read_barrier_mark_reg07 : nullptr;
+  qpoints->pReadBarrierMarkReg08 = is_active ? art_quick_read_barrier_mark_reg08 : nullptr;
+  qpoints->pReadBarrierMarkReg09 = is_active ? art_quick_read_barrier_mark_reg09 : nullptr;
+  qpoints->pReadBarrierMarkReg10 = is_active ? art_quick_read_barrier_mark_reg10 : nullptr;
+  qpoints->pReadBarrierMarkReg11 = is_active ? art_quick_read_barrier_mark_reg11 : nullptr;
+
+  // For the alignment check, strip the Thumb mode bit.
+  DCHECK_ALIGNED(reinterpret_cast<intptr_t>(art_quick_read_barrier_mark_introspection) - 1u, 256u);
+  // Check the field narrow entrypoint offset from the introspection entrypoint.
+  intptr_t narrow_diff =
+      reinterpret_cast<intptr_t>(art_quick_read_barrier_mark_introspection_narrow) -
+      reinterpret_cast<intptr_t>(art_quick_read_barrier_mark_introspection);
+  DCHECK_EQ(BAKER_MARK_INTROSPECTION_FIELD_LDR_NARROW_ENTRYPOINT_OFFSET, narrow_diff);
+  // Check array switch cases offsets from the introspection entrypoint.
+  intptr_t array_diff =
+      reinterpret_cast<intptr_t>(art_quick_read_barrier_mark_introspection_arrays) -
+      reinterpret_cast<intptr_t>(art_quick_read_barrier_mark_introspection);
+  DCHECK_EQ(BAKER_MARK_INTROSPECTION_ARRAY_SWITCH_OFFSET, array_diff);
+  // Check the GC root entrypoint offsets from the introspection entrypoint.
+  intptr_t gc_roots_wide_diff =
+      reinterpret_cast<intptr_t>(art_quick_read_barrier_mark_introspection_gc_roots_wide) -
+      reinterpret_cast<intptr_t>(art_quick_read_barrier_mark_introspection);
+  DCHECK_EQ(BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_WIDE_ENTRYPOINT_OFFSET, gc_roots_wide_diff);
+  intptr_t gc_roots_narrow_diff =
+      reinterpret_cast<intptr_t>(art_quick_read_barrier_mark_introspection_gc_roots_narrow) -
+      reinterpret_cast<intptr_t>(art_quick_read_barrier_mark_introspection);
+  DCHECK_EQ(BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_NARROW_ENTRYPOINT_OFFSET, gc_roots_narrow_diff);
+  // The register 12, i.e. IP, is reserved, so there is no art_quick_read_barrier_mark_reg12.
+  // We're using the entry to hold a pointer to the introspection entrypoint instead.
+  qpoints->pReadBarrierMarkReg12 = is_active ? art_quick_read_barrier_mark_introspection : nullptr;
 }
 
 void InitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) {
@@ -138,7 +171,7 @@ void InitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) {
 
   // Read barrier.
   qpoints->pReadBarrierJni = ReadBarrierJni;
-  UpdateReadBarrierEntrypoints(qpoints, /*is_marking*/ false);
+  UpdateReadBarrierEntrypoints(qpoints, /*is_active*/ false);
   qpoints->pReadBarrierMarkReg12 = nullptr;  // Cannot use register 12 (IP) to pass arguments.
   qpoints->pReadBarrierMarkReg13 = nullptr;  // Cannot use register 13 (SP) to pass arguments.
   qpoints->pReadBarrierMarkReg14 = nullptr;  // Cannot use register 14 (LR) to pass arguments.

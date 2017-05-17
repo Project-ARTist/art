@@ -1550,7 +1550,7 @@ class BCEVisitor : public HGraphVisitor {
         HBasicBlock* block = GetPreHeader(loop, check);
         HInstruction* cond =
             new (GetGraph()->GetArena()) HEqual(array, GetGraph()->GetNullConstant());
-        InsertDeoptInLoop(loop, block, cond);
+        InsertDeoptInLoop(loop, block, cond, /* is_null_check */ true);
         ReplaceInstruction(check, array);
         return true;
       }
@@ -1616,11 +1616,16 @@ class BCEVisitor : public HGraphVisitor {
   }
 
   /** Inserts a deoptimization test in a loop preheader. */
-  void InsertDeoptInLoop(HLoopInformation* loop, HBasicBlock* block, HInstruction* condition) {
+  void InsertDeoptInLoop(HLoopInformation* loop,
+                         HBasicBlock* block,
+                         HInstruction* condition,
+                         bool is_null_check = false) {
     HInstruction* suspend = loop->GetSuspendCheck();
     block->InsertInstructionBefore(condition, block->GetLastInstruction());
+    DeoptimizationKind kind =
+        is_null_check ? DeoptimizationKind::kLoopNullBCE : DeoptimizationKind::kLoopBoundsBCE;
     HDeoptimize* deoptimize = new (GetGraph()->GetArena()) HDeoptimize(
-        GetGraph()->GetArena(), condition, HDeoptimize::Kind::kBCE, suspend->GetDexPc());
+        GetGraph()->GetArena(), condition, kind, suspend->GetDexPc());
     block->InsertInstructionBefore(deoptimize, block->GetLastInstruction());
     if (suspend->HasEnvironment()) {
       deoptimize->CopyEnvironmentFromWithLoopPhiAdjustment(
@@ -1633,7 +1638,7 @@ class BCEVisitor : public HGraphVisitor {
     HBasicBlock* block = bounds_check->GetBlock();
     block->InsertInstructionBefore(condition, bounds_check);
     HDeoptimize* deoptimize = new (GetGraph()->GetArena()) HDeoptimize(
-        GetGraph()->GetArena(), condition, HDeoptimize::Kind::kBCE, bounds_check->GetDexPc());
+        GetGraph()->GetArena(), condition, DeoptimizationKind::kBlockBCE, bounds_check->GetDexPc());
     block->InsertInstructionBefore(deoptimize, bounds_check);
     deoptimize->CopyEnvironmentFrom(bounds_check->GetEnvironment());
   }
@@ -1729,8 +1734,8 @@ class BCEVisitor : public HGraphVisitor {
    */
   void InsertPhiNodes() {
     // Scan all new deoptimization blocks.
-    for (auto it1 = taken_test_loop_.begin(); it1 != taken_test_loop_.end(); ++it1) {
-      HBasicBlock* true_block = it1->second;
+    for (const auto& entry : taken_test_loop_) {
+      HBasicBlock* true_block = entry.second;
       HBasicBlock* new_preheader = true_block->GetSingleSuccessor();
       // Scan all instructions in a new deoptimization block.
       for (HInstructionIterator it(true_block->GetInstructions()); !it.Done(); it.Advance()) {
@@ -1749,6 +1754,7 @@ class BCEVisitor : public HGraphVisitor {
               phi = NewPhi(new_preheader, instruction, type);
             }
             user->ReplaceInput(phi, index);  // Removes the use node from the list.
+            induction_range_.Replace(user, instruction, phi);  // update induction
           }
         }
         // Scan all environment uses of an instruction and replace each later use with a phi node.

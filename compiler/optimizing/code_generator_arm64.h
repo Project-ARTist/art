@@ -318,12 +318,13 @@ class InstructionCodeGeneratorARM64 : public InstructionCodeGenerator {
   void GenerateDivRemIntegral(HBinaryOperation* instruction);
   void HandleGoto(HInstruction* got, HBasicBlock* successor);
 
-  vixl::aarch64::MemOperand CreateVecMemRegisters(
+  vixl::aarch64::MemOperand VecAddress(
       HVecMemoryOperation* instruction,
-      Location* reg_loc,
-      bool is_load,
       // This function may acquire a scratch register.
-      vixl::aarch64::UseScratchRegisterScope* temps_scope);
+      vixl::aarch64::UseScratchRegisterScope* temps_scope,
+      size_t size,
+      bool is_string_char_at,
+      /*out*/ vixl::aarch64::Register* scratch);
 
   Arm64Assembler* const assembler_;
   CodeGeneratorARM64* const codegen_;
@@ -585,11 +586,6 @@ class CodeGeneratorARM64 : public CodeGenerator {
   // before the CBNZ instruction.
   vixl::aarch64::Label* NewBakerReadBarrierPatch(uint32_t custom_data);
 
-  vixl::aarch64::Literal<uint32_t>* DeduplicateBootImageStringLiteral(
-      const DexFile& dex_file,
-      dex::StringIndex string_index);
-  vixl::aarch64::Literal<uint32_t>* DeduplicateBootImageTypeLiteral(const DexFile& dex_file,
-                                                                    dex::TypeIndex type_index);
   vixl::aarch64::Literal<uint32_t>* DeduplicateBootImageAddressLiteral(uint64_t address);
   vixl::aarch64::Literal<uint32_t>* DeduplicateJitStringLiteral(const DexFile& dex_file,
                                                                 dex::StringIndex string_index,
@@ -634,9 +630,6 @@ class CodeGeneratorARM64 : public CodeGenerator {
   // Load the object reference located at the address
   // `obj + offset + (index << scale_factor)`, held by object `obj`, into
   // `ref`, and mark it if needed.
-  //
-  // If `always_update_field` is true, the value of the reference is
-  // atomically updated in the holder (`obj`).
   void GenerateReferenceLoadWithBakerReadBarrier(HInstruction* instruction,
                                                  Location ref,
                                                  vixl::aarch64::Register obj,
@@ -645,8 +638,27 @@ class CodeGeneratorARM64 : public CodeGenerator {
                                                  size_t scale_factor,
                                                  vixl::aarch64::Register temp,
                                                  bool needs_null_check,
-                                                 bool use_load_acquire,
-                                                 bool always_update_field = false);
+                                                 bool use_load_acquire);
+
+  // Generate code checking whether the the reference field at the
+  // address `obj + field_offset`, held by object `obj`, needs to be
+  // marked, and if so, marking it and updating the field within `obj`
+  // with the marked value.
+  //
+  // This routine is used for the implementation of the
+  // UnsafeCASObject intrinsic with Baker read barriers.
+  //
+  // This method has a structure similar to
+  // GenerateReferenceLoadWithBakerReadBarrier, but note that argument
+  // `ref` is only as a temporary here, and thus its value should not
+  // be used afterwards.
+  void UpdateReferenceFieldWithBakerReadBarrier(HInstruction* instruction,
+                                                Location ref,
+                                                vixl::aarch64::Register obj,
+                                                Location field_offset,
+                                                vixl::aarch64::Register temp,
+                                                bool needs_null_check,
+                                                bool use_load_acquire);
 
   // Generate a heap reference load (with no read barrier).
   void GenerateRawReferenceLoad(HInstruction* instruction,
@@ -714,9 +726,6 @@ class CodeGeneratorARM64 : public CodeGenerator {
  private:
   using Uint64ToLiteralMap = ArenaSafeMap<uint64_t, vixl::aarch64::Literal<uint64_t>*>;
   using Uint32ToLiteralMap = ArenaSafeMap<uint32_t, vixl::aarch64::Literal<uint32_t>*>;
-  using MethodToLiteralMap = ArenaSafeMap<MethodReference,
-                                          vixl::aarch64::Literal<uint64_t>*,
-                                          MethodReferenceComparator>;
   using StringToLiteralMap = ArenaSafeMap<StringReference,
                                           vixl::aarch64::Literal<uint32_t>*,
                                           StringReferenceValueComparator>;
@@ -727,8 +736,6 @@ class CodeGeneratorARM64 : public CodeGenerator {
   vixl::aarch64::Literal<uint32_t>* DeduplicateUint32Literal(uint32_t value,
                                                              Uint32ToLiteralMap* map);
   vixl::aarch64::Literal<uint64_t>* DeduplicateUint64Literal(uint64_t value);
-  vixl::aarch64::Literal<uint64_t>* DeduplicateMethodLiteral(MethodReference target_method,
-                                                             MethodToLiteralMap* map);
 
   // The PcRelativePatchInfo is used for PC-relative addressing of dex cache arrays
   // and boot image strings/types. The only difference is the interpretation of the
@@ -780,12 +787,8 @@ class CodeGeneratorARM64 : public CodeGenerator {
   Uint64ToLiteralMap uint64_literals_;
   // PC-relative DexCache access info.
   ArenaDeque<PcRelativePatchInfo> pc_relative_dex_cache_patches_;
-  // Deduplication map for boot string literals for kBootImageLinkTimeAddress.
-  StringToLiteralMap boot_image_string_patches_;
   // PC-relative String patch info; type depends on configuration (app .bss or boot image PIC).
   ArenaDeque<PcRelativePatchInfo> pc_relative_string_patches_;
-  // Deduplication map for boot type literals for kBootImageLinkTimeAddress.
-  TypeToLiteralMap boot_image_type_patches_;
   // PC-relative type patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PcRelativePatchInfo> pc_relative_type_patches_;
   // PC-relative type patch info for kBssEntry.

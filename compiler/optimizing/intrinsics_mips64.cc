@@ -32,7 +32,7 @@ namespace art {
 namespace mips64 {
 
 IntrinsicLocationsBuilderMIPS64::IntrinsicLocationsBuilderMIPS64(CodeGeneratorMIPS64* codegen)
-  : arena_(codegen->GetGraph()->GetArena()) {
+  : codegen_(codegen), arena_(codegen->GetGraph()->GetArena()) {
 }
 
 Mips64Assembler* IntrinsicCodeGeneratorMIPS64::GetAssembler() {
@@ -890,54 +890,14 @@ static void GenRound(LocationSummary* locations, Mips64Assembler* assembler, Pri
   DCHECK(type == Primitive::kPrimFloat || type == Primitive::kPrimDouble);
 
   Mips64Label done;
-  Mips64Label finite;
-  Mips64Label add;
 
-  // if (in.isNaN) {
-  //   return 0;
-  // }
-  //
   // out = floor(in);
   //
-  // /*
-  //  * TODO: Amend this code when emulator FCSR.NAN2008=1 bug is fixed.
-  //  *
-  //  * Starting with MIPSR6, which always sets FCSR.NAN2008=1, negative
-  //  * numbers which are too large to be represented in a 32-/64-bit
-  //  * signed integer will be processed by floor.X.Y to output
-  //  * Integer.MIN_VALUE/Long.MIN_VALUE, and will no longer be
-  //  * processed by this "if" statement.
-  //  *
-  //  * However, this bug in the 64-bit MIPS emulator causes the
-  //  * behavior of floor.X.Y to be the same as pre-R6 implementations
-  //  * of MIPS64.  When that bug is fixed this logic should be amended.
-  //  */
-  // if (out == MAX_VALUE) {
-  //   TMP = (in < 0.0) ? 1 : 0;
-  //   /*
-  //    * If TMP is 1, then adding it to out will wrap its value from
-  //    * MAX_VALUE to MIN_VALUE.
-  //    */
+  // if (out != MAX_VALUE && out != MIN_VALUE) {
+  //   TMP = ((in - out) >= 0.5) ? 1 : 0;
   //   return out += TMP;
   // }
-  //
-  // /*
-  //  * For negative values not handled by the previous "if" statement the
-  //  * test here will correctly set the value of TMP.
-  //  */
-  // TMP = ((in - out) >= 0.5) ? 1 : 0;
-  // return out += TMP;
-
-  // Test for NaN.
-  if (type == Primitive::kPrimDouble) {
-    __ CmpUnD(FTMP, in, in);
-  } else {
-    __ CmpUnS(FTMP, in, in);
-  }
-
-  // Return zero for NaN.
-  __ Move(out, ZERO);
-  __ Bc1nez(FTMP, &done);
+  // return out;
 
   // out = floor(in);
   if (type == Primitive::kPrimDouble) {
@@ -948,27 +908,26 @@ static void GenRound(LocationSummary* locations, Mips64Assembler* assembler, Pri
     __ Mfc1(out, FTMP);
   }
 
-  // TMP = (out = java.lang.Integer.MAX_VALUE) ? 1 : 0;
+  // if (out != MAX_VALUE && out != MIN_VALUE)
   if (type == Primitive::kPrimDouble) {
-    __ LoadConst64(AT, std::numeric_limits<int64_t>::max());
+    __ Daddiu(TMP, out, 1);
+    __ Dati(TMP, 0x8000);  // TMP = out + 0x8000 0000 0000 0001
+                           // or    out - 0x7FFF FFFF FFFF FFFF.
+                           // IOW, TMP = 1 if out = Long.MIN_VALUE
+                           // or   TMP = 0 if out = Long.MAX_VALUE.
+    __ Dsrl(TMP, TMP, 1);  // TMP = 0 if out = Long.MIN_VALUE
+                           //         or out = Long.MAX_VALUE.
+    __ Beqzc(TMP, &done);
   } else {
-    __ LoadConst32(AT, std::numeric_limits<int32_t>::max());
+    __ Addiu(TMP, out, 1);
+    __ Aui(TMP, TMP, 0x8000);  // TMP = out + 0x8000 0001
+                               // or    out - 0x7FFF FFFF.
+                               // IOW, TMP = 1 if out = Int.MIN_VALUE
+                               // or   TMP = 0 if out = Int.MAX_VALUE.
+    __ Srl(TMP, TMP, 1);       // TMP = 0 if out = Int.MIN_VALUE
+                               //         or out = Int.MAX_VALUE.
+    __ Beqzc(TMP, &done);
   }
-  __ Bnec(AT, out, &finite);
-
-  if (type == Primitive::kPrimDouble) {
-    __ Dmtc1(ZERO, FTMP);
-    __ CmpLtD(FTMP, in, FTMP);
-    __ Dmfc1(AT, FTMP);
-  } else {
-    __ Mtc1(ZERO, FTMP);
-    __ CmpLtS(FTMP, in, FTMP);
-    __ Mfc1(AT, FTMP);
-  }
-
-  __ Bc(&add);
-
-  __ Bind(&finite);
 
   // TMP = (0.5 <= (in - out)) ? -1 : 0;
   if (type == Primitive::kPrimDouble) {
@@ -977,23 +936,21 @@ static void GenRound(LocationSummary* locations, Mips64Assembler* assembler, Pri
     __ SubD(FTMP, in, FTMP);
     __ Dmtc1(AT, half);
     __ CmpLeD(FTMP, half, FTMP);
-    __ Dmfc1(AT, FTMP);
+    __ Dmfc1(TMP, FTMP);
   } else {
     __ Cvtsw(FTMP, FTMP);  // Convert output of floor.w.s back to "float".
     __ LoadConst32(AT, bit_cast<int32_t, float>(0.5f));
     __ SubS(FTMP, in, FTMP);
     __ Mtc1(AT, half);
     __ CmpLeS(FTMP, half, FTMP);
-    __ Mfc1(AT, FTMP);
+    __ Mfc1(TMP, FTMP);
   }
-
-  __ Bind(&add);
 
   // Return out -= TMP.
   if (type == Primitive::kPrimDouble) {
-    __ Dsubu(out, out, AT);
+    __ Dsubu(out, out, TMP);
   } else {
-    __ Subu(out, out, AT);
+    __ Subu(out, out, TMP);
   }
 
   __ Bind(&done);
@@ -1168,6 +1125,9 @@ static void CreateIntIntIntToIntLocations(ArenaAllocator* arena,
                                                                 ? LocationSummary::kCallOnSlowPath
                                                                 : LocationSummary::kNoCall),
                                                            kIntrinsified);
+  if (can_call && kUseBakerReadBarrier) {
+    locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
+  }
   locations->SetInAt(0, Location::NoLocation());        // Unused receiver.
   locations->SetInAt(1, Location::RequiresRegister());
   locations->SetInAt(2, Location::RequiresRegister());
@@ -2564,6 +2524,84 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathTanh(HInvoke* invoke) {
   GenFPToFPCall(invoke, codegen_, kQuickTanh);
 }
 
+// long java.lang.Integer.valueOf(long)
+void IntrinsicLocationsBuilderMIPS64::VisitIntegerValueOf(HInvoke* invoke) {
+  InvokeRuntimeCallingConvention calling_convention;
+  IntrinsicVisitor::ComputeIntegerValueOfLocations(
+      invoke,
+      codegen_,
+      calling_convention.GetReturnLocation(Primitive::kPrimNot),
+      Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
+}
+
+void IntrinsicCodeGeneratorMIPS64::VisitIntegerValueOf(HInvoke* invoke) {
+  IntrinsicVisitor::IntegerValueOfInfo info = IntrinsicVisitor::ComputeIntegerValueOfInfo();
+  LocationSummary* locations = invoke->GetLocations();
+  Mips64Assembler* assembler = GetAssembler();
+  InstructionCodeGeneratorMIPS64* icodegen =
+      down_cast<InstructionCodeGeneratorMIPS64*>(codegen_->GetInstructionVisitor());
+
+  GpuRegister out = locations->Out().AsRegister<GpuRegister>();
+  InvokeRuntimeCallingConvention calling_convention;
+  if (invoke->InputAt(0)->IsConstant()) {
+    int32_t value = invoke->InputAt(0)->AsIntConstant()->GetValue();
+    if (value >= info.low && value <= info.high) {
+      // Just embed the j.l.Integer in the code.
+      ScopedObjectAccess soa(Thread::Current());
+      mirror::Object* boxed = info.cache->Get(value + (-info.low));
+      DCHECK(boxed != nullptr && Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(boxed));
+      uint32_t address = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(boxed));
+      __ LoadConst64(out, address);
+    } else {
+      // Allocate and initialize a new j.l.Integer.
+      // TODO: If we JIT, we could allocate the j.l.Integer now, and store it in the
+      // JIT object table.
+      uint32_t address =
+          dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(info.integer));
+      __ LoadConst64(calling_convention.GetRegisterAt(0), address);
+      codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
+      CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+      __ StoreConstToOffset(kStoreWord, value, out, info.value_offset, TMP);
+      // `value` is a final field :-( Ideally, we'd merge this memory barrier with the allocation
+      // one.
+      icodegen->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
+    }
+  } else {
+    GpuRegister in = locations->InAt(0).AsRegister<GpuRegister>();
+    Mips64Label allocate, done;
+    int32_t count = static_cast<uint32_t>(info.high) - info.low + 1;
+
+    // Is (info.low <= in) && (in <= info.high)?
+    __ Addiu32(out, in, -info.low);
+    // As unsigned quantities is out < (info.high - info.low + 1)?
+    __ LoadConst32(AT, count);
+    // Branch if out >= (info.high - info.low + 1).
+    // This means that "in" is outside of the range [info.low, info.high].
+    __ Bgeuc(out, AT, &allocate);
+
+    // If the value is within the bounds, load the j.l.Integer directly from the array.
+    uint32_t data_offset = mirror::Array::DataOffset(kHeapReferenceSize).Uint32Value();
+    uint32_t address = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(info.cache));
+    __ LoadConst64(TMP, data_offset + address);
+    __ Dlsa(out, out, TMP, TIMES_4);
+    __ Lwu(out, out, 0);
+    __ MaybeUnpoisonHeapReference(out);
+    __ Bc(&done);
+
+    __ Bind(&allocate);
+    // Otherwise allocate and initialize a new j.l.Integer.
+    address = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(info.integer));
+    __ LoadConst64(calling_convention.GetRegisterAt(0), address);
+    codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
+    CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+    __ StoreToOffset(kStoreWord, in, out, info.value_offset);
+    // `value` is a final field :-( Ideally, we'd merge this memory barrier with the allocation
+    // one.
+    icodegen->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
+    __ Bind(&done);
+  }
+}
+
 UNIMPLEMENTED_INTRINSIC(MIPS64, ReferenceGetReferent)
 UNIMPLEMENTED_INTRINSIC(MIPS64, SystemArrayCopy)
 
@@ -2582,8 +2620,6 @@ UNIMPLEMENTED_INTRINSIC(MIPS64, UnsafeGetAndAddLong)
 UNIMPLEMENTED_INTRINSIC(MIPS64, UnsafeGetAndSetInt)
 UNIMPLEMENTED_INTRINSIC(MIPS64, UnsafeGetAndSetLong)
 UNIMPLEMENTED_INTRINSIC(MIPS64, UnsafeGetAndSetObject)
-
-UNIMPLEMENTED_INTRINSIC(MIPS64, IntegerValueOf)
 
 UNREACHABLE_INTRINSICS(MIPS64)
 

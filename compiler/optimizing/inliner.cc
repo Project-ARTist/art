@@ -140,6 +140,14 @@ void HInliner::Run() {
   DCHECK_NE(total_number_of_instructions_, 0u);
   DCHECK_NE(inlining_budget_, 0u);
 
+  // If we're compiling with a core image (which is only used for
+  // test purposes), honor inlining directives in method names:
+  // - if a method's name contains the substring "$inline$", ensure
+  //   that this method is actually inlined;
+  // - if a method's name contains the substring "$noinline$", do not
+  //   inline that method.
+  const bool honor_inlining_directives = IsCompilingWithCoreImage();
+
   // Keep a copy of all blocks when starting the visit.
   ArenaVector<HBasicBlock*> blocks = graph_->GetReversePostOrder();
   DCHECK(!blocks.empty());
@@ -152,7 +160,7 @@ void HInliner::Run() {
       HInvoke* call = instruction->AsInvoke();
       // As long as the call is not intrinsified, it is worth trying to inline.
       if (call != nullptr && call->GetIntrinsic() == Intrinsics::kNone) {
-        if (kIsDebugBuild && IsCompilingWithCoreImage()) {
+        if (honor_inlining_directives) {
           // Debugging case: directives in method names control or assert on inlining.
           std::string callee_name = outer_compilation_unit_.GetDexFile()->PrettyMethod(
               call->GetDexMethodIndex(), /* with_signature */ false);
@@ -775,7 +783,7 @@ void HInliner::AddCHAGuard(HInstruction* invoke_instruction,
   HInstruction* compare = new (graph_->GetArena()) HNotEqual(
       deopt_flag, graph_->GetIntConstant(0, dex_pc));
   HInstruction* deopt = new (graph_->GetArena()) HDeoptimize(
-      graph_->GetArena(), compare, HDeoptimize::Kind::kInline, dex_pc);
+      graph_->GetArena(), compare, DeoptimizationKind::kCHA, dex_pc);
 
   if (cursor != nullptr) {
     bb_cursor->InsertInstructionAfter(deopt_flag, cursor);
@@ -809,7 +817,17 @@ HInstruction* HInliner::AddTypeGuard(HInstruction* receiver,
   }
 
   const DexFile& caller_dex_file = *caller_compilation_unit_.GetDexFile();
-  bool is_referrer = (klass.Get() == outermost_graph_->GetArtMethod()->GetDeclaringClass());
+  bool is_referrer;
+  ArtMethod* outermost_art_method = outermost_graph_->GetArtMethod();
+  if (outermost_art_method == nullptr) {
+    DCHECK(Runtime::Current()->IsAotCompiler());
+    // We are in AOT mode and we don't have an ART method to determine
+    // if the inlined method belongs to the referrer. Assume it doesn't.
+    is_referrer = false;
+  } else {
+    is_referrer = klass.Get() == outermost_art_method->GetDeclaringClass();
+  }
+
   // Note that we will just compare the classes, so we don't need Java semantics access checks.
   // Note that the type index and the dex file are relative to the method this type guard is
   // inlined into.
@@ -842,7 +860,9 @@ HInstruction* HInliner::AddTypeGuard(HInstruction* receiver,
         graph_->GetArena(),
         compare,
         receiver,
-        HDeoptimize::Kind::kInline,
+        Runtime::Current()->IsAotCompiler()
+            ? DeoptimizationKind::kAotInlineCache
+            : DeoptimizationKind::kJitInlineCache,
         invoke_instruction->GetDexPc());
     bb_cursor->InsertInstructionAfter(deoptimize, compare);
     deoptimize->CopyEnvironmentFrom(invoke_instruction->GetEnvironment());
@@ -1129,7 +1149,7 @@ bool HInliner::TryInlinePolymorphicCallToSameTarget(
         graph_->GetArena(),
         compare,
         receiver,
-        HDeoptimize::Kind::kInline,
+        DeoptimizationKind::kJitSameTarget,
         invoke_instruction->GetDexPc());
     bb_cursor->InsertInstructionAfter(deoptimize, compare);
     deoptimize->CopyEnvironmentFrom(invoke_instruction->GetEnvironment());
@@ -1462,8 +1482,13 @@ bool HInliner::TryPatternSubstitution(HInvoke* invoke_instruction,
         }
       }
       if (needs_constructor_barrier) {
-        HMemoryBarrier* barrier = new (graph_->GetArena()) HMemoryBarrier(kStoreStore, kNoDexPc);
-        invoke_instruction->GetBlock()->InsertInstructionBefore(barrier, invoke_instruction);
+        // See CompilerDriver::RequiresConstructorBarrier for more details.
+        DCHECK(obj != nullptr) << "only non-static methods can have a constructor fence";
+
+        HConstructorFence* constructor_fence =
+            new (graph_->GetArena()) HConstructorFence(obj, kNoDexPc, graph_->GetArena());
+        invoke_instruction->GetBlock()->InsertInstructionBefore(constructor_fence,
+                                                                invoke_instruction);
       }
       *return_replacement = nullptr;
       break;

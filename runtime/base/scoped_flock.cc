@@ -33,11 +33,22 @@ bool ScopedFlock::Init(const char* filename, std::string* error_msg) {
 }
 
 bool ScopedFlock::Init(const char* filename, int flags, bool block, std::string* error_msg) {
+  return Init(filename, flags, block, true, error_msg);
+}
+
+bool ScopedFlock::Init(const char* filename,
+                       int flags,
+                       bool block,
+                       bool flush_on_close,
+                       std::string* error_msg) {
+  flush_on_close_ = flush_on_close;
   while (true) {
     if (file_.get() != nullptr) {
       UNUSED(file_->FlushCloseOrErase());  // Ignore result.
     }
-    file_.reset(OS::OpenFileWithFlags(filename, flags));
+
+    bool check_usage = flush_on_close;  // Check usage only if we need to flush on close.
+    file_.reset(OS::OpenFileWithFlags(filename, flags, check_usage));
     if (file_.get() == nullptr) {
       *error_msg = StringPrintf("Failed to open file '%s': %s", filename, strerror(errno));
       return false;
@@ -86,6 +97,7 @@ bool ScopedFlock::Init(const char* filename, int flags, bool block, std::string*
 }
 
 bool ScopedFlock::Init(File* file, std::string* error_msg) {
+  flush_on_close_ = true;
   file_.reset(new File(dup(file->Fd()), file->GetPath(), file->CheckUsage(), file->ReadOnlyMode()));
   if (file_->Fd() == -1) {
     file_.reset();
@@ -111,17 +123,21 @@ bool ScopedFlock::HasFile() {
   return file_.get() != nullptr;
 }
 
-ScopedFlock::ScopedFlock() { }
+ScopedFlock::ScopedFlock() : flush_on_close_(true) { }
 
 ScopedFlock::~ScopedFlock() {
   if (file_.get() != nullptr) {
     int flock_result = TEMP_FAILURE_RETRY(flock(file_->Fd(), LOCK_UN));
     if (flock_result != 0) {
-      PLOG(FATAL) << "Unable to unlock file " << file_->GetPath();
-      UNREACHABLE();
+      // Only printing a warning is okay since this is only used with either:
+      // 1) a non-blocking Init call, or
+      // 2) as a part of a seperate binary (eg dex2oat) which has it's own timeout logic to prevent
+      //    deadlocks.
+      // This means we can be sure that the warning won't cause a deadlock.
+      PLOG(WARNING) << "Unable to unlock file " << file_->GetPath();
     }
     int close_result = -1;
-    if (file_->ReadOnlyMode()) {
+    if (file_->ReadOnlyMode() || !flush_on_close_) {
       close_result = file_->Close();
     } else {
       close_result = file_->FlushCloseOrErase();

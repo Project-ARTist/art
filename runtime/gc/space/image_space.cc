@@ -651,7 +651,8 @@ class ImageSpaceLoader {
               bitmap_name,
               image_bitmap_map.release(),
               reinterpret_cast<uint8_t*>(map->Begin()),
-              image_objects.End()));
+              // Make sure the bitmap is aligned to card size instead of just bitmap word size.
+              RoundUp(image_objects.End(), gc::accounting::CardTable::kCardSize)));
       if (bitmap == nullptr) {
         *error_msg = StringPrintf("Could not create bitmap '%s'", bitmap_name.c_str());
         return nullptr;
@@ -1693,6 +1694,29 @@ bool ImageSpace::LoadBootImage(const std::string& image_file_name,
 
   *oat_file_end = oat_file_end_tmp;
   return true;
+}
+
+ImageSpace::~ImageSpace() {
+  Runtime* runtime = Runtime::Current();
+  if (runtime == nullptr) {
+    return;
+  }
+
+  if (GetImageHeader().IsAppImage()) {
+    // This image space did not modify resolution method then in Init.
+    return;
+  }
+
+  if (!runtime->HasResolutionMethod()) {
+    // Another image space has already unloaded the below methods.
+    return;
+  }
+
+  runtime->ClearInstructionSet();
+  runtime->ClearResolutionMethod();
+  runtime->ClearImtConflictMethod();
+  runtime->ClearImtUnimplementedMethod();
+  runtime->ClearCalleeSaveMethods();
 }
 
 std::unique_ptr<ImageSpace> ImageSpace::CreateFromAppImage(const char* image,

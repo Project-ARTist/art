@@ -83,16 +83,16 @@ ART_TEST_HOST_GTEST_VerifierDepsMulti_DEX := $(dir $(ART_TEST_HOST_GTEST_Main_DE
 ART_TEST_TARGET_GTEST_VerifierDepsMulti_DEX := $(dir $(ART_TEST_TARGET_GTEST_Main_DEX))$(subst Main,VerifierDepsMulti,$(basename $(notdir $(ART_TEST_TARGET_GTEST_Main_DEX))))$(suffix $(ART_TEST_TARGET_GTEST_Main_DEX))
 
 $(ART_TEST_HOST_GTEST_VerifierDeps_DEX): $(ART_TEST_GTEST_VerifierDeps_SRC) $(HOST_OUT_EXECUTABLES)/smali
-	 $(HOST_OUT_EXECUTABLES)/smali --output=$@ $(filter %.smali,$^)
+	 $(HOST_OUT_EXECUTABLES)/smali assemble --output $@ $(filter %.smali,$^)
 
 $(ART_TEST_TARGET_GTEST_VerifierDeps_DEX): $(ART_TEST_GTEST_VerifierDeps_SRC) $(HOST_OUT_EXECUTABLES)/smali
-	 $(HOST_OUT_EXECUTABLES)/smali --output=$@ $(filter %.smali,$^)
+	 $(HOST_OUT_EXECUTABLES)/smali assemble --output $@ $(filter %.smali,$^)
 
 $(ART_TEST_HOST_GTEST_VerifierDepsMulti_DEX): $(ART_TEST_GTEST_VerifierDepsMulti_SRC) $(HOST_OUT_EXECUTABLES)/smali
-	 $(HOST_OUT_EXECUTABLES)/smali --output=$@ $(filter %.smali,$^)
+	 $(HOST_OUT_EXECUTABLES)/smali assemble --output $@ $(filter %.smali,$^)
 
 $(ART_TEST_TARGET_GTEST_VerifierDepsMulti_DEX): $(ART_TEST_GTEST_VerifierDepsMulti_SRC) $(HOST_OUT_EXECUTABLES)/smali
-	 $(HOST_OUT_EXECUTABLES)/smali --output=$@ $(filter %.smali,$^)
+	 $(HOST_OUT_EXECUTABLES)/smali assemble --output $@ $(filter %.smali,$^)
 
 # Dex file dependencies for each gtest.
 ART_GTEST_dex2oat_environment_tests_DEX_DEPS := Main MainStripped MultiDex MultiDexModifiedSecondary Nested
@@ -171,6 +171,12 @@ ART_GTEST_dex2oat_test_TARGET_DEPS := \
 # TODO: document why this is needed.
 ART_GTEST_proxy_test_HOST_DEPS := $(HOST_CORE_IMAGE_DEFAULT_64) $(HOST_CORE_IMAGE_DEFAULT_32)
 
+# The dexdiag test requires the dexdiag utility.
+ART_GTEST_dexdiag_test_HOST_DEPS := \
+  $(HOST_OUT_EXECUTABLES)/dexdiag
+ART_GTEST_dexdiag_test_TARGET_DEPS := \
+  dexdiag
+
 # The dexdump test requires an image and the dexdump utility.
 # TODO: rename into dexdump when migration completes
 ART_GTEST_dexdump_test_HOST_DEPS := \
@@ -227,6 +233,8 @@ ART_GTEST_oatdump_test_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_DEFAULT_64) \
   $(TARGET_CORE_IMAGE_DEFAULT_32) \
   oatdump
+ART_GTEST_oatdump_image_test_HOST_DEPS := $(ART_GTEST_oatdump_test_HOST_DEPS)
+ART_GTEST_oatdump_image_test_TARGET_DEPS := $(ART_GTEST_oatdump_test_TARGET_DEPS)
 
 # Profile assistant tests requires profman utility.
 ART_GTEST_profile_assistant_test_HOST_DEPS := \
@@ -242,6 +250,7 @@ ART_TEST_MODULES := \
     art_compiler_tests \
     art_compiler_host_tests \
     art_dex2oat_tests \
+    art_dexdiag_tests \
     art_dexdump_tests \
     art_dexlayout_tests \
     art_dexlist_tests \

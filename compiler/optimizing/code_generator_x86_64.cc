@@ -397,8 +397,14 @@ class DeoptimizationSlowPathX86_64 : public SlowPathCode {
   void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
     CodeGeneratorX86_64* x86_64_codegen = down_cast<CodeGeneratorX86_64*>(codegen);
     __ Bind(GetEntryLabel());
+    LocationSummary* locations = instruction_->GetLocations();
+    SaveLiveRegisters(codegen, locations);
+    InvokeRuntimeCallingConvention calling_convention;
+    x86_64_codegen->Load32BitValue(
+        CpuRegister(calling_convention.GetRegisterAt(0)),
+        static_cast<uint32_t>(instruction_->AsDeoptimize()->GetDeoptimizationKind()));
     x86_64_codegen->InvokeRuntime(kQuickDeoptimize, instruction_, instruction_->GetDexPc(), this);
-    CheckEntrypointTypes<kQuickDeoptimize, void, void>();
+    CheckEntrypointTypes<kQuickDeoptimize, void, DeoptimizationKind>();
   }
 
   const char* GetDescription() const OVERRIDE { return "DeoptimizationSlowPathX86_64"; }
@@ -1128,14 +1134,13 @@ void CodeGeneratorX86_64::EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_pat
   linker_patches->reserve(size);
   EmitPcRelativeLinkerPatches<LinkerPatch::DexCacheArrayPatch>(pc_relative_dex_cache_patches_,
                                                                linker_patches);
-  if (!GetCompilerOptions().IsBootImage()) {
-    DCHECK(boot_image_type_patches_.empty());
-    EmitPcRelativeLinkerPatches<LinkerPatch::StringBssEntryPatch>(string_patches_, linker_patches);
-  } else {
-    // These are always PC-relative, see GetSupportedLoadClassKind()/GetSupportedLoadStringKind().
+  if (GetCompilerOptions().IsBootImage()) {
     EmitPcRelativeLinkerPatches<LinkerPatch::RelativeTypePatch>(boot_image_type_patches_,
                                                                 linker_patches);
     EmitPcRelativeLinkerPatches<LinkerPatch::RelativeStringPatch>(string_patches_, linker_patches);
+  } else {
+    DCHECK(boot_image_type_patches_.empty());
+    EmitPcRelativeLinkerPatches<LinkerPatch::StringBssEntryPatch>(string_patches_, linker_patches);
   }
   EmitPcRelativeLinkerPatches<LinkerPatch::TypeBssEntryPatch>(type_bss_entry_patches_,
                                                               linker_patches);
@@ -1710,7 +1715,10 @@ void InstructionCodeGeneratorX86_64::VisitIf(HIf* if_instr) {
 void LocationsBuilderX86_64::VisitDeoptimize(HDeoptimize* deoptimize) {
   LocationSummary* locations = new (GetGraph()->GetArena())
       LocationSummary(deoptimize, LocationSummary::kCallOnSlowPath);
-  locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
+  InvokeRuntimeCallingConvention calling_convention;
+  RegisterSet caller_saves = RegisterSet::Empty();
+  caller_saves.Add(Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
+  locations->SetCustomSlowPathCallerSaves(caller_saves);
   if (IsBooleanValueOrMaterializedCondition(deoptimize->InputAt(0))) {
     locations->SetInAt(0, Location::Any());
   }
@@ -2163,6 +2171,15 @@ void LocationsBuilderX86_64::VisitDoubleConstant(HDoubleConstant* constant) {
 void InstructionCodeGeneratorX86_64::VisitDoubleConstant(
     HDoubleConstant* constant ATTRIBUTE_UNUSED) {
   // Will be generated at use site.
+}
+
+void LocationsBuilderX86_64::VisitConstructorFence(HConstructorFence* constructor_fence) {
+  constructor_fence->SetLocations(nullptr);
+}
+
+void InstructionCodeGeneratorX86_64::VisitConstructorFence(
+    HConstructorFence* constructor_fence ATTRIBUTE_UNUSED) {
+  codegen_->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
 }
 
 void LocationsBuilderX86_64::VisitMemoryBarrier(HMemoryBarrier* memory_barrier) {
@@ -5440,21 +5457,14 @@ HLoadClass::LoadKind CodeGeneratorX86_64::GetSupportedLoadClassKind(
       UNREACHABLE();
     case HLoadClass::LoadKind::kReferrersClass:
       break;
-    case HLoadClass::LoadKind::kBootImageLinkTimeAddress:
-      DCHECK(!GetCompilerOptions().GetCompilePic());
-      // We prefer the always-available RIP-relative address for the x86-64 boot image.
-      return HLoadClass::LoadKind::kBootImageLinkTimePcRelative;
     case HLoadClass::LoadKind::kBootImageLinkTimePcRelative:
-      DCHECK(GetCompilerOptions().GetCompilePic());
-      break;
-    case HLoadClass::LoadKind::kBootImageAddress:
-      break;
     case HLoadClass::LoadKind::kBssEntry:
       DCHECK(!Runtime::Current()->UseJitCompilation());
       break;
     case HLoadClass::LoadKind::kJitTableAddress:
       DCHECK(Runtime::Current()->UseJitCompilation());
       break;
+    case HLoadClass::LoadKind::kBootImageAddress:
     case HLoadClass::LoadKind::kDexCacheViaMethod:
       break;
   }
@@ -5617,21 +5627,14 @@ void InstructionCodeGeneratorX86_64::VisitClinitCheck(HClinitCheck* check) {
 HLoadString::LoadKind CodeGeneratorX86_64::GetSupportedLoadStringKind(
     HLoadString::LoadKind desired_string_load_kind) {
   switch (desired_string_load_kind) {
-    case HLoadString::LoadKind::kBootImageLinkTimeAddress:
-      DCHECK(!GetCompilerOptions().GetCompilePic());
-      // We prefer the always-available RIP-relative address for the x86-64 boot image.
-      return HLoadString::LoadKind::kBootImageLinkTimePcRelative;
     case HLoadString::LoadKind::kBootImageLinkTimePcRelative:
-      DCHECK(GetCompilerOptions().GetCompilePic());
-      break;
-    case HLoadString::LoadKind::kBootImageAddress:
-      break;
     case HLoadString::LoadKind::kBssEntry:
       DCHECK(!Runtime::Current()->UseJitCompilation());
       break;
     case HLoadString::LoadKind::kJitTableAddress:
       DCHECK(Runtime::Current()->UseJitCompilation());
       break;
+    case HLoadString::LoadKind::kBootImageAddress:
     case HLoadString::LoadKind::kDexCacheViaMethod:
       break;
   }
@@ -7037,7 +7040,7 @@ void CodeGeneratorX86_64::Finalize(CodeAllocator* allocator) {
     constant_area_start_ = assembler->CodeSize();
 
     // Populate any jump tables.
-    for (auto jump_table : fixups_to_jump_tables_) {
+    for (JumpTableRIPFixup* jump_table : fixups_to_jump_tables_) {
       jump_table->CreateJumpTable();
     }
 
@@ -7131,17 +7134,19 @@ void CodeGeneratorX86_64::PatchJitRootUse(uint8_t* code,
 
 void CodeGeneratorX86_64::EmitJitRootPatches(uint8_t* code, const uint8_t* roots_data) {
   for (const PatchInfo<Label>& info : jit_string_patches_) {
-    const auto& it = jit_string_roots_.find(
+    const auto it = jit_string_roots_.find(
         StringReference(&info.dex_file, dex::StringIndex(info.index)));
     DCHECK(it != jit_string_roots_.end());
-    PatchJitRootUse(code, roots_data, info, it->second);
+    uint64_t index_in_table = it->second;
+    PatchJitRootUse(code, roots_data, info, index_in_table);
   }
 
   for (const PatchInfo<Label>& info : jit_class_patches_) {
-    const auto& it = jit_class_roots_.find(
+    const auto it = jit_class_roots_.find(
         TypeReference(&info.dex_file, dex::TypeIndex(info.index)));
     DCHECK(it != jit_class_roots_.end());
-    PatchJitRootUse(code, roots_data, info, it->second);
+    uint64_t index_in_table = it->second;
+    PatchJitRootUse(code, roots_data, info, index_in_table);
   }
 }
 

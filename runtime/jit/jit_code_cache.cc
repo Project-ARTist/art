@@ -149,7 +149,6 @@ JitCodeCache::JitCodeCache(MemMap* code_map,
       used_memory_for_code_(0),
       number_of_compilations_(0),
       number_of_osr_compilations_(0),
-      number_of_deoptimizations_(0),
       number_of_collections_(0),
       histogram_stack_map_memory_use_("Memory used for stack maps", 16),
       histogram_code_memory_use_("Memory used for compiled code", 16),
@@ -323,12 +322,19 @@ static uint8_t* GetRootTable(const void* code_ptr, uint32_t* number_of_roots = n
   return data - ComputeRootTableSize(roots);
 }
 
+// Use a sentinel for marking entries in the JIT table that have been cleared.
+// This helps diagnosing in case the compiled code tries to wrongly access such
+// entries.
+static mirror::Class* const weak_sentinel = reinterpret_cast<mirror::Class*>(0x1);
+
 // Helper for the GC to process a weak class in a JIT root table.
-static inline void ProcessWeakClass(GcRoot<mirror::Class>* root_ptr, IsMarkedVisitor* visitor)
+static inline void ProcessWeakClass(GcRoot<mirror::Class>* root_ptr,
+                                    IsMarkedVisitor* visitor,
+                                    mirror::Class* update)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   // This does not need a read barrier because this is called by GC.
   mirror::Class* cls = root_ptr->Read<kWithoutReadBarrier>();
-  if (cls != nullptr) {
+  if (cls != nullptr && cls != weak_sentinel) {
     DCHECK((cls->IsClass<kDefaultVerifyFlags, kWithoutReadBarrier>()));
     // Look at the classloader of the class to know if it has been unloaded.
     // This does not need a read barrier because this is called by GC.
@@ -343,7 +349,7 @@ static inline void ProcessWeakClass(GcRoot<mirror::Class>* root_ptr, IsMarkedVis
       }
     } else {
       // The class loader is not live, clear the entry.
-      *root_ptr = GcRoot<mirror::Class>(nullptr);
+      *root_ptr = GcRoot<mirror::Class>(update);
     }
   }
 }
@@ -357,7 +363,7 @@ void JitCodeCache::SweepRootTables(IsMarkedVisitor* visitor) {
     for (uint32_t i = 0; i < number_of_roots; ++i) {
       // This does not need a read barrier because this is called by GC.
       mirror::Object* object = roots[i].Read<kWithoutReadBarrier>();
-      if (object == nullptr) {
+      if (object == nullptr || object == weak_sentinel) {
         // entry got deleted in a previous sweep.
       } else if (object->IsString<kDefaultVerifyFlags, kWithoutReadBarrier>()) {
         mirror::Object* new_object = visitor->IsMarked(object);
@@ -372,7 +378,8 @@ void JitCodeCache::SweepRootTables(IsMarkedVisitor* visitor) {
           roots[i] = GcRoot<mirror::Object>(new_object);
         }
       } else {
-        ProcessWeakClass(reinterpret_cast<GcRoot<mirror::Class>*>(&roots[i]), visitor);
+        ProcessWeakClass(
+            reinterpret_cast<GcRoot<mirror::Class>*>(&roots[i]), visitor, weak_sentinel);
       }
     }
   }
@@ -381,7 +388,7 @@ void JitCodeCache::SweepRootTables(IsMarkedVisitor* visitor) {
     for (size_t i = 0; i < info->number_of_inline_caches_; ++i) {
       InlineCache* cache = &info->cache_[i];
       for (size_t j = 0; j < InlineCache::kIndividualCacheSize; ++j) {
-        ProcessWeakClass(&cache->classes_[j], visitor);
+        ProcessWeakClass(&cache->classes_[j], visitor, nullptr);
       }
     }
   }
@@ -670,13 +677,13 @@ void JitCodeCache::NotifyMethodRedefined(ArtMethod* method) {
   }
   method->SetProfilingInfo(nullptr);
   ScopedCodeCacheWrite ccw(code_map_.get());
-  for (auto code_iter = method_code_map_.begin();
-       code_iter != method_code_map_.end();
-       ++code_iter) {
+  for (auto code_iter = method_code_map_.begin(); code_iter != method_code_map_.end();) {
     if (code_iter->second == method) {
       FreeCode(code_iter->first);
-      method_code_map_.erase(code_iter);
+      code_iter = method_code_map_.erase(code_iter);
+      continue;
     }
+    ++code_iter;
   }
   auto code_map = osr_code_map_.find(method);
   if (code_map != osr_code_map_.end()) {
@@ -1416,8 +1423,6 @@ void JitCodeCache::InvalidateCompiledCodeFor(ArtMethod* method,
       osr_code_map_.erase(it);
     }
   }
-  MutexLock mu(Thread::Current(), lock_);
-  number_of_deoptimizations_++;
 }
 
 uint8_t* JitCodeCache::AllocateCode(size_t code_size) {
@@ -1456,7 +1461,6 @@ void JitCodeCache::Dump(std::ostream& os) {
      << "Total number of JIT compilations: " << number_of_compilations_ << "\n"
      << "Total number of JIT compilations for on stack replacement: "
         << number_of_osr_compilations_ << "\n"
-     << "Total number of deoptimizations: " << number_of_deoptimizations_ << "\n"
      << "Total number of JIT code cache collections: " << number_of_collections_ << std::endl;
   histogram_stack_map_memory_use_.PrintMemoryUse(os);
   histogram_code_memory_use_.PrintMemoryUse(os);

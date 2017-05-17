@@ -564,6 +564,11 @@ if [ "$PROFILE" = "y" ] || [ "$RANDOM_PROFILE" = "y" ]; then
   profman_cmdline="${ANDROID_ROOT}/bin/profman  \
     --apk=$DEX_LOCATION/$TEST_NAME.jar \
     --dex-location=$DEX_LOCATION/$TEST_NAME.jar"
+  if [ -f $DEX_LOCATION/$TEST_NAME-ex.jar ]; then
+    profman_cmdline="${profman_cmdline} \
+      --apk=$DEX_LOCATION/$TEST_NAME-ex.jar \
+      --dex-location=$DEX_LOCATION/$TEST_NAME-ex.jar"
+  fi
   COMPILE_FLAGS="${COMPILE_FLAGS} --profile-file=$DEX_LOCATION/$TEST_NAME.prof"
   FLAGS="${FLAGS} -Xcompiler-option --profile-file=$DEX_LOCATION/$TEST_NAME.prof"
   if [ "$PROFILE" = "y" ]; then
@@ -582,7 +587,11 @@ if [ "$PREBUILD" = "y" ]; then
     app_image="--base=0x4000 --app-image-file=$DEX_LOCATION/oat/$ISA/$TEST_NAME.art"
   fi
 
-  dex2oat_cmdline="$INVOKE_WITH $ANDROID_ROOT/bin/dex2oatd \
+  dex2oat_binary=dex2oatd
+  if  [[ "$TEST_IS_NDEBUG" = "y" ]]; then
+    dex2oat_binary=dex2oat
+  fi
+  dex2oat_cmdline="$INVOKE_WITH $ANDROID_ROOT/bin/$dex2oat_binary \
                       $COMPILE_FLAGS \
                       --boot-image=${BOOT_IMAGE} \
                       --dex-file=$DEX_LOCATION/$TEST_NAME.jar \
@@ -607,6 +616,8 @@ if [ "$PREBUILD" = "y" ]; then
     vdex_cmdline="${dex2oat_cmdline} ${VDEX_FILTER} --input-vdex=$DEX_LOCATION/oat/$ISA/$TEST_NAME.vdex --output-vdex=$DEX_LOCATION/oat/$ISA/$TEST_NAME.vdex"
   elif [ "$TEST_VDEX" = "y" ]; then
     vdex_cmdline="${dex2oat_cmdline} ${VDEX_FILTER} --input-vdex=$DEX_LOCATION/oat/$ISA/$TEST_NAME.vdex"
+  elif [ "$PROFILE" = "y" ] || [ "$RANDOM_PROFILE" = "y" ]; then
+    vdex_cmdline="${dex2oat_cmdline} --input-vdex=$DEX_LOCATION/oat/$ISA/$TEST_NAME.vdex --output-vdex=$DEX_LOCATION/oat/$ISA/$TEST_NAME.vdex"
   fi
 fi
 
@@ -659,7 +670,7 @@ if [ "$HOST" = "n" ]; then
     adb root > /dev/null
     adb wait-for-device
     if [ "$QUIET" = "n" ]; then
-      adb shell rm -r $DEX_LOCATION
+      adb shell rm -rf $DEX_LOCATION
       adb shell mkdir -p $DEX_LOCATION
       adb push $TEST_NAME.jar $DEX_LOCATION
       adb push $TEST_NAME-ex.jar $DEX_LOCATION
@@ -727,6 +738,7 @@ if [ "$HOST" = "n" ]; then
 
     rm -f $cmdfile
 else
+    # Host run.
     export ANDROID_PRINTF_LOG=brief
 
     # By default, and for prebuild dex2oat, we are interested in errors being logged. In dev mode
@@ -783,7 +795,12 @@ else
 
     cd $ANDROID_BUILD_TOP
 
+    # Make sure we delete any existing compiler artifacts.
+    # This enables tests to call the RUN script multiple times in a row
+    # without worrying about interference.
+    rm -rf ${DEX_LOCATION}/oat
     rm -rf ${DEX_LOCATION}/dalvik-cache/
+
     mkdir -p ${mkdir_locations} || exit 1
     $profman_cmdline || { echo "Profman failed." >&2 ; exit 2; }
     $dex2oat_cmdline || { echo "Dex2oat failed." >&2 ; exit 2; }

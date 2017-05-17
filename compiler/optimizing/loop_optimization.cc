@@ -71,7 +71,7 @@ static bool IsSignExtensionAndGet(HInstruction* instruction,
   // extension when represented in the *width* of the given narrower data type
   // (the fact that char normally zero extends does not matter here).
   int64_t value = 0;
-  if (IsInt64AndGet(instruction, &value)) {
+  if (IsInt64AndGet(instruction, /*out*/ &value)) {
     switch (type) {
       case Primitive::kPrimByte:
         if (std::numeric_limits<int8_t>::min() <= value &&
@@ -119,7 +119,7 @@ static bool IsZeroExtensionAndGet(HInstruction* instruction,
   // extension when represented in the *width* of the given narrower data type
   // (the fact that byte/short normally sign extend does not matter here).
   int64_t value = 0;
-  if (IsInt64AndGet(instruction, &value)) {
+  if (IsInt64AndGet(instruction, /*out*/ &value)) {
     switch (type) {
       case Primitive::kPrimByte:
         if (std::numeric_limits<uint8_t>::min() <= value &&
@@ -733,12 +733,6 @@ bool HLoopOptimization::VectorizeUse(LoopNode* node,
     }
     return true;
   } else if (instruction->IsArrayGet()) {
-    // Strings are different, with a different offset to the actual data
-    // and some compressed to save memory. For now, all cases are rejected
-    // to avoid the complexity.
-    if (instruction->AsArrayGet()->IsStringCharAt()) {
-      return false;
-    }
     // Accept a right-hand-side array base[index] for
     // (1) exact matching vector type,
     // (2) loop-invariant base,
@@ -839,17 +833,17 @@ bool HLoopOptimization::VectorizeUse(LoopNode* node,
     // TODO: accept symbolic, albeit loop invariant shift factors.
     HInstruction* opa = instruction->InputAt(0);
     HInstruction* opb = instruction->InputAt(1);
-    if (VectorizeUse(node, opa, generate_code, type, restrictions) && opb->IsIntConstant()) {
-      if (generate_code) {
-        // Make sure shift factor only looks at lower bits, as defined for sequential shifts.
-        // Note that even the narrower SIMD shifts do the right thing after that.
-        int32_t mask = (instruction->GetType() == Primitive::kPrimLong)
-            ? kMaxLongShiftDistance
-            : kMaxIntShiftDistance;
-        HInstruction* s = graph_->GetIntConstant(opb->AsIntConstant()->GetValue() & mask);
-        GenerateVecOp(instruction, vector_map_->Get(opa), s, type);
+    int64_t distance = 0;
+    if (VectorizeUse(node, opa, generate_code, type, restrictions) &&
+        IsInt64AndGet(opb, /*out*/ &distance)) {
+      // Restrict shift distance to packed data type width.
+      int64_t max_distance = Primitive::ComponentSize(type) * 8;
+      if (0 <= distance && distance < max_distance) {
+        if (generate_code) {
+          GenerateVecOp(instruction, vector_map_->Get(opa), opb, type);
+        }
+        return true;
       }
-      return true;
     }
   } else if (instruction->IsInvokeStaticOrDirect()) {
     // Accept particular intrinsics.
@@ -870,6 +864,32 @@ bool HLoopOptimization::VectorizeUse(LoopNode* node,
         if (VectorizeUse(node, opa, generate_code, type, restrictions)) {
           if (generate_code) {
             GenerateVecOp(instruction, vector_map_->Get(opa), nullptr, type);
+          }
+          return true;
+        }
+        return false;
+      }
+      case Intrinsics::kMathMinIntInt:
+      case Intrinsics::kMathMinLongLong:
+      case Intrinsics::kMathMinFloatFloat:
+      case Intrinsics::kMathMinDoubleDouble:
+      case Intrinsics::kMathMaxIntInt:
+      case Intrinsics::kMathMaxLongLong:
+      case Intrinsics::kMathMaxFloatFloat:
+      case Intrinsics::kMathMaxDoubleDouble: {
+        // Deal with vector restrictions.
+        if (HasVectorRestrictions(restrictions, kNoMinMax) ||
+            HasVectorRestrictions(restrictions, kNoHiBits)) {
+          // TODO: we can do better for some hibits cases.
+          return false;
+        }
+        // Accept MIN/MAX(x, y) for vectorizable operands.
+        HInstruction* opa = instruction->InputAt(0);
+        HInstruction* opb = instruction->InputAt(1);
+        if (VectorizeUse(node, opa, generate_code, type, restrictions) &&
+            VectorizeUse(node, opb, generate_code, type, restrictions)) {
+          if (generate_code) {
+            GenerateVecOp(instruction, vector_map_->Get(opa), vector_map_->Get(opb), type);
           }
           return true;
         }
@@ -904,7 +924,7 @@ bool HLoopOptimization::TrySetVectorType(Primitive::Type type, uint64_t* restric
           *restrictions |= kNoDiv;
           return TrySetVectorLength(4);
         case Primitive::kPrimLong:
-          *restrictions |= kNoDiv | kNoMul;
+          *restrictions |= kNoDiv | kNoMul | kNoMinMax;
           return TrySetVectorLength(2);
         case Primitive::kPrimFloat:
           return TrySetVectorLength(4);
@@ -930,11 +950,13 @@ bool HLoopOptimization::TrySetVectorType(Primitive::Type type, uint64_t* restric
             *restrictions |= kNoDiv;
             return TrySetVectorLength(4);
           case Primitive::kPrimLong:
-            *restrictions |= kNoMul | kNoDiv | kNoShr | kNoAbs;
+            *restrictions |= kNoMul | kNoDiv | kNoShr | kNoAbs | kNoMinMax;
             return TrySetVectorLength(2);
           case Primitive::kPrimFloat:
+            *restrictions |= kNoMinMax;  // -0.0 vs +0.0
             return TrySetVectorLength(4);
           case Primitive::kPrimDouble:
+            *restrictions |= kNoMinMax;  // -0.0 vs +0.0
             return TrySetVectorLength(2);
           default:
             break;
@@ -1114,6 +1136,24 @@ void HLoopOptimization::GenerateVecOp(HInstruction* org,
             DCHECK(opb == nullptr);
             vector = new (global_allocator_) HVecAbs(global_allocator_, opa, type, vector_length_);
             break;
+          case Intrinsics::kMathMinIntInt:
+          case Intrinsics::kMathMinLongLong:
+          case Intrinsics::kMathMinFloatFloat:
+          case Intrinsics::kMathMinDoubleDouble: {
+            bool is_unsigned = false;  // TODO: detect unsigned versions
+            vector = new (global_allocator_)
+                HVecMin(global_allocator_, opa, opb, type, vector_length_, is_unsigned);
+            break;
+          }
+          case Intrinsics::kMathMaxIntInt:
+          case Intrinsics::kMathMaxLongLong:
+          case Intrinsics::kMathMaxFloatFloat:
+          case Intrinsics::kMathMaxDoubleDouble: {
+            bool is_unsigned = false;  // TODO: detect unsigned versions
+            vector = new (global_allocator_)
+                HVecMax(global_allocator_, opa, opb, type, vector_length_, is_unsigned);
+            break;
+          }
           default:
             LOG(FATAL) << "Unsupported SIMD intrinsic";
             UNREACHABLE();
@@ -1178,14 +1218,14 @@ bool HLoopOptimization::VectorizeHalvingAddIdiom(LoopNode* node,
   int64_t value = 0;
   if ((instruction->IsShr() ||
        instruction->IsUShr()) &&
-      IsInt64AndGet(instruction->InputAt(1), &value) && value == 1) {
+      IsInt64AndGet(instruction->InputAt(1), /*out*/ &value) && value == 1) {
     //
     // TODO: make following code less sensitive to associativity and commutativity differences.
     //
     HInstruction* x = instruction->InputAt(0);
     // Test for an optional rounding part (x + 1) >> 1.
     bool is_rounded = false;
-    if (x->IsAdd() && IsInt64AndGet(x->InputAt(1), &value) && value == 1) {
+    if (x->IsAdd() && IsInt64AndGet(x->InputAt(1), /*out*/ &value) && value == 1) {
       x = x->InputAt(0);
       is_rounded = true;
     }

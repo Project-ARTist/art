@@ -150,8 +150,13 @@ static constexpr bool kUsePartialTlabs = true;
 static uint8_t* const kPreferredAllocSpaceBegin =
     reinterpret_cast<uint8_t*>(300 * MB - Heap::kDefaultNonMovingSpaceCapacity);
 #else
-// For 32-bit, use 0x20000000 because asan reserves 0x04000000 - 0x20000000.
+#ifdef __ANDROID__
+// For 32-bit Android, use 0x20000000 because asan reserves 0x04000000 - 0x20000000.
 static uint8_t* const kPreferredAllocSpaceBegin = reinterpret_cast<uint8_t*>(0x20000000);
+#else
+// For 32-bit host, use 0x40000000 because asan uses most of the space below this.
+static uint8_t* const kPreferredAllocSpaceBegin = reinterpret_cast<uint8_t*>(0x40000000);
+#endif
 #endif
 
 static inline bool CareAboutPauseTimes() {
@@ -558,6 +563,7 @@ Heap::Heap(size_t initial_size,
   native_blocking_gc_lock_ = new Mutex("Native blocking GC lock");
   native_blocking_gc_cond_.reset(new ConditionVariable("Native blocking GC condition variable",
                                                        *native_blocking_gc_lock_));
+  native_blocking_gc_is_assigned_ = false;
   native_blocking_gc_in_progress_ = false;
   native_blocking_gcs_finished_ = 0;
 
@@ -2690,6 +2696,10 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
     // old_native_bytes_allocated_ now that GC has been triggered, resetting
     // new_native_bytes_allocated_ to zero in the process.
     old_native_bytes_allocated_.FetchAndAddRelaxed(new_native_bytes_allocated_.ExchangeRelaxed(0));
+    if (gc_cause == kGcCauseForNativeAllocBlocking) {
+      MutexLock mu(self, *native_blocking_gc_lock_);
+      native_blocking_gc_in_progress_ = true;
+    }
   }
 
   DCHECK_LT(gc_type, collector::kGcTypeMax);
@@ -3521,6 +3531,7 @@ collector::GcType Heap::WaitForGcToCompleteLocked(GcCause cause, Thread* self) {
     // it results in log spam. kGcCauseExplicit is already logged in LogGC, so avoid it here too.
     if (cause == kGcCauseForAlloc ||
         cause == kGcCauseForNativeAlloc ||
+        cause == kGcCauseForNativeAllocBlocking ||
         cause == kGcCauseDisableMovingGc) {
       VLOG(gc) << "Starting a blocking GC " << cause;
     }
@@ -3922,33 +3933,36 @@ void Heap::RegisterNativeAllocation(JNIEnv* env, size_t bytes) {
         // finish before addressing the fact that we exceeded the blocking
         // watermark again.
         do {
+          ScopedTrace trace("RegisterNativeAllocation: Wait For Prior Blocking GC Completion");
           native_blocking_gc_cond_->Wait(self);
         } while (native_blocking_gcs_finished_ == initial_gcs_finished);
         initial_gcs_finished++;
       }
 
       // It's possible multiple threads have seen that we exceeded the
-      // blocking watermark. Ensure that only one of those threads runs the
-      // blocking GC. The rest of the threads should instead wait for the
-      // blocking GC to complete.
+      // blocking watermark. Ensure that only one of those threads is assigned
+      // to run the blocking GC. The rest of the threads should instead wait
+      // for the blocking GC to complete.
       if (native_blocking_gcs_finished_ == initial_gcs_finished) {
-        if (native_blocking_gc_in_progress_) {
+        if (native_blocking_gc_is_assigned_) {
           do {
+            ScopedTrace trace("RegisterNativeAllocation: Wait For Blocking GC Completion");
             native_blocking_gc_cond_->Wait(self);
           } while (native_blocking_gcs_finished_ == initial_gcs_finished);
         } else {
-          native_blocking_gc_in_progress_ = true;
+          native_blocking_gc_is_assigned_ = true;
           run_gc = true;
         }
       }
     }
 
     if (run_gc) {
-      CollectGarbageInternal(NonStickyGcType(), kGcCauseForNativeAlloc, false);
+      CollectGarbageInternal(NonStickyGcType(), kGcCauseForNativeAllocBlocking, false);
       RunFinalization(env, kNativeAllocationFinalizeTimeout);
       CHECK(!env->ExceptionCheck());
 
       MutexLock mu(self, *native_blocking_gc_lock_);
+      native_blocking_gc_is_assigned_ = false;
       native_blocking_gc_in_progress_ = false;
       native_blocking_gcs_finished_++;
       native_blocking_gc_cond_->Broadcast(self);
@@ -3957,7 +3971,7 @@ void Heap::RegisterNativeAllocation(JNIEnv* env, size_t bytes) {
     // Trigger another GC because there have been enough native bytes
     // allocated since the last GC.
     if (IsGcConcurrent()) {
-      RequestConcurrentGC(ThreadForEnv(env), kGcCauseForNativeAllocBackground, /*force_full*/true);
+      RequestConcurrentGC(ThreadForEnv(env), kGcCauseForNativeAlloc, /*force_full*/true);
     } else {
       CollectGarbageInternal(NonStickyGcType(), kGcCauseForNativeAlloc, false);
     }

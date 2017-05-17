@@ -14,27 +14,20 @@
  * limitations under the License.
  */
 
-#ifndef ART_COMPILER_COMPILED_CLASS_H_
-#define ART_COMPILER_COMPILED_CLASS_H_
-
-#include "mirror/class.h"
+#include "image_test.h"
 
 namespace art {
 
-class CompiledClass {
- public:
-  explicit CompiledClass(mirror::Class::Status status) : status_(status) {}
-  ~CompiledClass() {}
-  mirror::Class::Status GetStatus() const {
-    return status_;
-  }
-  void SetStatus(mirror::Class::Status status) {
-    status_ = status;
-  }
- private:
-  mirror::Class::Status status_;
-};
+TEST_F(ImageTest, WriteReadUncompressed) {
+  TestWriteRead(ImageHeader::kStorageModeUncompressed);
+}
+
+TEST_F(ImageTest, WriteReadLZ4) {
+  TestWriteRead(ImageHeader::kStorageModeLZ4);
+}
+
+TEST_F(ImageTest, WriteReadLZ4HC) {
+  TestWriteRead(ImageHeader::kStorageModeLZ4HC);
+}
 
 }  // namespace art
-
-#endif  // ART_COMPILER_COMPILED_CLASS_H_

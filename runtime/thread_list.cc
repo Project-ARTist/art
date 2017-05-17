@@ -34,6 +34,7 @@
 #include "base/timing_logger.h"
 #include "debugger.h"
 #include "gc/collector/concurrent_copying.h"
+#include "gc/gc_pause_listener.h"
 #include "gc/reference_processor.h"
 #include "jni_internal.h"
 #include "lock_word.h"
@@ -73,12 +74,17 @@ ThreadList::ThreadList(uint64_t thread_suspend_timeout_ns)
       unregistering_count_(0),
       suspend_all_historam_("suspend all histogram", 16, 64),
       long_suspend_(false),
+      shut_down_(false),
       thread_suspend_timeout_ns_(thread_suspend_timeout_ns),
       empty_checkpoint_barrier_(new Barrier(0)) {
   CHECK(Monitor::IsValidLockWord(LockWord::FromThinLockId(kMaxThreadId, 1, 0U)));
 }
 
 ThreadList::~ThreadList() {
+  CHECK(shut_down_);
+}
+
+void ThreadList::ShutDown() {
   ScopedTrace trace(__PRETTY_FUNCTION__);
   // Detach the current thread if necessary. If we failed to start, there might not be any threads.
   // We need to detach the current thread here in case there's another thread waiting to join with
@@ -102,6 +108,8 @@ ThreadList::~ThreadList() {
   // TODO: there's an unaddressed race here where a thread may attach during shutdown, see
   //       Thread::Init.
   SuspendAllDaemonThreadsForShutdown();
+
+  shut_down_ = true;
 }
 
 bool ThreadList::Contains(Thread* thread) {
@@ -521,7 +529,8 @@ size_t ThreadList::RunCheckpointOnRunnableThreads(Closure* checkpoint_function) 
 // invariant.
 size_t ThreadList::FlipThreadRoots(Closure* thread_flip_visitor,
                                    Closure* flip_callback,
-                                   gc::collector::GarbageCollector* collector) {
+                                   gc::collector::GarbageCollector* collector,
+                                   gc::GcPauseListener* pause_listener) {
   TimingLogger::ScopedTiming split("ThreadListFlip", collector->GetTimings());
   Thread* self = Thread::Current();
   Locks::mutator_lock_->AssertNotHeld(self);
@@ -535,6 +544,9 @@ size_t ThreadList::FlipThreadRoots(Closure* thread_flip_visitor,
   // pause.
   const uint64_t suspend_start_time = NanoTime();
   SuspendAllInternal(self, self, nullptr);
+  if (pause_listener != nullptr) {
+    pause_listener->StartPause();
+  }
 
   // Run the flip callback for the collector.
   Locks::mutator_lock_->ExclusiveLock(self);
@@ -542,6 +554,9 @@ size_t ThreadList::FlipThreadRoots(Closure* thread_flip_visitor,
   flip_callback->Run(self);
   Locks::mutator_lock_->ExclusiveUnlock(self);
   collector->RegisterPause(NanoTime() - suspend_start_time);
+  if (pause_listener != nullptr) {
+    pause_listener->EndPause();
+  }
 
   // Resume runnable threads.
   size_t runnable_thread_count = 0;
@@ -1362,6 +1377,7 @@ void ThreadList::SuspendAllDaemonThreadsForShutdown() {
 
 void ThreadList::Register(Thread* self) {
   DCHECK_EQ(self, Thread::Current());
+  CHECK(!shut_down_);
 
   if (VLOG_IS_ON(threads)) {
     std::ostringstream oss;
@@ -1387,13 +1403,14 @@ void ThreadList::Register(Thread* self) {
   CHECK(!Contains(self));
   list_.push_back(self);
   if (kUseReadBarrier) {
+    gc::collector::ConcurrentCopying* const cc =
+        Runtime::Current()->GetHeap()->ConcurrentCopyingCollector();
     // Initialize according to the state of the CC collector.
-    bool is_gc_marking =
-        Runtime::Current()->GetHeap()->ConcurrentCopyingCollector()->IsMarking();
-    self->SetIsGcMarkingAndUpdateEntrypoints(is_gc_marking);
-    bool weak_ref_access_enabled =
-        Runtime::Current()->GetHeap()->ConcurrentCopyingCollector()->IsWeakRefAccessEnabled();
-    self->SetWeakRefAccessEnabled(weak_ref_access_enabled);
+    self->SetIsGcMarkingAndUpdateEntrypoints(cc->IsMarking());
+    if (cc->IsUsingReadBarrierEntrypoints()) {
+      self->SetReadBarrierEntrypoints();
+    }
+    self->SetWeakRefAccessEnabled(cc->IsWeakRefAccessEnabled());
   }
 }
 

@@ -194,6 +194,7 @@ void InstructionCodeGeneratorX86_64::VisitVecNeg(HVecNeg* instruction) {
 
 void LocationsBuilderX86_64::VisitVecAbs(HVecAbs* instruction) {
   CreateVecUnOpLocations(GetGraph()->GetArena(), instruction);
+  // Integral-abs requires a temporary for the comparison.
   if (instruction->GetPackedType() == Primitive::kPrimInt) {
     instruction->GetLocations()->AddTemp(Location::RequiresFpuRegister());
   }
@@ -352,6 +353,10 @@ void InstructionCodeGeneratorX86_64::VisitVecHalvingAdd(HVecHalvingAdd* instruct
   DCHECK(locations->InAt(0).Equals(locations->Out()));
   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
+
+  DCHECK(instruction->IsRounded());
+  DCHECK(instruction->IsUnsigned());
+
   switch (instruction->GetPackedType()) {
     case Primitive::kPrimByte:
       DCHECK_EQ(16u, instruction->GetVectorLength());
@@ -471,7 +476,51 @@ void LocationsBuilderX86_64::VisitVecMin(HVecMin* instruction) {
 }
 
 void InstructionCodeGeneratorX86_64::VisitVecMin(HVecMin* instruction) {
-  LOG(FATAL) << "No SIMD for " << instruction->GetId();
+  LocationSummary* locations = instruction->GetLocations();
+  DCHECK(locations->InAt(0).Equals(locations->Out()));
+  XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
+  XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
+  switch (instruction->GetPackedType()) {
+    case Primitive::kPrimByte:
+      DCHECK_EQ(16u, instruction->GetVectorLength());
+      if (instruction->IsUnsigned()) {
+        __ pminub(dst, src);
+      } else {
+        __ pminsb(dst, src);
+      }
+      break;
+    case Primitive::kPrimChar:
+    case Primitive::kPrimShort:
+      DCHECK_EQ(8u, instruction->GetVectorLength());
+      if (instruction->IsUnsigned()) {
+        __ pminuw(dst, src);
+      } else {
+        __ pminsw(dst, src);
+      }
+      break;
+    case Primitive::kPrimInt:
+      DCHECK_EQ(4u, instruction->GetVectorLength());
+      if (instruction->IsUnsigned()) {
+        __ pminud(dst, src);
+      } else {
+        __ pminsd(dst, src);
+      }
+      break;
+    // Next cases are sloppy wrt 0.0 vs -0.0.
+    case Primitive::kPrimFloat:
+      DCHECK_EQ(4u, instruction->GetVectorLength());
+      DCHECK(!instruction->IsUnsigned());
+      __ minps(dst, src);
+      break;
+    case Primitive::kPrimDouble:
+      DCHECK_EQ(2u, instruction->GetVectorLength());
+      DCHECK(!instruction->IsUnsigned());
+      __ minpd(dst, src);
+      break;
+    default:
+      LOG(FATAL) << "Unsupported SIMD type";
+      UNREACHABLE();
+  }
 }
 
 void LocationsBuilderX86_64::VisitVecMax(HVecMax* instruction) {
@@ -479,7 +528,51 @@ void LocationsBuilderX86_64::VisitVecMax(HVecMax* instruction) {
 }
 
 void InstructionCodeGeneratorX86_64::VisitVecMax(HVecMax* instruction) {
-  LOG(FATAL) << "No SIMD for " << instruction->GetId();
+  LocationSummary* locations = instruction->GetLocations();
+  DCHECK(locations->InAt(0).Equals(locations->Out()));
+  XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
+  XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
+  switch (instruction->GetPackedType()) {
+    case Primitive::kPrimByte:
+      DCHECK_EQ(16u, instruction->GetVectorLength());
+      if (instruction->IsUnsigned()) {
+        __ pmaxub(dst, src);
+      } else {
+        __ pmaxsb(dst, src);
+      }
+      break;
+    case Primitive::kPrimChar:
+    case Primitive::kPrimShort:
+      DCHECK_EQ(8u, instruction->GetVectorLength());
+      if (instruction->IsUnsigned()) {
+        __ pmaxuw(dst, src);
+      } else {
+        __ pmaxsw(dst, src);
+      }
+      break;
+    case Primitive::kPrimInt:
+      DCHECK_EQ(4u, instruction->GetVectorLength());
+      if (instruction->IsUnsigned()) {
+        __ pmaxud(dst, src);
+      } else {
+        __ pmaxsd(dst, src);
+      }
+      break;
+    // Next cases are sloppy wrt 0.0 vs -0.0.
+    case Primitive::kPrimFloat:
+      DCHECK_EQ(4u, instruction->GetVectorLength());
+      DCHECK(!instruction->IsUnsigned());
+      __ maxps(dst, src);
+      break;
+    case Primitive::kPrimDouble:
+      DCHECK_EQ(2u, instruction->GetVectorLength());
+      DCHECK(!instruction->IsUnsigned());
+      __ maxpd(dst, src);
+      break;
+    default:
+      LOG(FATAL) << "Unsupported SIMD type";
+      UNREACHABLE();
+  }
 }
 
 void LocationsBuilderX86_64::VisitVecAnd(HVecAnd* instruction) {
@@ -755,16 +848,10 @@ static void CreateVecMemLocations(ArenaAllocator* arena,
   }
 }
 
-// Helper to set up registers and address for vector memory operations.
-static Address CreateVecMemRegisters(HVecMemoryOperation* instruction,
-                                     Location* reg_loc,
-                                     bool is_load) {
-  LocationSummary* locations = instruction->GetLocations();
+// Helper to construct address for vector memory operations.
+static Address VecAddress(LocationSummary* locations, size_t size, bool is_string_char_at) {
   Location base = locations->InAt(0);
   Location index = locations->InAt(1);
-  *reg_loc = is_load ? locations->Out() : locations->InAt(2);
-  size_t size = Primitive::ComponentSize(instruction->GetPackedType());
-  uint32_t offset = mirror::Array::DataOffset(size).Uint32Value();
   ScaleFactor scale = TIMES_1;
   switch (size) {
     case 2: scale = TIMES_2; break;
@@ -772,22 +859,53 @@ static Address CreateVecMemRegisters(HVecMemoryOperation* instruction,
     case 8: scale = TIMES_8; break;
     default: break;
   }
+  uint32_t offset = is_string_char_at
+      ? mirror::String::ValueOffset().Uint32Value()
+      : mirror::Array::DataOffset(size).Uint32Value();
   return CodeGeneratorX86_64::ArrayAddress(base.AsRegister<CpuRegister>(), index, scale, offset);
 }
 
 void LocationsBuilderX86_64::VisitVecLoad(HVecLoad* instruction) {
   CreateVecMemLocations(GetGraph()->GetArena(), instruction, /*is_load*/ true);
+  // String load requires a temporary for the compressed load.
+  if (mirror::kUseStringCompression && instruction->IsStringCharAt()) {
+    instruction->GetLocations()->AddTemp(Location::RequiresFpuRegister());
+  }
 }
 
 void InstructionCodeGeneratorX86_64::VisitVecLoad(HVecLoad* instruction) {
-  Location reg_loc = Location::NoLocation();
-  Address address = CreateVecMemRegisters(instruction, &reg_loc, /*is_load*/ true);
-  XmmRegister reg = reg_loc.AsFpuRegister<XmmRegister>();
+  LocationSummary* locations = instruction->GetLocations();
+  size_t size = Primitive::ComponentSize(instruction->GetPackedType());
+  Address address = VecAddress(locations, size, instruction->IsStringCharAt());
+  XmmRegister reg = locations->Out().AsFpuRegister<XmmRegister>();
   bool is_aligned16 = instruction->GetAlignment().IsAlignedAt(16);
   switch (instruction->GetPackedType()) {
+    case Primitive::kPrimChar:
+      DCHECK_EQ(8u, instruction->GetVectorLength());
+      // Special handling of compressed/uncompressed string load.
+      if (mirror::kUseStringCompression && instruction->IsStringCharAt()) {
+        NearLabel done, not_compressed;
+        XmmRegister tmp = locations->GetTemp(0).AsFpuRegister<XmmRegister>();
+        // Test compression bit.
+        static_assert(static_cast<uint32_t>(mirror::StringCompressionFlag::kCompressed) == 0u,
+                      "Expecting 0=compressed, 1=uncompressed");
+        uint32_t count_offset = mirror::String::CountOffset().Uint32Value();
+        __ testb(Address(locations->InAt(0).AsRegister<CpuRegister>(), count_offset), Immediate(1));
+        __ j(kNotZero, &not_compressed);
+        // Zero extend 8 compressed bytes into 8 chars.
+        __ movsd(reg, VecAddress(locations, 1, /*is_string_char_at*/ true));
+        __ pxor(tmp, tmp);
+        __ punpcklbw(reg, tmp);
+        __ jmp(&done);
+        // Load 8 direct uncompressed chars.
+        __ Bind(&not_compressed);
+        is_aligned16 ?  __ movdqa(reg, address) :  __ movdqu(reg, address);
+        __ Bind(&done);
+        return;
+      }
+      FALLTHROUGH_INTENDED;
     case Primitive::kPrimBoolean:
     case Primitive::kPrimByte:
-    case Primitive::kPrimChar:
     case Primitive::kPrimShort:
     case Primitive::kPrimInt:
     case Primitive::kPrimLong:
@@ -814,9 +932,10 @@ void LocationsBuilderX86_64::VisitVecStore(HVecStore* instruction) {
 }
 
 void InstructionCodeGeneratorX86_64::VisitVecStore(HVecStore* instruction) {
-  Location reg_loc = Location::NoLocation();
-  Address address = CreateVecMemRegisters(instruction, &reg_loc, /*is_load*/ false);
-  XmmRegister reg = reg_loc.AsFpuRegister<XmmRegister>();
+  LocationSummary* locations = instruction->GetLocations();
+  size_t size = Primitive::ComponentSize(instruction->GetPackedType());
+  Address address = VecAddress(locations, size, /*is_string_char_at*/ false);
+  XmmRegister reg = locations->InAt(2).AsFpuRegister<XmmRegister>();
   bool is_aligned16 = instruction->GetAlignment().IsAlignedAt(16);
   switch (instruction->GetPackedType()) {
     case Primitive::kPrimBoolean:

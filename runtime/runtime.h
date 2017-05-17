@@ -29,6 +29,7 @@
 #include "arch/instruction_set.h"
 #include "base/macros.h"
 #include "base/mutex.h"
+#include "deoptimization_kind.h"
 #include "dex_file_types.h"
 #include "experimental_flags.h"
 #include "gc_root.h"
@@ -47,9 +48,6 @@ namespace art {
 namespace gc {
   class AbstractSystemWeakHolder;
   class Heap;
-  namespace collector {
-    class GarbageCollector;
-  }  // namespace collector
 }  // namespace gc
 
 namespace jit {
@@ -78,7 +76,6 @@ class ArenaPool;
 class ArtMethod;
 class ClassHierarchyAnalysis;
 class ClassLinker;
-class Closure;
 class CompilerCallbacks;
 class DexFile;
 class InternTable;
@@ -235,6 +232,7 @@ class Runtime {
   // Detaches the current native thread from the runtime.
   void DetachCurrentThread() REQUIRES(!Locks::mutator_lock_);
 
+  void DumpDeoptimizations(std::ostream& os);
   void DumpForSigQuit(std::ostream& os);
   void DumpLockHolders(std::ostream& os);
 
@@ -338,11 +336,6 @@ class Runtime {
   void VisitTransactionRoots(RootVisitor* visitor)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Flip thread roots from from-space refs to to-space refs.
-  size_t FlipThreadRoots(Closure* thread_flip_visitor, Closure* flip_callback,
-                         gc::collector::GarbageCollector* collector)
-      REQUIRES(!Locks::mutator_lock_);
-
   // Sweep system weaks, the system weak is deleted if the visitor return null. Otherwise, the
   // system weak is updated to be the visitor's returned value.
   void SweepSystemWeaks(IsMarkedVisitor* visitor)
@@ -356,6 +349,9 @@ class Runtime {
   }
 
   void SetResolutionMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
+  void ClearResolutionMethod() {
+    resolution_method_ = nullptr;
+  }
 
   ArtMethod* CreateResolutionMethod() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -367,12 +363,20 @@ class Runtime {
     return imt_conflict_method_ != nullptr;
   }
 
+  void ClearImtConflictMethod() {
+    imt_conflict_method_ = nullptr;
+  }
+
   void FixupConflictTables();
   void SetImtConflictMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
   void SetImtUnimplementedMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
 
   ArtMethod* CreateImtConflictMethod(LinearAlloc* linear_alloc)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void ClearImtUnimplementedMethod() {
+    imt_unimplemented_method_ = nullptr;
+  }
 
   // Returns a special method that describes all callee saves being spilled to the stack.
   enum CalleeSaveType {
@@ -409,8 +413,10 @@ class Runtime {
   }
 
   void SetInstructionSet(InstructionSet instruction_set);
+  void ClearInstructionSet();
 
   void SetCalleeSaveMethod(ArtMethod* method, CalleeSaveType type);
+  void ClearCalleeSaveMethods();
 
   ArtMethod* CreateCalleeSaveMethod() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -667,6 +673,11 @@ class Runtime {
 
   void SetDumpGCPerformanceOnShutdown(bool value) {
     dump_gc_performance_on_shutdown_ = value;
+  }
+
+  void IncrementDeoptimizationCount(DeoptimizationKind kind) {
+    DCHECK_LE(kind, DeoptimizationKind::kLast);
+    deoptimization_counts_[static_cast<size_t>(kind)]++;
   }
 
  private:
@@ -927,6 +938,9 @@ class Runtime {
   ClassHierarchyAnalysis* cha_;
 
   std::unique_ptr<RuntimeCallbacks> callbacks_;
+
+  std::atomic<uint32_t> deoptimization_counts_[
+      static_cast<uint32_t>(DeoptimizationKind::kLast) + 1];
 
   DISALLOW_COPY_AND_ASSIGN(Runtime);
 };

@@ -349,23 +349,23 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("  --profile-file-fd=<number>: same as --profile-file but accepts a file descriptor.");
   UsageError("      Cannot be used together with --profile-file.");
   UsageError("");
-  UsageError("  --swap-file=<file-name>:  specifies a file to use for swap.");
+  UsageError("  --swap-file=<file-name>: specifies a file to use for swap.");
   UsageError("      Example: --swap-file=/data/tmp/swap.001");
   UsageError("");
-  UsageError("  --swap-fd=<file-descriptor>:  specifies a file to use for swap (by descriptor).");
+  UsageError("  --swap-fd=<file-descriptor>: specifies a file to use for swap (by descriptor).");
   UsageError("      Example: --swap-fd=10");
   UsageError("");
-  UsageError("  --swap-dex-size-threshold=<size>:  specifies the minimum total dex file size in");
+  UsageError("  --swap-dex-size-threshold=<size>: specifies the minimum total dex file size in");
   UsageError("      bytes to allow the use of swap.");
   UsageError("      Example: --swap-dex-size-threshold=1000000");
   UsageError("      Default: %zu", kDefaultMinDexFileCumulativeSizeForSwap);
   UsageError("");
-  UsageError("  --swap-dex-count-threshold=<count>:  specifies the minimum number of dex files to");
+  UsageError("  --swap-dex-count-threshold=<count>: specifies the minimum number of dex files to");
   UsageError("      allow the use of swap.");
   UsageError("      Example: --swap-dex-count-threshold=10");
   UsageError("      Default: %zu", kDefaultMinDexFilesForSwap);
   UsageError("");
-  UsageError("  --very-large-app-threshold=<size>:  specifies the minimum total dex file size in");
+  UsageError("  --very-large-app-threshold=<size>: specifies the minimum total dex file size in");
   UsageError("      bytes to consider the input \"very large\" and punt on the compilation.");
   UsageError("      Example: --very-large-app-threshold=100000000");
   UsageError("");
@@ -379,6 +379,14 @@ NO_RETURN static void Usage(const char* fmt, ...) {
              "input dex file.");
   UsageError("");
   UsageError("  --force-determinism: force the compiler to emit a deterministic output.");
+  UsageError("");
+  UsageError("  --dump-cfg=<cfg-file>: dump control-flow graphs (CFGs) to specified file.");
+  UsageError("      Example: --dump-cfg=output.cfg");
+  UsageError("");
+  UsageError("  --dump-cfg-append: when dumping CFGs to an existing file, append new CFG data to");
+  UsageError("      existing data (instead of overwriting existing data with new data, which is");
+  UsageError("      the default behavior). This option is only meaningful when used with");
+  UsageError("      --dump-cfg.");
   UsageError("");
   UsageError("  --classpath-dir=<directory-path>: directory used to resolve relative class paths.");
   UsageError("");
@@ -1364,6 +1372,26 @@ class Dex2Oat FINAL {
       vdex_files_.push_back(std::move(vdex_file));
 
       oat_filenames_.push_back(oat_location_.c_str());
+    }
+
+    // If we're updating in place a vdex file, be defensive and put an invalid vdex magic in case
+    // dex2oat gets killed.
+    // Note: we're only invalidating the magic data in the file, as dex2oat needs the rest of
+    // the information to remain valid.
+    if (update_input_vdex_) {
+      std::unique_ptr<BufferedOutputStream> vdex_out(MakeUnique<BufferedOutputStream>(
+          MakeUnique<FileOutputStream>(vdex_files_.back().get())));
+      if (!vdex_out->WriteFully(&VdexFile::Header::kVdexInvalidMagic,
+                                arraysize(VdexFile::Header::kVdexInvalidMagic))) {
+        PLOG(ERROR) << "Failed to invalidate vdex header. File: " << vdex_out->GetLocation();
+        return false;
+      }
+
+      if (!vdex_out->Flush()) {
+        PLOG(ERROR) << "Failed to flush stream after invalidating header of vdex file."
+                    << " File: " << vdex_out->GetLocation();
+        return false;
+      }
     }
 
     // Swap file handling
@@ -2406,6 +2434,8 @@ class Dex2Oat FINAL {
     if (!IsBootImage()) {
       raw_options.push_back(std::make_pair("-Xno-dex-file-fallback", nullptr));
     }
+    // Never allow implicit image compilation.
+    raw_options.push_back(std::make_pair("-Xnoimage-dex2oat", nullptr));
     // Disable libsigchain. We don't don't need it during compilation and it prevents us
     // from getting a statically linked version of dex2oat (because of dlsym and RTLD_NEXT).
     raw_options.push_back(std::make_pair("-Xno-sig-chain", nullptr));
@@ -2423,8 +2453,8 @@ class Dex2Oat FINAL {
       // which uses an unstarted runtime.
       raw_options.push_back(std::make_pair("-Xgc:nonconcurrent", nullptr));
 
-      // Also force the free-list implementation for large objects.
-      raw_options.push_back(std::make_pair("-XX:LargeObjectSpace=freelist", nullptr));
+      // The default LOS implementation (map) is not deterministic. So disable it.
+      raw_options.push_back(std::make_pair("-XX:LargeObjectSpace=disabled", nullptr));
 
       // We also need to turn off the nonmoving space. For that, we need to disable HSpace
       // compaction (done above) and ensure that neither foreground nor background collectors

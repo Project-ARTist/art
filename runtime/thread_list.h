@@ -35,6 +35,7 @@ namespace gc {
   namespace collector {
     class GarbageCollector;
   }  // namespac collector
+  class GcPauseListener;
 }  // namespace gc
 class Closure;
 class Thread;
@@ -49,6 +50,8 @@ class ThreadList {
 
   explicit ThreadList(uint64_t thread_suspend_timeout_ns);
   ~ThreadList();
+
+  void ShutDown();
 
   void DumpForSigQuit(std::ostream& os)
       REQUIRES(!Locks::thread_list_lock_, !Locks::mutator_lock_);
@@ -119,7 +122,8 @@ class ThreadList {
   // the concurrent copying collector.
   size_t FlipThreadRoots(Closure* thread_flip_visitor,
                          Closure* flip_callback,
-                         gc::collector::GarbageCollector* collector)
+                         gc::collector::GarbageCollector* collector,
+                         gc::GcPauseListener* pause_listener)
       REQUIRES(!Locks::mutator_lock_,
                !Locks::thread_list_lock_,
                !Locks::thread_suspend_count_lock_);
@@ -218,6 +222,10 @@ class ThreadList {
 
   // Whether or not the current thread suspension is long.
   bool long_suspend_;
+
+  // Whether the shutdown function has been called. This is checked in the destructor. It is an
+  // error to destroy a ThreadList instance without first calling ShutDown().
+  bool shut_down_;
 
   // Thread suspension timeout in nanoseconds.
   const uint64_t thread_suspend_timeout_ns_;

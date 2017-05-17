@@ -229,9 +229,10 @@ class InstructionCodeGeneratorMIPS : public InstructionCodeGenerator {
   // We switch to the table-based method starting with 7 cases.
   static constexpr uint32_t kPackedSwitchJumpTableThreshold = 6;
 
+  void GenerateMemoryBarrier(MemBarrierKind kind);
+
  private:
   void GenerateClassInitializationCheck(SlowPathCodeMIPS* slow_path, Register class_reg);
-  void GenerateMemoryBarrier(MemBarrierKind kind);
   void GenerateSuspendCheck(HSuspendCheck* check, HBasicBlock* successor);
   void HandleBinaryOp(HBinaryOperation* operation);
   void HandleCondition(HCondition* instruction);
@@ -294,6 +295,7 @@ class InstructionCodeGeneratorMIPS : public InstructionCodeGenerator {
   void GenerateIntCompareAndBranch(IfCondition cond,
                                    LocationSummary* locations,
                                    MipsLabel* label);
+  void GenerateLongCompare(IfCondition cond, LocationSummary* locations);
   void GenerateLongCompareAndBranch(IfCondition cond,
                                     LocationSummary* locations,
                                     MipsLabel* label);
@@ -586,9 +588,6 @@ class CodeGeneratorMIPS : public CodeGenerator {
   PcRelativePatchInfo* NewTypeBssEntryPatch(const DexFile& dex_file, dex::TypeIndex type_index);
   PcRelativePatchInfo* NewPcRelativeDexCacheArrayPatch(const DexFile& dex_file,
                                                        uint32_t element_offset);
-  Literal* DeduplicateBootImageStringLiteral(const DexFile& dex_file,
-                                             dex::StringIndex string_index);
-  Literal* DeduplicateBootImageTypeLiteral(const DexFile& dex_file, dex::TypeIndex type_index);
   Literal* DeduplicateBootImageAddressLiteral(uint32_t address);
 
   void EmitPcRelativeAddressPlaceholderHigh(PcRelativePatchInfo* info, Register out, Register base);
@@ -622,16 +621,8 @@ class CodeGeneratorMIPS : public CodeGenerator {
   Register GetInvokeStaticOrDirectExtraParameter(HInvokeStaticOrDirect* invoke, Register temp);
 
   using Uint32ToLiteralMap = ArenaSafeMap<uint32_t, Literal*>;
-  using MethodToLiteralMap = ArenaSafeMap<MethodReference, Literal*, MethodReferenceComparator>;
-  using BootStringToLiteralMap = ArenaSafeMap<StringReference,
-                                              Literal*,
-                                              StringReferenceValueComparator>;
-  using BootTypeToLiteralMap = ArenaSafeMap<TypeReference,
-                                            Literal*,
-                                            TypeReferenceValueComparator>;
 
   Literal* DeduplicateUint32Literal(uint32_t value, Uint32ToLiteralMap* map);
-  Literal* DeduplicateMethodLiteral(MethodReference target_method, MethodToLiteralMap* map);
   PcRelativePatchInfo* NewPcRelativePatch(const DexFile& dex_file,
                                           uint32_t offset_or_index,
                                           ArenaDeque<PcRelativePatchInfo>* patches);
@@ -653,12 +644,8 @@ class CodeGeneratorMIPS : public CodeGenerator {
   Uint32ToLiteralMap uint32_literals_;
   // PC-relative patch info for each HMipsDexCacheArraysBase.
   ArenaDeque<PcRelativePatchInfo> pc_relative_dex_cache_patches_;
-  // Deduplication map for boot string literals for kBootImageLinkTimeAddress.
-  BootStringToLiteralMap boot_image_string_patches_;
   // PC-relative String patch info; type depends on configuration (app .bss or boot image PIC).
   ArenaDeque<PcRelativePatchInfo> pc_relative_string_patches_;
-  // Deduplication map for boot type literals for kBootImageLinkTimeAddress.
-  BootTypeToLiteralMap boot_image_type_patches_;
   // PC-relative type patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PcRelativePatchInfo> pc_relative_type_patches_;
   // PC-relative type patch info for kBssEntry.

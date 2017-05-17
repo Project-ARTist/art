@@ -36,7 +36,6 @@
 #include "base/time_utils.h"
 #include "base/timing_logger.h"
 #include "class_linker-inl.h"
-#include "compiled_class.h"
 #include "compiled_method.h"
 #include "compiler.h"
 #include "compiler_callbacks.h"
@@ -317,11 +316,6 @@ CompilerDriver::CompilerDriver(
 }
 
 CompilerDriver::~CompilerDriver() {
-  Thread* self = Thread::Current();
-  {
-    MutexLock mu(self, compiled_classes_lock_);
-    STLDeleteValues(&compiled_classes_);
-  }
   compiled_methods_.Visit([this](const MethodReference& ref ATTRIBUTE_UNUSED,
                                  CompiledMethod* method) {
     if (method != nullptr) {
@@ -1978,8 +1972,7 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
         if (compiler_only_verifies) {
           // Just update the compiled_classes_ map. The compiler doesn't need to resolve
           // the type.
-          compiled_classes_.Overwrite(
-              ClassReference(dex_file, i), new CompiledClass(mirror::Class::kStatusVerified));
+          compiled_classes_.Overwrite(ClassReference(dex_file, i), mirror::Class::kStatusVerified);
         } else {
           // Update the class status, so later compilation stages know they don't need to verify
           // the class.
@@ -2030,16 +2023,18 @@ void CompilerDriver::Verify(jobject jclass_loader,
     }
   }
 
-  // Note: verification should not be pulling in classes anymore when compiling the boot image,
-  //       as all should have been resolved before. As such, doing this in parallel should still
-  //       be deterministic.
+  // Verification updates VerifierDeps and needs to run single-threaded to be deterministic.
+  bool force_determinism = GetCompilerOptions().IsForceDeterminism();
+  ThreadPool* verify_thread_pool =
+      force_determinism ? single_thread_pool_.get() : parallel_thread_pool_.get();
+  size_t verify_thread_count = force_determinism ? 1U : parallel_thread_count_;
   for (const DexFile* dex_file : dex_files) {
     CHECK(dex_file != nullptr);
     VerifyDexFile(jclass_loader,
                   *dex_file,
                   dex_files,
-                  parallel_thread_pool_.get(),
-                  parallel_thread_count_,
+                  verify_thread_pool,
+                  verify_thread_count,
                   timings);
   }
 
@@ -2688,14 +2683,15 @@ void CompilerDriver::AddCompiledMethod(const MethodReference& method_ref,
       << method_ref.dex_file->PrettyMethod(method_ref.dex_method_index);
 }
 
-CompiledClass* CompilerDriver::GetCompiledClass(ClassReference ref) const {
+bool CompilerDriver::GetCompiledClass(ClassReference ref, mirror::Class::Status* status) const {
+  DCHECK(status != nullptr);
   MutexLock mu(Thread::Current(), compiled_classes_lock_);
-  ClassTable::const_iterator it = compiled_classes_.find(ref);
+  ClassStateTable::const_iterator it = compiled_classes_.find(ref);
   if (it == compiled_classes_.end()) {
-    return nullptr;
+    return false;
   }
-  CHECK(it->second != nullptr);
-  return it->second;
+  *status = it->second;
+  return true;
 }
 
 void CompilerDriver::RecordClassStatus(ClassReference ref, mirror::Class::Status status) {
@@ -2717,12 +2713,11 @@ void CompilerDriver::RecordClassStatus(ClassReference ref, mirror::Class::Status
   MutexLock mu(Thread::Current(), compiled_classes_lock_);
   auto it = compiled_classes_.find(ref);
   if (it == compiled_classes_.end()) {
-    CompiledClass* compiled_class = new CompiledClass(status);
-    compiled_classes_.Overwrite(ref, compiled_class);
-  } else if (status > it->second->GetStatus()) {
+    compiled_classes_.Overwrite(ref, status);
+  } else if (status > it->second) {
     // Update the status if we now have a greater one. This happens with vdex,
     // which records a class is verified, but does not resolve it.
-    it->second->SetStatus(status);
+    it->second = status;
   }
 }
 
