@@ -981,7 +981,46 @@ void Heap::VisitObjectsInternal(ObjectCallback callback, void* arg) {
   // TODO: Switch to standard begin and end to use ranged a based loop.
   for (auto* it = allocation_stack_->Begin(), *end = allocation_stack_->End(); it < end; ++it) {
     mirror::Object* const obj = it->AsMirrorPtr();
-    if (obj != nullptr && obj->GetClass() != nullptr) {
+
+    mirror::Class* kls = nullptr;
+    if (obj != nullptr && (kls = obj->GetClass()) != nullptr) {
+      // Below invariant is safe regardless of what space the Object is in.
+      // For speed reasons, only perform it when Rosalloc could possibly be used.
+      // (Disabled for read barriers because it never uses Rosalloc).
+      // (See the DCHECK in RosAllocSpace constructor).
+      if (!kUseReadBarrier) {
+        // Rosalloc has a race in allocation. Objects can be written into the allocation
+        // stack before their header writes are visible to this thread.
+        // See b/28790624 for more details.
+        //
+        // obj.class will either be pointing to a valid Class*, or it will point
+        // to a rosalloc free buffer.
+        //
+        // If it's pointing to a valid Class* then that Class's Class will be the
+        // ClassClass (whose Class is itself).
+        //
+        // A rosalloc free buffer will point to another rosalloc free buffer
+        // (or to null), and never to itself.
+        //
+        // Either way dereferencing while its not-null is safe because it will
+        // always point to another valid pointer or to null.
+        mirror::Class* klsClass = kls->GetClass();
+
+        if (klsClass == nullptr) {
+          continue;
+        } else if (klsClass->GetClass() != klsClass) {
+          continue;
+        }
+      } else {
+        // Ensure the invariant is not broken for non-rosalloc cases.
+        DCHECK(Heap::rosalloc_space_ == nullptr)
+            << "unexpected rosalloc with read barriers";
+        DCHECK(kls->GetClass() != nullptr)
+            << "invalid object: class does not have a class";
+        DCHECK_EQ(kls->GetClass()->GetClass(), kls->GetClass())
+            << "invalid object: class's class is not ClassClass";
+      }
+
       // Avoid the race condition caused by the object not yet being written into the allocation
       // stack or the class not yet being written in the object. Or, if
       // kUseThreadLocalAllocationStack, there can be nulls on the allocation stack.
@@ -1413,6 +1452,9 @@ void Heap::TrimIndirectReferenceTables(Thread* self) {
 }
 
 void Heap::StartGC(Thread* self, GcCause cause, CollectorType collector_type) {
+  // Need to do this before acquiring the locks since we don't want to get suspended while
+  // holding any locks.
+  ScopedThreadStateChange tsc(self, kWaitingForGcToComplete);
   MutexLock mu(self, *gc_complete_lock_);
   // Ensure there is only one GC at a time.
   WaitForGcToCompleteLocked(cause, self);
@@ -1421,14 +1463,9 @@ void Heap::StartGC(Thread* self, GcCause cause, CollectorType collector_type) {
 }
 
 void Heap::TrimSpaces(Thread* self) {
-  {
-    // Need to do this before acquiring the locks since we don't want to get suspended while
-    // holding any locks.
-    ScopedThreadStateChange tsc(self, kWaitingForGcToComplete);
-    // Pretend we are doing a GC to prevent background compaction from deleting the space we are
-    // trimming.
-    StartGC(self, kGcCauseTrim, kCollectorTypeHeapTrim);
-  }
+  // Pretend we are doing a GC to prevent background compaction from deleting the space we are
+  // trimming.
+  StartGC(self, kGcCauseTrim, kCollectorTypeHeapTrim);
   ScopedTrace trace(__PRETTY_FUNCTION__);
   const uint64_t start_ns = NanoTime();
   // Trim the managed spaces.
@@ -4013,7 +4050,7 @@ void Heap::CheckPreconditionsForAllocObject(ObjPtr<mirror::Class> c, size_t byte
       << " IsVariableSize=" << c->IsVariableSize()
       << " ObjectSize=" << c->GetObjectSize()
       << " sizeof(Class)=" << sizeof(mirror::Class)
-      << " klass=" << c.Ptr();
+      << verification_->DumpObjectInfo(c.Ptr(), /*tag*/ "klass");
   CHECK_GE(byte_count, sizeof(mirror::Object));
 }
 
