@@ -400,7 +400,8 @@ class InstructionCodeGeneratorARMVIXL : public InstructionCodeGenerator {
                              bool far_target = true);
   void GenerateCompareTestAndBranch(HCondition* condition,
                                     vixl::aarch32::Label* true_target,
-                                    vixl::aarch32::Label* false_target);
+                                    vixl::aarch32::Label* false_target,
+                                    bool is_far_target = true);
   void DivRemOneOrMinusOne(HBinaryOperation* instruction);
   void DivRemByPowerOfTwo(HBinaryOperation* instruction);
   void GenerateDivRemWithAnyConstant(HBinaryOperation* instruction);
@@ -563,10 +564,11 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
     vixl::aarch32::Label add_pc_label;
   };
 
-  PcRelativePatchInfo* NewPcRelativeStringPatch(const DexFile& dex_file,
-                                                dex::StringIndex string_index);
+  PcRelativePatchInfo* NewPcRelativeMethodPatch(MethodReference target_method);
   PcRelativePatchInfo* NewPcRelativeTypePatch(const DexFile& dex_file, dex::TypeIndex type_index);
   PcRelativePatchInfo* NewTypeBssEntryPatch(const DexFile& dex_file, dex::TypeIndex type_index);
+  PcRelativePatchInfo* NewPcRelativeStringPatch(const DexFile& dex_file,
+                                                dex::StringIndex string_index);
   PcRelativePatchInfo* NewPcRelativeDexCacheArrayPatch(const DexFile& dex_file,
                                                        uint32_t element_offset);
 
@@ -765,12 +767,14 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
   Uint32ToLiteralMap uint32_literals_;
   // PC-relative patch info for each HArmDexCacheArraysBase.
   ArenaDeque<PcRelativePatchInfo> pc_relative_dex_cache_patches_;
-  // PC-relative String patch info; type depends on configuration (app .bss or boot image PIC).
-  ArenaDeque<PcRelativePatchInfo> pc_relative_string_patches_;
+  // PC-relative method patch info for kBootImageLinkTimePcRelative.
+  ArenaDeque<PcRelativePatchInfo> pc_relative_method_patches_;
   // PC-relative type patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PcRelativePatchInfo> pc_relative_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> type_bss_entry_patches_;
+  // PC-relative String patch info; type depends on configuration (app .bss or boot image PIC).
+  ArenaDeque<PcRelativePatchInfo> pc_relative_string_patches_;
   // Baker read barrier patch info.
   ArenaDeque<BakerReadBarrierPatchInfo> baker_read_barrier_patches_;
 

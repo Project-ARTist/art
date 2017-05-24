@@ -2139,7 +2139,8 @@ static void GenerateEqualLong(HCondition* cond, CodeGeneratorARMVIXL* codegen) {
 static void GenerateLongComparesAndJumps(HCondition* cond,
                                          vixl32::Label* true_label,
                                          vixl32::Label* false_label,
-                                         CodeGeneratorARMVIXL* codegen) {
+                                         CodeGeneratorARMVIXL* codegen,
+                                         bool is_far_target = true) {
   LocationSummary* locations = cond->GetLocations();
   Location left = locations->InAt(0);
   Location right = locations->InAt(1);
@@ -2190,12 +2191,12 @@ static void GenerateLongComparesAndJumps(HCondition* cond,
 
     __ Cmp(left_high, val_high);
     if (if_cond == kCondNE) {
-      __ B(ARMCondition(true_high_cond), true_label);
+      __ B(ARMCondition(true_high_cond), true_label, is_far_target);
     } else if (if_cond == kCondEQ) {
-      __ B(ARMCondition(false_high_cond), false_label);
+      __ B(ARMCondition(false_high_cond), false_label, is_far_target);
     } else {
-      __ B(ARMCondition(true_high_cond), true_label);
-      __ B(ARMCondition(false_high_cond), false_label);
+      __ B(ARMCondition(true_high_cond), true_label, is_far_target);
+      __ B(ARMCondition(false_high_cond), false_label, is_far_target);
     }
     // Must be equal high, so compare the lows.
     __ Cmp(left_low, val_low);
@@ -2205,19 +2206,19 @@ static void GenerateLongComparesAndJumps(HCondition* cond,
 
     __ Cmp(left_high, right_high);
     if (if_cond == kCondNE) {
-      __ B(ARMCondition(true_high_cond), true_label);
+      __ B(ARMCondition(true_high_cond), true_label, is_far_target);
     } else if (if_cond == kCondEQ) {
-      __ B(ARMCondition(false_high_cond), false_label);
+      __ B(ARMCondition(false_high_cond), false_label, is_far_target);
     } else {
-      __ B(ARMCondition(true_high_cond), true_label);
-      __ B(ARMCondition(false_high_cond), false_label);
+      __ B(ARMCondition(true_high_cond), true_label, is_far_target);
+      __ B(ARMCondition(false_high_cond), false_label, is_far_target);
     }
     // Must be equal high, so compare the lows.
     __ Cmp(left_low, right_low);
   }
   // The last comparison might be unsigned.
   // TODO: optimize cases where this is always true/false
-  __ B(final_condition, true_label);
+  __ B(final_condition, true_label, is_far_target);
 }
 
 static void GenerateConditionLong(HCondition* cond, CodeGeneratorARMVIXL* codegen) {
@@ -2292,7 +2293,7 @@ static void GenerateConditionLong(HCondition* cond, CodeGeneratorARMVIXL* codege
   vixl32::Label* const final_label = codegen->GetFinalLabel(cond, &done_label);
   vixl32::Label true_label, false_label;
 
-  GenerateLongComparesAndJumps(cond, &true_label, &false_label, codegen);
+  GenerateLongComparesAndJumps(cond, &true_label, &false_label, codegen, /* is_far_target */ false);
 
   // False case: result = 0.
   __ Bind(&false_label);
@@ -2500,9 +2501,10 @@ CodeGeneratorARMVIXL::CodeGeneratorARMVIXL(HGraph* graph,
       uint32_literals_(std::less<uint32_t>(),
                        graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
       pc_relative_dex_cache_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
-      pc_relative_string_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
+      pc_relative_method_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
       pc_relative_type_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
       type_bss_entry_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
+      pc_relative_string_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
       baker_read_barrier_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
       jit_string_patches_(StringReferenceValueComparator(),
                           graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
@@ -2956,7 +2958,8 @@ void InstructionCodeGeneratorARMVIXL::VisitExit(HExit* exit ATTRIBUTE_UNUSED) {
 
 void InstructionCodeGeneratorARMVIXL::GenerateCompareTestAndBranch(HCondition* condition,
                                                                    vixl32::Label* true_target_in,
-                                                                   vixl32::Label* false_target_in) {
+                                                                   vixl32::Label* false_target_in,
+                                                                   bool is_far_target) {
   if (CanGenerateTest(condition, codegen_->GetAssembler())) {
     vixl32::Label* non_fallthrough_target;
     bool invert;
@@ -2972,7 +2975,7 @@ void InstructionCodeGeneratorARMVIXL::GenerateCompareTestAndBranch(HCondition* c
 
     const auto cond = GenerateTest(condition, invert, codegen_);
 
-    __ B(cond.first, non_fallthrough_target);
+    __ B(cond.first, non_fallthrough_target, is_far_target);
 
     if (false_target_in != nullptr && false_target_in != non_fallthrough_target) {
       __ B(false_target_in);
@@ -2988,7 +2991,7 @@ void InstructionCodeGeneratorARMVIXL::GenerateCompareTestAndBranch(HCondition* c
   vixl32::Label* false_target = (false_target_in == nullptr) ? &fallthrough : false_target_in;
 
   DCHECK_EQ(condition->InputAt(0)->GetType(), Primitive::kPrimLong);
-  GenerateLongComparesAndJumps(condition, true_target, false_target, codegen_);
+  GenerateLongComparesAndJumps(condition, true_target, false_target, codegen_, is_far_target);
 
   if (false_target != &fallthrough) {
     __ B(false_target);
@@ -3056,7 +3059,7 @@ void InstructionCodeGeneratorARMVIXL::GenerateTestAndBranch(HInstruction* instru
     // the HCondition, generate the comparison directly.
     Primitive::Type type = condition->InputAt(0)->GetType();
     if (type == Primitive::kPrimLong || Primitive::IsFloatingPointType(type)) {
-      GenerateCompareTestAndBranch(condition, true_target, false_target);
+      GenerateCompareTestAndBranch(condition, true_target, false_target, far_target);
       return;
     }
 
@@ -3075,14 +3078,14 @@ void InstructionCodeGeneratorARMVIXL::GenerateTestAndBranch(HInstruction* instru
 
     if (right.IsImmediate() && right.GetImmediate() == 0 && (arm_cond.Is(ne) || arm_cond.Is(eq))) {
       if (arm_cond.Is(eq)) {
-        __ CompareAndBranchIfZero(left, non_fallthrough_target);
+        __ CompareAndBranchIfZero(left, non_fallthrough_target, far_target);
       } else {
         DCHECK(arm_cond.Is(ne));
-        __ CompareAndBranchIfNonZero(left, non_fallthrough_target);
+        __ CompareAndBranchIfNonZero(left, non_fallthrough_target, far_target);
       }
     } else {
       __ Cmp(left, right);
-      __ B(arm_cond, non_fallthrough_target);
+      __ B(arm_cond, non_fallthrough_target, far_target);
     }
   }
 
@@ -9130,6 +9133,13 @@ Location CodeGeneratorARMVIXL::GenerateCalleeMethodStaticOrDirectCall(
     case HInvokeStaticOrDirect::MethodLoadKind::kRecursive:
       callee_method = invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex());
       break;
+    case HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative: {
+      DCHECK(GetCompilerOptions().IsBootImage());
+      PcRelativePatchInfo* labels = NewPcRelativeMethodPatch(invoke->GetTargetMethod());
+      vixl32::Register temp_reg = RegisterFrom(temp);
+      EmitMovwMovtPlaceholder(labels, temp_reg);
+      break;
+    }
     case HInvokeStaticOrDirect::MethodLoadKind::kDirectAddress:
       __ Mov(RegisterFrom(temp), Operand::From(invoke->GetMethodAddress()));
       break;
@@ -9246,9 +9256,11 @@ void CodeGeneratorARMVIXL::GenerateVirtualCall(HInvokeVirtual* invoke, Location 
   __ blx(lr);
 }
 
-CodeGeneratorARMVIXL::PcRelativePatchInfo* CodeGeneratorARMVIXL::NewPcRelativeStringPatch(
-    const DexFile& dex_file, dex::StringIndex string_index) {
-  return NewPcRelativePatch(dex_file, string_index.index_, &pc_relative_string_patches_);
+CodeGeneratorARMVIXL::PcRelativePatchInfo* CodeGeneratorARMVIXL::NewPcRelativeMethodPatch(
+    MethodReference target_method) {
+  return NewPcRelativePatch(*target_method.dex_file,
+                            target_method.dex_method_index,
+                            &pc_relative_method_patches_);
 }
 
 CodeGeneratorARMVIXL::PcRelativePatchInfo* CodeGeneratorARMVIXL::NewPcRelativeTypePatch(
@@ -9259,6 +9271,11 @@ CodeGeneratorARMVIXL::PcRelativePatchInfo* CodeGeneratorARMVIXL::NewPcRelativeTy
 CodeGeneratorARMVIXL::PcRelativePatchInfo* CodeGeneratorARMVIXL::NewTypeBssEntryPatch(
     const DexFile& dex_file, dex::TypeIndex type_index) {
   return NewPcRelativePatch(dex_file, type_index.index_, &type_bss_entry_patches_);
+}
+
+CodeGeneratorARMVIXL::PcRelativePatchInfo* CodeGeneratorARMVIXL::NewPcRelativeStringPatch(
+    const DexFile& dex_file, dex::StringIndex string_index) {
+  return NewPcRelativePatch(dex_file, string_index.index_, &pc_relative_string_patches_);
 }
 
 CodeGeneratorARMVIXL::PcRelativePatchInfo* CodeGeneratorARMVIXL::NewPcRelativeDexCacheArrayPatch(
@@ -9330,21 +9347,25 @@ void CodeGeneratorARMVIXL::EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_pa
   DCHECK(linker_patches->empty());
   size_t size =
       /* MOVW+MOVT for each entry */ 2u * pc_relative_dex_cache_patches_.size() +
-      /* MOVW+MOVT for each entry */ 2u * pc_relative_string_patches_.size() +
+      /* MOVW+MOVT for each entry */ 2u * pc_relative_method_patches_.size() +
       /* MOVW+MOVT for each entry */ 2u * pc_relative_type_patches_.size() +
       /* MOVW+MOVT for each entry */ 2u * type_bss_entry_patches_.size() +
+      /* MOVW+MOVT for each entry */ 2u * pc_relative_string_patches_.size() +
       baker_read_barrier_patches_.size();
   linker_patches->reserve(size);
   EmitPcRelativeLinkerPatches<LinkerPatch::DexCacheArrayPatch>(pc_relative_dex_cache_patches_,
                                                                linker_patches);
-  if (!GetCompilerOptions().IsBootImage()) {
-    DCHECK(pc_relative_type_patches_.empty());
-    EmitPcRelativeLinkerPatches<LinkerPatch::StringBssEntryPatch>(pc_relative_string_patches_,
+  if (GetCompilerOptions().IsBootImage()) {
+    EmitPcRelativeLinkerPatches<LinkerPatch::RelativeMethodPatch>(pc_relative_method_patches_,
                                                                   linker_patches);
-  } else {
     EmitPcRelativeLinkerPatches<LinkerPatch::RelativeTypePatch>(pc_relative_type_patches_,
                                                                 linker_patches);
     EmitPcRelativeLinkerPatches<LinkerPatch::RelativeStringPatch>(pc_relative_string_patches_,
+                                                                  linker_patches);
+  } else {
+    DCHECK(pc_relative_method_patches_.empty());
+    DCHECK(pc_relative_type_patches_.empty());
+    EmitPcRelativeLinkerPatches<LinkerPatch::StringBssEntryPatch>(pc_relative_string_patches_,
                                                                   linker_patches);
   }
   EmitPcRelativeLinkerPatches<LinkerPatch::TypeBssEntryPatch>(type_bss_entry_patches_,

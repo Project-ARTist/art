@@ -48,7 +48,7 @@ public class Main {
   /// CHECK-DAG: <<And1:i\d+>> And [<<Get1>>,<<IMAX>>]             loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<And2:i\d+>> And [<<Get2>>,<<IMAX>>]             loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<Min:i\d+>>  InvokeStaticOrDirect [<<And1>>,<<And2>>] intrinsic:MathMinIntInt loop:<<Loop>> outer_loop:none
-  /// CHECK-DAG: <<Cnv:b\d+>>  TypeConversion [<<Min>>]            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Min>>]            loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi>>,<<Cnv>>] loop:<<Loop>>      outer_loop:none
   //
   /// CHECK-START-ARM64: void Main.doitMinUnsigned(short[], short[], short[]) loop_optimization (after)
@@ -93,7 +93,7 @@ public class Main {
   /// CHECK-DAG: <<And1:i\d+>> And [<<Get1>>,<<IMAX>>]             loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<And2:i\d+>> And [<<Get2>>,<<IMAX>>]             loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<Max:i\d+>>  InvokeStaticOrDirect [<<And1>>,<<And2>>] intrinsic:MathMaxIntInt loop:<<Loop>> outer_loop:none
-  /// CHECK-DAG: <<Cnv:b\d+>>  TypeConversion [<<Max>>]            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Max>>]            loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi>>,<<Cnv>>] loop:<<Loop>>      outer_loop:none
   //
   /// CHECK-START-ARM64: void Main.doitMaxUnsigned(short[], short[], short[]) loop_optimization (after)
