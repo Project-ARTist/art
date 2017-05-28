@@ -140,18 +140,18 @@ static inline bool DoFastInvoke(Thread* self,
     result->SetJ(0);
     return false;
   } else {
-    if (called_method->IsIntrinsic()) {
-      if (MterpHandleIntrinsic(&shadow_frame, called_method, inst, inst_data,
-                               shadow_frame.GetResultRegister())) {
-        return !self->IsExceptionPending();
-      }
-    }
     jit::Jit* jit = Runtime::Current()->GetJit();
     if (jit != nullptr) {
       if (type == kVirtual) {
         jit->InvokeVirtualOrInterface(receiver, sf_method, shadow_frame.GetDexPC(), called_method);
       }
       jit->AddSamples(self, sf_method, 1, /*with_backedges*/false);
+    }
+    if (called_method->IsIntrinsic()) {
+      if (MterpHandleIntrinsic(&shadow_frame, called_method, inst, inst_data,
+                               shadow_frame.GetResultRegister())) {
+        return !self->IsExceptionPending();
+      }
     }
     return DoCall<false, false>(called_method, self, shadow_frame, inst, inst_data, result);
   }
@@ -527,10 +527,11 @@ static inline void AssignRegister(ShadowFrame* new_shadow_frame, const ShadowFra
   }
 }
 
+// The arg_offset is the offset to the first input register in the frame.
 void ArtInterpreterToCompiledCodeBridge(Thread* self,
                                         ArtMethod* caller,
-                                        const DexFile::CodeItem* code_item,
                                         ShadowFrame* shadow_frame,
+                                        uint16_t arg_offset,
                                         JValue* result);
 
 // Set string value created from StringFactory.newStringFromXXX() into all aliases of
