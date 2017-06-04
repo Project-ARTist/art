@@ -19,6 +19,7 @@
 
 #include "read_barrier.h"
 
+#include "gc/accounting/read_barrier_table.h"
 #include "gc/collector/concurrent_copying-inl.h"
 #include "gc/heap.h"
 #include "mirror/object_reference.h"
@@ -62,7 +63,7 @@ inline MirrorType* ReadBarrier::Barrier(
         // If kAlwaysUpdateField is true, update the field atomically. This may fail if mutator
         // updates before us, but it's OK.
         if (kAlwaysUpdateField && ref != old_ref) {
-          obj->CasFieldStrongRelaxedObjectWithoutWriteBarrier<false, false>(
+          obj->CasFieldStrongReleaseObjectWithoutWriteBarrier<false, false>(
               offset, old_ref, ref);
         }
       }
@@ -80,7 +81,7 @@ inline MirrorType* ReadBarrier::Barrier(
         ref = reinterpret_cast<MirrorType*>(Mark(old_ref));
         // Update the field atomically. This may fail if mutator updates before us, but it's ok.
         if (ref != old_ref) {
-          obj->CasFieldStrongRelaxedObjectWithoutWriteBarrier<false, false>(
+          obj->CasFieldStrongReleaseObjectWithoutWriteBarrier<false, false>(
               offset, old_ref, ref);
         }
       }

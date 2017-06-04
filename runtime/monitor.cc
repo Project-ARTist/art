@@ -32,6 +32,7 @@
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "scoped_thread_state_change-inl.h"
+#include "stack.h"
 #include "thread.h"
 #include "thread_list.h"
 #include "verifier/method_verifier.h"
@@ -437,17 +438,11 @@ void Monitor::Lock(Thread* self) {
                     << " in " << ArtMethod::PrettyMethod(m) << " for "
                     << PrettyDuration(MsToNs(wait_ms));
               }
-              const char* owners_filename;
-              int32_t owners_line_number;
-              TranslateLocation(owners_method,
-                                owners_dex_pc,
-                                &owners_filename,
-                                &owners_line_number);
               LogContentionEvent(self,
                                  wait_ms,
                                  sample_percent,
-                                 owners_filename,
-                                 owners_line_number);
+                                 owners_method,
+                                 owners_dex_pc);
             }
           }
         }

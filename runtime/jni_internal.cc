@@ -106,10 +106,9 @@ static void ThrowNoSuchMethodError(ScopedObjectAccess& soa,
 static void ReportInvalidJNINativeMethod(const ScopedObjectAccess& soa,
                                          ObjPtr<mirror::Class> c,
                                          const char* kind,
-                                         jint idx,
-                                         bool return_errors)
+                                         jint idx)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  LOG(return_errors ? ::android::base::ERROR : ::android::base::FATAL)
+  LOG(ERROR)
       << "Failed to register native method in " << c->PrettyDescriptor()
       << " in " << c->GetDexCache()->GetLocation()->ToModifiedUtf8()
       << ": " << kind << " is null at index " << idx;
@@ -2145,13 +2144,10 @@ class JNI {
                                                                      buf);
   }
 
-  static jint RegisterNatives(JNIEnv* env, jclass java_class, const JNINativeMethod* methods,
+  static jint RegisterNatives(JNIEnv* env,
+                              jclass java_class,
+                              const JNINativeMethod* methods,
                               jint method_count) {
-    return RegisterNativeMethods(env, java_class, methods, method_count, true);
-  }
-
-  static jint RegisterNativeMethods(JNIEnv* env, jclass java_class, const JNINativeMethod* methods,
-                                    jint method_count, bool return_errors) {
     if (UNLIKELY(method_count < 0)) {
       JavaVmExtFromEnv(env)->JniAbortF("RegisterNatives", "negative method count: %d",
                                        method_count);
@@ -2172,13 +2168,13 @@ class JNI {
       const char* sig = methods[i].signature;
       const void* fnPtr = methods[i].fnPtr;
       if (UNLIKELY(name == nullptr)) {
-        ReportInvalidJNINativeMethod(soa, c.Get(), "method name", i, return_errors);
+        ReportInvalidJNINativeMethod(soa, c.Get(), "method name", i);
         return JNI_ERR;
       } else if (UNLIKELY(sig == nullptr)) {
-        ReportInvalidJNINativeMethod(soa, c.Get(), "method signature", i, return_errors);
+        ReportInvalidJNINativeMethod(soa, c.Get(), "method signature", i);
         return JNI_ERR;
       } else if (UNLIKELY(fnPtr == nullptr)) {
-        ReportInvalidJNINativeMethod(soa, c.Get(), "native function", i, return_errors);
+        ReportInvalidJNINativeMethod(soa, c.Get(), "native function", i);
         return JNI_ERR;
       }
       bool is_fast = false;
@@ -2244,19 +2240,15 @@ class JNI {
       }
 
       if (m == nullptr) {
-        c->DumpClass(
-            LOG_STREAM(return_errors
-                           ? ::android::base::ERROR
-                           : ::android::base::FATAL_WITHOUT_ABORT),
-            mirror::Class::kDumpClassFullDetail);
-        LOG(return_errors ? ::android::base::ERROR : ::android::base::FATAL)
+        c->DumpClass(LOG_STREAM(ERROR), mirror::Class::kDumpClassFullDetail);
+        LOG(ERROR)
             << "Failed to register native method "
             << c->PrettyDescriptor() << "." << name << sig << " in "
             << c->GetDexCache()->GetLocation()->ToModifiedUtf8();
         ThrowNoSuchMethodError(soa, c.Get(), name, sig, "static or non-static");
         return JNI_ERR;
       } else if (!m->IsNative()) {
-        LOG(return_errors ? ::android::base::ERROR : ::android::base::FATAL)
+        LOG(ERROR)
             << "Failed to register non-native method "
             << c->PrettyDescriptor() << "." << name << sig
             << " as native";
@@ -2407,18 +2399,18 @@ class JNI {
   static jint EnsureLocalCapacityInternal(ScopedObjectAccess& soa, jint desired_capacity,
                                           const char* caller)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    // TODO: we should try to expand the table if necessary.
-    if (desired_capacity < 0 || desired_capacity > static_cast<jint>(kLocalsInitial)) {
+    if (desired_capacity < 0) {
       LOG(ERROR) << "Invalid capacity given to " << caller << ": " << desired_capacity;
       return JNI_ERR;
     }
-    // TODO: this isn't quite right, since "capacity" includes holes.
-    const size_t capacity = soa.Env()->locals.Capacity();
-    bool okay = (static_cast<jint>(kLocalsInitial - capacity) >= desired_capacity);
-    if (!okay) {
-      soa.Self()->ThrowOutOfMemoryError(caller);
+
+    std::string error_msg;
+    if (!soa.Env()->locals.EnsureFreeCapacity(static_cast<size_t>(desired_capacity), &error_msg)) {
+      std::string caller_error = android::base::StringPrintf("%s: %s", caller, error_msg.c_str());
+      soa.Self()->ThrowOutOfMemoryError(caller_error.c_str());
+      return JNI_ERR;
     }
-    return okay ? JNI_OK : JNI_ERR;
+    return JNI_OK;
   }
 
   template<typename JniT, typename ArtT>
@@ -3049,16 +3041,6 @@ void (*gJniSleepForeverStub[])()  = {
 
 const JNINativeInterface* GetRuntimeShutdownNativeInterface() {
   return reinterpret_cast<JNINativeInterface*>(&gJniSleepForeverStub);
-}
-
-void RegisterNativeMethods(JNIEnv* env, const char* jni_class_name, const JNINativeMethod* methods,
-                           jint method_count) {
-  ScopedLocalRef<jclass> c(env, env->FindClass(jni_class_name));
-  if (c.get() == nullptr) {
-    LOG(FATAL) << "Couldn't find class: " << jni_class_name;
-  }
-  jint jni_result = env->RegisterNatives(c.get(), methods, method_count);
-  CHECK_EQ(JNI_OK, jni_result);
 }
 
 }  // namespace art

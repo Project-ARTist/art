@@ -28,10 +28,12 @@
 #include "jit/jit.h"
 #include "jni_internal.h"
 #include "JNIHelp.h"
+#include "native_util.h"
 #include "non_debuggable_classes.h"
 #include "scoped_thread_state_change-inl.h"
 #include "ScopedUtfChars.h"
-#include "thread-inl.h"
+#include "stack.h"
+#include "thread-current-inl.h"
 #include "thread_list.h"
 #include "trace.h"
 

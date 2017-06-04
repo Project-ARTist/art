@@ -20,6 +20,7 @@
 #if defined(__cplusplus)
 #include "art_method.h"
 #include "base/bit_utils.h"
+#include "gc/accounting/card_table.h"
 #include "gc/allocator/rosalloc.h"
 #include "gc/heap.h"
 #include "jit/jit.h"
@@ -29,6 +30,7 @@
 #include "mirror/string.h"
 #include "utils/dex_cache_arrays_layout.h"
 #include "runtime.h"
+#include "stack.h"
 #include "thread.h"
 #endif
 

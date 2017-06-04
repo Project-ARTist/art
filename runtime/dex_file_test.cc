@@ -16,6 +16,8 @@
 
 #include "dex_file.h"
 
+#include <sys/mman.h>
+
 #include <memory>
 
 #include "base/stl_util.h"
@@ -25,7 +27,7 @@
 #include "mem_map.h"
 #include "os.h"
 #include "scoped_thread_state_change-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "utils.h"
 
 namespace art {

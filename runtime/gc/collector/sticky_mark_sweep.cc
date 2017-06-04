@@ -14,11 +14,15 @@
  * limitations under the License.
  */
 
+#include "sticky_mark_sweep.h"
+
+#include "gc/accounting/atomic_stack.h"
+#include "gc/accounting/card_table.h"
 #include "gc/heap.h"
 #include "gc/space/large_object_space.h"
 #include "gc/space/space-inl.h"
-#include "sticky_mark_sweep.h"
-#include "thread-inl.h"
+#include "runtime.h"
+#include "thread-current-inl.h"
 
 namespace art {
 namespace gc {

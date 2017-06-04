@@ -28,7 +28,7 @@
 #include "lock_word.h"
 #include "mirror/object-inl.h"
 #include "nth_caller_visitor.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "thread_list.h"
 
 namespace art {
@@ -123,8 +123,8 @@ void JNIEnvExt::DumpReferenceTables(std::ostream& os) {
   monitors.Dump(os);
 }
 
-void JNIEnvExt::PushFrame(int capacity ATTRIBUTE_UNUSED) {
-  // TODO: take 'capacity' into account.
+void JNIEnvExt::PushFrame(int capacity) {
+  DCHECK_GE(locals.FreeCapacity(), static_cast<size_t>(capacity));
   stacked_local_ref_cookies.push_back(local_ref_cookie);
   local_ref_cookie = locals.GetSegmentState();
 }

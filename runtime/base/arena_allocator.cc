@@ -14,16 +14,19 @@
  * limitations under the License.
  */
 
+#include "arena_allocator-inl.h"
+
+#include <sys/mman.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <iomanip>
 #include <numeric>
 
-#include "arena_allocator-inl.h"
 #include "logging.h"
 #include "mem_map.h"
 #include "mutex.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "systrace.h"
 
 namespace art {

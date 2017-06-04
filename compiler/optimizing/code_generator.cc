@@ -58,7 +58,7 @@
 #include "parallel_move_resolver.h"
 #include "ssa_liveness_analysis.h"
 #include "scoped_thread_state_change-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "utils/assembler.h"
 
 namespace art {
@@ -557,6 +557,9 @@ void CodeGenerator::BlockIfInRegister(Location location, bool is_out) const {
 }
 
 void CodeGenerator::AllocateLocations(HInstruction* instruction) {
+  for (HEnvironment* env = instruction->GetEnvironment(); env != nullptr; env = env->GetParent()) {
+    env->AllocateLocations();
+  }
   instruction->Accept(GetLocationBuilder());
   DCHECK(CheckTypeConsistency(instruction));
   LocationSummary* locations = instruction->GetLocations();

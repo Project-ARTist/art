@@ -14,12 +14,14 @@
  * limitations under the License.
  */
 
+#include <sys/mman.h>
+
 #include "common_runtime_test.h"
 #include "gc/collector/immune_spaces.h"
 #include "gc/space/image_space.h"
 #include "gc/space/space-inl.h"
 #include "oat_file.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 
 namespace art {
 namespace mirror {

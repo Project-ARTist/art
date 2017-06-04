@@ -28,6 +28,7 @@
 
 #include "base/logging.h"
 #include "base/macros.h"
+#include "base/mutex-inl.h"
 #include "dex_file-inl.h"
 #include "dex2oat_environment_test.h"
 #include "dex2oat_return_codes.h"
@@ -37,6 +38,8 @@
 #include "utils.h"
 
 namespace art {
+
+static constexpr size_t kMaxMethodIds = 65535;
 
 using android::base::StringPrintf;
 
@@ -612,7 +615,7 @@ class Dex2oatLayoutTest : public Dex2oatTest {
     ProfileCompilationInfo info;
     std::string profile_key = ProfileCompilationInfo::GetProfileDexFileKey(dex_location);
     for (size_t i = 0; i < num_classes; ++i) {
-      info.AddClassIndex(profile_key, checksum, dex::TypeIndex(1 + i));
+      info.AddClassIndex(profile_key, checksum, dex::TypeIndex(1 + i), kMaxMethodIds);
     }
     bool result = info.Save(profile_test_fd);
     close(profile_test_fd);

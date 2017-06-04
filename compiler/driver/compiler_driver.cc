@@ -28,6 +28,7 @@
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
+#include "base/arena_allocator.h"
 #include "base/array_ref.h"
 #include "base/bit_vector.h"
 #include "base/enums.h"
@@ -999,7 +1000,8 @@ bool CompilerDriver::ShouldCompileBasedOnProfile(const MethodReference& method_r
   if (profile_compilation_info_ == nullptr) {
     return false;
   }
-  bool result = profile_compilation_info_->ContainsMethod(method_ref);
+  // TODO: Revisit compiling all startup methods. b/36457259
+  bool result = profile_compilation_info_->IsStartupOrHotMethod(method_ref);
 
   if (kDebugProfileGuidedCompilation) {
     LOG(INFO) << "[ProfileGuidedCompilation] "

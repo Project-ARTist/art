@@ -359,7 +359,7 @@ class ConcurrentCopying::ThreadFlipVisitor : public Closure, public RootVisitor 
     ReaderMutexLock mu(self, *Locks::heap_bitmap_lock_);
     // We can use the non-CAS VisitRoots functions below because we update thread-local GC roots
     // only.
-    thread->VisitRoots(this);
+    thread->VisitRoots(this, kVisitRootFlagAllRoots);
     concurrent_copying_->GetBarrier().Pass(self);
   }
 
@@ -2086,8 +2086,11 @@ inline void ConcurrentCopying::Process(mirror::Object* obj, MemberOffset offset)
       // It was updated by the mutator.
       break;
     }
-  } while (!obj->CasFieldWeakRelaxedObjectWithoutWriteBarrier<
-      false, false, kVerifyNone>(offset, expected_ref, new_ref));
+    // Use release cas to make sure threads reading the reference see contents of copied objects.
+  } while (!obj->CasFieldWeakReleaseObjectWithoutWriteBarrier<false, false, kVerifyNone>(
+      offset,
+      expected_ref,
+      new_ref));
 }
 
 // Process some roots.

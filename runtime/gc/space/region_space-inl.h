@@ -18,7 +18,7 @@
 #define ART_RUNTIME_GC_SPACE_REGION_SPACE_INL_H_
 
 #include "region_space.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 
 namespace art {
 namespace gc {
@@ -136,20 +136,6 @@ inline mirror::Object* RegionSpace::Region::Alloc(size_t num_bytes, size_t* byte
   }
   *bytes_tl_bulk_allocated = num_bytes;
   return reinterpret_cast<mirror::Object*>(old_top);
-}
-
-inline size_t RegionSpace::AllocationSizeNonvirtual(mirror::Object* obj, size_t* usable_size) {
-  size_t num_bytes = obj->SizeOf();
-  if (usable_size != nullptr) {
-    if (LIKELY(num_bytes <= kRegionSize)) {
-      DCHECK(RefToRegion(obj)->IsAllocated());
-      *usable_size = RoundUp(num_bytes, kAlignment);
-    } else {
-      DCHECK(RefToRegion(obj)->IsLarge());
-      *usable_size = RoundUp(num_bytes, kRegionSize);
-    }
-  }
-  return num_bytes;
 }
 
 template<RegionSpace::RegionType kRegionType>

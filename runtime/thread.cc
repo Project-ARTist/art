@@ -55,6 +55,7 @@
 #include "gc/allocator/rosalloc.h"
 #include "gc/heap.h"
 #include "gc/space/space-inl.h"
+#include "gc_root.h"
 #include "handle_scope-inl.h"
 #include "indirect_reference_table-inl.h"
 #include "java_vm_ext.h"
@@ -2160,7 +2161,7 @@ Thread::~Thread() {
   TearDownAlternateSignalStack();
 }
 
-void Thread::HandleUncaughtExceptions(ScopedObjectAccess& soa) {
+void Thread::HandleUncaughtExceptions(ScopedObjectAccessAlreadyRunnable& soa) {
   if (!IsExceptionPending()) {
     return;
   }
@@ -2180,7 +2181,7 @@ void Thread::HandleUncaughtExceptions(ScopedObjectAccess& soa) {
   tlsPtr_.jni_env->ExceptionClear();
 }
 
-void Thread::RemoveFromThreadGroup(ScopedObjectAccess& soa) {
+void Thread::RemoveFromThreadGroup(ScopedObjectAccessAlreadyRunnable& soa) {
   // this.group.removeThread(this);
   // group can be null if we're in the compiler or a test.
   ObjPtr<mirror::Object> ogroup = jni::DecodeArtField(WellKnownClasses::java_lang_Thread_group)
@@ -3442,11 +3443,13 @@ class VerifyRootVisitor : public SingleRootVisitor {
 };
 
 void Thread::VerifyStackImpl() {
-  VerifyRootVisitor visitor;
-  std::unique_ptr<Context> context(Context::Create());
-  RootCallbackVisitor visitor_to_callback(&visitor, GetThreadId());
-  ReferenceMapVisitor<RootCallbackVisitor> mapper(this, context.get(), visitor_to_callback);
-  mapper.WalkStack();
+  if (Runtime::Current()->GetHeap()->IsObjectValidationEnabled()) {
+    VerifyRootVisitor visitor;
+    std::unique_ptr<Context> context(Context::Create());
+    RootCallbackVisitor visitor_to_callback(&visitor, GetThreadId());
+    ReferenceMapVisitor<RootCallbackVisitor> mapper(this, context.get(), visitor_to_callback);
+    mapper.WalkStack();
+  }
 }
 
 // Set the stack end to that to be used during a stack overflow

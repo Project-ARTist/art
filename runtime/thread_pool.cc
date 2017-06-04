@@ -18,6 +18,7 @@
 
 #include <pthread.h>
 
+#include <sys/mman.h>
 #include <sys/time.h>
 #include <sys/resource.h>
 
@@ -29,7 +30,7 @@
 #include "base/stl_util.h"
 #include "base/time_utils.h"
 #include "runtime.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 
 namespace art {
 

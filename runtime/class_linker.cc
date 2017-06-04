@@ -8949,7 +8949,8 @@ class GetResolvedClassesVisitor : public ClassVisitor {
         last_dex_file_ = &dex_file;
         DexCacheResolvedClasses resolved_classes(dex_file.GetLocation(),
                                                  dex_file.GetBaseLocation(),
-                                                 dex_file.GetLocationChecksum());
+                                                 dex_file.GetLocationChecksum(),
+                                                 dex_file.NumMethodIds());
         last_resolved_classes_ = result_->find(resolved_classes);
         if (last_resolved_classes_ == result_->end()) {
           last_resolved_classes_ = result_->insert(resolved_classes).first;
@@ -9046,6 +9047,12 @@ std::unordered_set<std::string> ClassLinker::GetClassDescriptorsForResolvedClass
                      << info.GetClasses().size() << " classes";
       DCHECK_EQ(dex_file->GetLocationChecksum(), info.GetLocationChecksum());
       for (dex::TypeIndex type_idx : info.GetClasses()) {
+        if (!dex_file->IsTypeIndexValid(type_idx)) {
+          // Something went bad. The profile is probably corrupted. Abort and return an emtpy set.
+          LOG(WARNING) << "Corrupted profile: invalid type index "
+              << type_idx.index_ << " in dex " << location;
+          return std::unordered_set<std::string>();
+        }
         const DexFile::TypeId& type_id = dex_file->GetTypeId(type_idx);
         const char* descriptor = dex_file->GetTypeDescriptor(type_id);
         ret.insert(descriptor);
