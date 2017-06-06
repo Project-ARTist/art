@@ -7137,7 +7137,7 @@ HLoadClass::LoadKind CodeGeneratorARM::GetSupportedLoadClassKind(
       DCHECK(Runtime::Current()->UseJitCompilation());
       break;
     case HLoadClass::LoadKind::kBootImageAddress:
-    case HLoadClass::LoadKind::kDexCacheViaMethod:
+    case HLoadClass::LoadKind::kRuntimeCall:
       break;
   }
   return desired_class_load_kind;
@@ -7145,7 +7145,7 @@ HLoadClass::LoadKind CodeGeneratorARM::GetSupportedLoadClassKind(
 
 void LocationsBuilderARM::VisitLoadClass(HLoadClass* cls) {
   HLoadClass::LoadKind load_kind = cls->GetLoadKind();
-  if (load_kind == HLoadClass::LoadKind::kDexCacheViaMethod) {
+  if (load_kind == HLoadClass::LoadKind::kRuntimeCall) {
     InvokeRuntimeCallingConvention calling_convention;
     CodeGenerator::CreateLoadClassRuntimeCallLocationSummary(
         cls,
@@ -7198,7 +7198,7 @@ void LocationsBuilderARM::VisitLoadClass(HLoadClass* cls) {
 // move.
 void InstructionCodeGeneratorARM::VisitLoadClass(HLoadClass* cls) NO_THREAD_SAFETY_ANALYSIS {
   HLoadClass::LoadKind load_kind = cls->GetLoadKind();
-  if (load_kind == HLoadClass::LoadKind::kDexCacheViaMethod) {
+  if (load_kind == HLoadClass::LoadKind::kRuntimeCall) {
     codegen_->GenerateLoadClassRuntimeCall(cls);
     return;
   }
@@ -7270,7 +7270,7 @@ void InstructionCodeGeneratorARM::VisitLoadClass(HLoadClass* cls) NO_THREAD_SAFE
       GenerateGcRootFieldLoad(cls, out_loc, out, /* offset */ 0, read_barrier_option);
       break;
     }
-    case HLoadClass::LoadKind::kDexCacheViaMethod:
+    case HLoadClass::LoadKind::kRuntimeCall:
     case HLoadClass::LoadKind::kInvalid:
       LOG(FATAL) << "UNREACHABLE";
       UNREACHABLE();
@@ -7332,7 +7332,7 @@ HLoadString::LoadKind CodeGeneratorARM::GetSupportedLoadStringKind(
       DCHECK(Runtime::Current()->UseJitCompilation());
       break;
     case HLoadString::LoadKind::kBootImageAddress:
-    case HLoadString::LoadKind::kDexCacheViaMethod:
+    case HLoadString::LoadKind::kRuntimeCall:
       break;
   }
   return desired_string_load_kind;
@@ -7342,7 +7342,7 @@ void LocationsBuilderARM::VisitLoadString(HLoadString* load) {
   LocationSummary::CallKind call_kind = CodeGenerator::GetLoadStringCallKind(load);
   LocationSummary* locations = new (GetGraph()->GetArena()) LocationSummary(load, call_kind);
   HLoadString::LoadKind load_kind = load->GetLoadKind();
-  if (load_kind == HLoadString::LoadKind::kDexCacheViaMethod) {
+  if (load_kind == HLoadString::LoadKind::kRuntimeCall) {
     locations->SetOut(Location::RegisterLocation(R0));
   } else {
     locations->SetOut(Location::RequiresRegister());
@@ -7429,7 +7429,7 @@ void InstructionCodeGeneratorARM::VisitLoadString(HLoadString* load) NO_THREAD_S
   }
 
   // TODO: Consider re-adding the compiler code to do string dex cache lookup again.
-  DCHECK(load_kind == HLoadString::LoadKind::kDexCacheViaMethod);
+  DCHECK(load_kind == HLoadString::LoadKind::kRuntimeCall);
   InvokeRuntimeCallingConvention calling_convention;
   DCHECK_EQ(calling_convention.GetRegisterAt(0), out);
   __ LoadImmediate(calling_convention.GetRegisterAt(0), load->GetStringIndex().index_);
@@ -8946,7 +8946,8 @@ Register CodeGeneratorARM::GetInvokeStaticOrDirectExtraParameter(HInvokeStaticOr
   // save one load. However, since this is just an intrinsic slow path we prefer this
   // simple and more robust approach rather that trying to determine if that's the case.
   SlowPathCode* slow_path = GetCurrentSlowPath();
-  if (slow_path != nullptr && slow_path->IsCoreRegisterSaved(location.AsRegister<Register>())) {
+  DCHECK(slow_path != nullptr);  // For intrinsified invokes the call is emitted on the slow path.
+  if (slow_path->IsCoreRegisterSaved(location.AsRegister<Register>())) {
     int stack_offset = slow_path->GetStackOffsetOfCoreRegister(location.AsRegister<Register>());
     __ LoadFromOffset(kLoadWord, temp, SP, stack_offset);
     return temp;
@@ -8954,8 +8955,7 @@ Register CodeGeneratorARM::GetInvokeStaticOrDirectExtraParameter(HInvokeStaticOr
   return location.AsRegister<Register>();
 }
 
-Location CodeGeneratorARM::GenerateCalleeMethodStaticOrDirectCall(HInvokeStaticOrDirect* invoke,
-                                                                  Location temp) {
+void CodeGeneratorARM::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Location temp) {
   Location callee_method = temp;  // For all kinds except kRecursive, callee will be in temp.
   switch (invoke->GetMethodLoadKind()) {
     case HInvokeStaticOrDirect::MethodLoadKind::kStringInit: {
@@ -9016,11 +9016,6 @@ Location CodeGeneratorARM::GenerateCalleeMethodStaticOrDirectCall(HInvokeStaticO
       break;
     }
   }
-  return callee_method;
-}
-
-void CodeGeneratorARM::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Location temp) {
-  Location callee_method = GenerateCalleeMethodStaticOrDirectCall(invoke, temp);
 
   switch (invoke->GetCodePtrLocation()) {
     case HInvokeStaticOrDirect::CodePtrLocation::kCallSelf:

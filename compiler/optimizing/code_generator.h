@@ -542,7 +542,7 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
       case HLoadString::LoadKind::kBssEntry:
         DCHECK(load->NeedsEnvironment());
         return LocationSummary::kCallOnSlowPath;
-      case HLoadString::LoadKind::kDexCacheViaMethod:
+      case HLoadString::LoadKind::kRuntimeCall:
         DCHECK(load->NeedsEnvironment());
         return LocationSummary::kCallOnMainOnly;
       case HLoadString::LoadKind::kJitTableAddress:
@@ -572,9 +572,6 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   virtual void MoveFromReturnRegister(Location trg, Primitive::Type type) = 0;
 
   virtual void GenerateNop() = 0;
-
-  uint32_t GetReferenceSlowFlagOffset() const;
-  uint32_t GetReferenceDisableFlagOffset() const;
 
   static QuickEntrypointEnum GetArrayAllocationEntrypoint(Handle<mirror::Class> array_klass);
 
