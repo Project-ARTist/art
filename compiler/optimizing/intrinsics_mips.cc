@@ -23,6 +23,7 @@
 #include "intrinsics.h"
 #include "mirror/array-inl.h"
 #include "mirror/string.h"
+#include "scoped_thread_state_change-inl.h"
 #include "thread.h"
 #include "utils/mips/assembler_mips.h"
 #include "utils/mips/constants_mips.h"
@@ -111,12 +112,12 @@ class IntrinsicSlowPathMIPS : public SlowPathCodeMIPS {
     MoveArguments(invoke_, codegen);
 
     if (invoke_->IsInvokeStaticOrDirect()) {
-      codegen->GenerateStaticOrDirectCall(invoke_->AsInvokeStaticOrDirect(),
-                                          Location::RegisterLocation(A0));
+      codegen->GenerateStaticOrDirectCall(
+          invoke_->AsInvokeStaticOrDirect(), Location::RegisterLocation(A0), this);
     } else {
-      codegen->GenerateVirtualCall(invoke_->AsInvokeVirtual(), Location::RegisterLocation(A0));
+      codegen->GenerateVirtualCall(
+          invoke_->AsInvokeVirtual(), Location::RegisterLocation(A0), this);
     }
-    codegen->RecordPcInfo(invoke_, invoke_->GetDexPc(), this);
 
     // Copy the result back to the expected output.
     Location out = invoke_->GetLocations()->Out();

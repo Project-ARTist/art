@@ -47,8 +47,8 @@
 namespace art {
 
 const uint8_t ProfileCompilationInfo::kProfileMagic[] = { 'p', 'r', 'o', '\0' };
-// Last profile version: Instead of method index, put the difference with the last
-// method's index.
+// Last profile version: Move startup methods to use a bitmap. Also add support for post-startup
+// methods.
 const uint8_t ProfileCompilationInfo::kProfileVersion[] = { '0', '0', '8', '\0' };
 
 static constexpr uint16_t kMaxDexFileKeyLength = PATH_MAX;
@@ -284,10 +284,13 @@ static constexpr size_t kLineHeaderSize =
 /**
  * Serialization format:
  *    magic,version,number_of_dex_files,uncompressed_size_of_zipped_data,compressed_data_size,
- *    zipped[dex_location1,number_of_classes1,methods_region_size,dex_location_checksum1, \
+ *    zipped[dex_location1,number_of_classes1,methods_region_size,dex_location_checksum1
+ *        num_method_ids,
  *        method_encoding_11,method_encoding_12...,class_id1,class_id2...
- *    dex_location2,number_of_classes2,methods_region_size,dex_location_checksum2, \
+ *        startup/post startup bitmap,
+ *    dex_location2,number_of_classes2,methods_region_size,dex_location_checksum2, num_method_ids,
  *        method_encoding_21,method_encoding_22...,,class_id1,class_id2...
+ *        startup/post startup bitmap,
  *    .....]
  * The method_encoding is:
  *    method_id,number_of_inline_caches,inline_cache1,inline_cache2...
@@ -995,15 +998,6 @@ bool ProfileCompilationInfo::Load(int fd) {
   }
 }
 
-void ProfileCompilationInfo::DexFileData::CreateBitmap() {
-  const size_t num_bits = num_method_ids * kMethodBitCount;
-  bitmap_storage.resize(RoundUp(num_bits, kBitsPerByte) / kBitsPerByte);
-  if (!bitmap_storage.empty()) {
-    method_bitmap =
-        BitMemoryRegion(MemoryRegion(&bitmap_storage[0], bitmap_storage.size()), 0, num_bits);
-  }
-}
-
 // TODO(calin): fail fast if the dex checksums don't match.
 ProfileCompilationInfo::ProfileLoadSatus ProfileCompilationInfo::LoadInternal(
       int fd, std::string* error) {
@@ -1256,7 +1250,7 @@ bool ProfileCompilationInfo::IsStartupOrHotMethod(const std::string& dex_locatio
   return method_it != methods.end();
 }
 
-bool ProfileCompilationInfo::ContainsMethod(const MethodReference& method_ref) const {
+bool ProfileCompilationInfo::ContainsHotMethod(const MethodReference& method_ref) const {
   return FindMethod(method_ref.dex_file->GetLocation(),
                     method_ref.dex_file->GetLocationChecksum(),
                     method_ref.dex_method_index) != nullptr;
@@ -1375,7 +1369,7 @@ std::string ProfileCompilationInfo::DumpInfo(const std::vector<const DexFile*>* 
         }
       }
     }
-    os << "\n\tmethods: ";
+    os << "\n\thot methods: ";
     for (const auto& method_it : dex_data->method_map) {
       if (dex_file != nullptr) {
         os << "\n\t\t" << dex_file->PrettyMethod(method_it.first, true);
@@ -1399,6 +1393,19 @@ std::string ProfileCompilationInfo::DumpInfo(const std::vector<const DexFile*>* 
         os << "}";
       }
       os << "], ";
+    }
+    bool startup = true;
+    while (true) {
+      os << "\n\t" << (startup ? "startup methods: " : "post startup methods: ");
+      for (uint32_t method_idx = 0; method_idx < dex_data->num_method_ids; ++method_idx) {
+        if (dex_data->HasSampledMethod(startup, method_idx)) {
+          os << method_idx << ", ";
+        }
+      }
+      if (startup == false) {
+        break;
+      }
+      startup = false;
     }
     os << "\n\tclasses: ";
     for (const auto class_it : dex_data->class_set) {

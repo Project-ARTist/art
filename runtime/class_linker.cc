@@ -55,7 +55,6 @@
 #include "gc_root-inl.h"
 #include "gc/accounting/card_table-inl.h"
 #include "gc/accounting/heap_bitmap-inl.h"
-#include "gc/accounting/space_bitmap-inl.h"
 #include "gc/heap.h"
 #include "gc/scoped_gc_critical_section.h"
 #include "gc/space/image_space.h"
@@ -89,7 +88,6 @@
 #include "mirror/method_handles_lookup.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
-#include "mirror/object-refvisitor-inl.h"
 #include "mirror/proxy.h"
 #include "mirror/reference-inl.h"
 #include "mirror/stack_trace_element.h"
@@ -109,6 +107,7 @@
 #include "thread-inl.h"
 #include "thread_list.h"
 #include "trace.h"
+#include "utf.h"
 #include "utils.h"
 #include "utils/dex_cache_arrays_layout-inl.h"
 #include "verifier/method_verifier.h"
@@ -1194,63 +1193,6 @@ class VerifyDeclaringClassVisitor : public ArtMethodVisitor {
   gc::accounting::HeapBitmap* const live_bitmap_;
 };
 
-class FixupInternVisitor {
- public:
-  ALWAYS_INLINE ObjPtr<mirror::Object> TryInsertIntern(mirror::Object* obj) const
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (obj != nullptr && obj->IsString()) {
-      const auto intern = Runtime::Current()->GetInternTable()->InternStrong(obj->AsString());
-      return intern;
-    }
-    return obj;
-  }
-
-  ALWAYS_INLINE void VisitRootIfNonNull(
-      mirror::CompressedReference<mirror::Object>* root) const
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (!root->IsNull()) {
-      VisitRoot(root);
-    }
-  }
-
-  ALWAYS_INLINE void VisitRoot(mirror::CompressedReference<mirror::Object>* root) const
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    root->Assign(TryInsertIntern(root->AsMirrorPtr()));
-  }
-
-  // Visit Class Fields
-  ALWAYS_INLINE void operator()(ObjPtr<mirror::Object> obj,
-                                MemberOffset offset,
-                                bool is_static ATTRIBUTE_UNUSED) const
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    // There could be overlap between ranges, we must avoid visiting the same reference twice.
-    // Avoid the class field since we already fixed it up in FixupClassVisitor.
-    if (offset.Uint32Value() != mirror::Object::ClassOffset().Uint32Value()) {
-      // Updating images, don't do a read barrier.
-      // Only string fields are fixed, don't do a verify.
-      mirror::Object* ref = obj->GetFieldObject<mirror::Object, kVerifyNone, kWithoutReadBarrier>(
-          offset);
-      obj->SetFieldObject<false, false>(offset, TryInsertIntern(ref));
-    }
-  }
-
-  void operator()(ObjPtr<mirror::Class> klass ATTRIBUTE_UNUSED,
-                  ObjPtr<mirror::Reference> ref) const
-      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(Locks::heap_bitmap_lock_) {
-    this->operator()(ref, mirror::Reference::ReferentOffset(), false);
-  }
-
-  void operator()(mirror::Object* obj) const
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (obj->IsDexCache()) {
-      obj->VisitReferences<true, kVerifyNone, kWithoutReadBarrier>(*this, *this);
-    } else {
-      // Don't visit native roots for non-dex-cache
-      obj->VisitReferences<false, kVerifyNone, kWithoutReadBarrier>(*this, *this);
-    }
-  }
-};
-
 // Copies data from one array to another array at the same position
 // if pred returns false. If there is a page of continuous data in
 // the src array for which pred consistently returns true then
@@ -1343,7 +1285,6 @@ bool AppImageClassLoadersAndDexCachesHelper::Update(
         return false;
       }
     }
-
     // Only add the classes to the class loader after the points where we can return false.
     for (size_t i = 0; i < num_dex_caches; i++) {
       ObjPtr<mirror::DexCache> dex_cache = dex_caches->Get(i);
@@ -1506,21 +1447,6 @@ bool AppImageClassLoadersAndDexCachesHelper::Update(
         }
       }
     }
-  }
-  {
-    // Fixup all the literal strings happens at app images which are supposed to be interned.
-    ScopedTrace timing("Fixup String Intern in image and dex_cache");
-    const auto& image_header = space->GetImageHeader();
-    const auto bitmap = space->GetMarkBitmap();  // bitmap of objects
-    const uint8_t* target_base = space->GetMemMap()->Begin();
-    const ImageSection& objects_section =
-        image_header.GetImageSection(ImageHeader::kSectionObjects);
-
-    uintptr_t objects_begin = reinterpret_cast<uintptr_t>(target_base + objects_section.Offset());
-    uintptr_t objects_end = reinterpret_cast<uintptr_t>(target_base + objects_section.End());
-
-    FixupInternVisitor fixup_intern_visitor;
-    bitmap->VisitMarkedRange(objects_begin, objects_end, fixup_intern_visitor);
   }
   if (*out_forward_dex_cache_array) {
     ScopedTrace timing("Fixup ArtMethod dex cache arrays");
@@ -3982,6 +3908,12 @@ void ClassLinker::UpdateClassMethods(ObjPtr<mirror::Class> klass,
 }
 
 mirror::Class* ClassLinker::LookupClass(Thread* self,
+                           const char* descriptor,
+                           ObjPtr<mirror::ClassLoader> class_loader) {
+  return LookupClass(self, descriptor, ComputeModifiedUtf8Hash(descriptor), class_loader);
+}
+
+mirror::Class* ClassLinker::LookupClass(Thread* self,
                                         const char* descriptor,
                                         size_t hash,
                                         ObjPtr<mirror::ClassLoader> class_loader) {
@@ -4604,7 +4536,10 @@ void ClassLinker::CreateProxyConstructor(Handle<mirror::Class> klass, ArtMethod*
   DCHECK(out != nullptr);
   out->CopyFrom(proxy_constructor, image_pointer_size_);
   // Make this constructor public and fix the class to be our Proxy version
-  out->SetAccessFlags((out->GetAccessFlags() & ~kAccProtected) | kAccPublic);
+  // Mark kAccCompileDontBother so that we don't take JIT samples for the method. b/62349349
+  out->SetAccessFlags((out->GetAccessFlags() & ~kAccProtected) |
+                      kAccPublic |
+                      kAccCompileDontBother);
   out->SetDeclaringClass(klass.Get());
 }
 
@@ -4638,7 +4573,8 @@ void ClassLinker::CreateProxyMethod(Handle<mirror::Class> klass, ArtMethod* prot
   // preference to the invocation handler.
   const uint32_t kRemoveFlags = kAccAbstract | kAccDefault | kAccDefaultConflict;
   // Make the method final.
-  const uint32_t kAddFlags = kAccFinal;
+  // Mark kAccCompileDontBother so that we don't take JIT samples for the method. b/62349349
+  const uint32_t kAddFlags = kAccFinal | kAccCompileDontBother;
   out->SetAccessFlags((out->GetAccessFlags() & ~kRemoveFlags) | kAddFlags);
 
   // Clear the dex_code_item_offset_. It needs to be 0 since proxy methods have no CodeItems but the

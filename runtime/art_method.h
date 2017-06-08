@@ -24,19 +24,17 @@
 #include "base/enums.h"
 #include "dex_file.h"
 #include "gc_root.h"
-#include "invoke_type.h"
-#include "method_reference.h"
 #include "modifiers.h"
-#include "mirror/dex_cache.h"
-#include "mirror/object.h"
 #include "obj_ptr.h"
+#include "offsets.h"
+#include "primitive.h"
 #include "read_barrier_option.h"
-#include "utils.h"
 
 namespace art {
 
 template<class T> class Handle;
 class ImtConflictTable;
+enum InvokeType : uint32_t;
 union JValue;
 class OatQuickMethodHeader;
 class ProfilingInfo;
@@ -47,8 +45,13 @@ class ShadowFrame;
 namespace mirror {
 class Array;
 class Class;
+class ClassLoader;
+class DexCache;
 class IfTable;
+class Object;
+template <typename MirrorType> class ObjectArray;
 class PointerArray;
+class String;
 }  // namespace mirror
 
 class ArtMethod FINAL {
@@ -318,11 +321,11 @@ class ArtMethod FINAL {
   }
 
   static MemberOffset DexMethodIndexOffset() {
-    return OFFSET_OF_OBJECT_MEMBER(ArtMethod, dex_method_index_);
+    return MemberOffset(OFFSETOF_MEMBER(ArtMethod, dex_method_index_));
   }
 
   static MemberOffset MethodIndexOffset() {
-    return OFFSET_OF_OBJECT_MEMBER(ArtMethod, method_index_);
+    return MemberOffset(OFFSETOF_MEMBER(ArtMethod, method_index_));
   }
 
   uint32_t GetCodeItemOffset() {
@@ -524,10 +527,6 @@ class ArtMethod FINAL {
 
   bool IsImtUnimplementedMethod() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  MethodReference ToMethodReference() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return MethodReference(GetDexFile(), GetDexMethodIndex());
-  }
-
   // Find the catch block for the given exception type and dex_pc. When a catch block is found,
   // indicates whether the found catch block is responsible for clearing the exception or whether
   // a move-exception instruction is present.
@@ -570,6 +569,8 @@ class ArtMethod FINAL {
   const DexFile::ClassDef& GetClassDef() REQUIRES_SHARED(Locks::mutator_lock_);
 
   const char* GetReturnTypeDescriptor() REQUIRES_SHARED(Locks::mutator_lock_);
+
+  ALWAYS_INLINE Primitive::Type GetReturnTypePrimitive() REQUIRES_SHARED(Locks::mutator_lock_);
 
   const char* GetTypeDescriptorFromTypeIdx(dex::TypeIndex type_idx)
       REQUIRES_SHARED(Locks::mutator_lock_);
