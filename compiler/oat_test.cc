@@ -19,6 +19,7 @@
 #include "arch/instruction_set_features.h"
 #include "art_method-inl.h"
 #include "base/enums.h"
+#include "base/stl_util.h"
 #include "base/unix_file/fd_file.h"
 #include "class_linker.h"
 #include "common_compiler_test.h"
@@ -220,11 +221,12 @@ class OatTest : public CommonCompilerTest {
     elf_writer->PrepareDynamicSection(rodata_size,
                                       text_size,
                                       oat_writer.GetBssSize(),
+                                      oat_writer.GetBssMethodsOffset(),
                                       oat_writer.GetBssRootsOffset());
 
     if (kIsVdexEnabled) {
-      std::unique_ptr<BufferedOutputStream> vdex_out(
-            MakeUnique<BufferedOutputStream>(MakeUnique<FileOutputStream>(vdex_file)));
+      std::unique_ptr<BufferedOutputStream> vdex_out =
+            std::make_unique<BufferedOutputStream>(std::make_unique<FileOutputStream>(vdex_file));
       if (!oat_writer.WriteVerifierDeps(vdex_out.get(), nullptr)) {
         return false;
       }
@@ -483,7 +485,7 @@ TEST_F(OatTest, WriteRead) {
 TEST_F(OatTest, OatHeaderSizeCheck) {
   // If this test is failing and you have to update these constants,
   // it is time to update OatHeader::kOatVersion
-  EXPECT_EQ(72U, sizeof(OatHeader));
+  EXPECT_EQ(76U, sizeof(OatHeader));
   EXPECT_EQ(4U, sizeof(OatMethodOffsets));
   EXPECT_EQ(24U, sizeof(OatQuickMethodHeader));
   EXPECT_EQ(161 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),

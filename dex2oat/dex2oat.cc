@@ -39,6 +39,7 @@
 #include "arch/instruction_set_features.h"
 #include "arch/mips/instruction_set_features_mips.h"
 #include "art_method-inl.h"
+#include "base/callee_save_type.h"
 #include "base/dumpable.h"
 #include "base/macros.h"
 #include "base/scoped_flock.h"
@@ -113,11 +114,16 @@ static std::string CommandLine() {
 static std::string StrippedCommandLine() {
   std::vector<std::string> command;
 
-  // Do a pre-pass to look for zip-fd.
+  // Do a pre-pass to look for zip-fd and the compiler filter.
   bool saw_zip_fd = false;
+  bool saw_compiler_filter = false;
   for (int i = 0; i < original_argc; ++i) {
     if (android::base::StartsWith(original_argv[i], "--zip-fd=")) {
       saw_zip_fd = true;
+      break;
+    }
+    if (android::base::StartsWith(original_argv[i], "--compiler-filter=")) {
+      saw_compiler_filter = true;
       break;
     }
   }
@@ -160,6 +166,11 @@ static std::string StrippedCommandLine() {
     }
 
     command.push_back(original_argv[i]);
+  }
+
+  if (!saw_compiler_filter) {
+    command.push_back("--compiler-filter=" +
+        CompilerFilter::NameOfFilter(CompilerFilter::kDefaultCompilerFilter));
   }
 
   // Construct the final output.
@@ -514,13 +525,14 @@ class WatchDog {
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_mutex_unlock, (&mutex_), reason);
   }
 
-  const int64_t timeout_in_milliseconds_;
-  bool shutting_down_;
   // TODO: Switch to Mutex when we can guarantee it won't prevent shutdown in error cases.
   pthread_mutex_t mutex_;
   pthread_cond_t cond_;
   pthread_attr_t attr_;
   pthread_t pthread_;
+
+  const int64_t timeout_in_milliseconds_;
+  bool shutting_down_;
 };
 
 class Dex2Oat FINAL {
@@ -1390,8 +1402,8 @@ class Dex2Oat FINAL {
     // Note: we're only invalidating the magic data in the file, as dex2oat needs the rest of
     // the information to remain valid.
     if (update_input_vdex_) {
-      std::unique_ptr<BufferedOutputStream> vdex_out(MakeUnique<BufferedOutputStream>(
-          MakeUnique<FileOutputStream>(vdex_files_.back().get())));
+      std::unique_ptr<BufferedOutputStream> vdex_out = std::make_unique<BufferedOutputStream>(
+          std::make_unique<FileOutputStream>(vdex_files_.back().get()));
       if (!vdex_out->WriteFully(&VdexFile::Header::kVdexInvalidMagic,
                                 arraysize(VdexFile::Header::kVdexInvalidMagic))) {
         PLOG(ERROR) << "Failed to invalidate vdex header. File: " << vdex_out->GetLocation();
@@ -1888,8 +1900,8 @@ class Dex2Oat FINAL {
       verifier::VerifierDeps* verifier_deps = callbacks_->GetVerifierDeps();
       for (size_t i = 0, size = oat_files_.size(); i != size; ++i) {
         File* vdex_file = vdex_files_[i].get();
-        std::unique_ptr<BufferedOutputStream> vdex_out(
-            MakeUnique<BufferedOutputStream>(MakeUnique<FileOutputStream>(vdex_file)));
+        std::unique_ptr<BufferedOutputStream> vdex_out =
+            std::make_unique<BufferedOutputStream>(std::make_unique<FileOutputStream>(vdex_file));
 
         if (!oat_writers_[i]->WriteVerifierDeps(vdex_out.get(), verifier_deps)) {
           LOG(ERROR) << "Failed to write verifier dependencies into VDEX " << vdex_file->GetPath();
@@ -1923,6 +1935,7 @@ class Dex2Oat FINAL {
         elf_writer->PrepareDynamicSection(rodata_size,
                                           text_size,
                                           oat_writer->GetBssSize(),
+                                          oat_writer->GetBssMethodsOffset(),
                                           oat_writer->GetBssRootsOffset());
 
         if (IsImage()) {
@@ -2500,8 +2513,8 @@ class Dex2Oat FINAL {
 
     runtime_.reset(Runtime::Current());
     runtime_->SetInstructionSet(instruction_set_);
-    for (int i = 0; i < Runtime::kLastCalleeSaveType; i++) {
-      Runtime::CalleeSaveType type = Runtime::CalleeSaveType(i);
+    for (uint32_t i = 0; i < static_cast<uint32_t>(CalleeSaveType::kLastCalleeSaveType); ++i) {
+      CalleeSaveType type = CalleeSaveType(i);
       if (!runtime_->HasCalleeSaveMethod(type)) {
         runtime_->SetCalleeSaveMethod(runtime_->CreateCalleeSaveMethod(), type);
       }
@@ -2920,7 +2933,7 @@ static dex2oat::ReturnCode Dex2oat(int argc, char** argv) {
   // might produce a stack frame too large for this function or for
   // functions inlining it (such as main), that would not fit the
   // requirements of the `-Wframe-larger-than` option.
-  std::unique_ptr<Dex2Oat> dex2oat = MakeUnique<Dex2Oat>(&timings);
+  std::unique_ptr<Dex2Oat> dex2oat = std::make_unique<Dex2Oat>(&timings);
 
   // Parse arguments. Argument mistakes will lead to exit(EXIT_FAILURE) in UsageError.
   dex2oat->ParseArgs(argc, argv);

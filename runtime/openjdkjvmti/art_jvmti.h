@@ -41,6 +41,7 @@
 #include "base/casts.h"
 #include "base/logging.h"
 #include "base/macros.h"
+#include "base/strlcpy.h"
 #include "events.h"
 #include "java_vm_ext.h"
 #include "jni_env_ext.h"
@@ -187,7 +188,7 @@ static inline JvmtiUniquePtr<char[]> CopyString(jvmtiEnv* env, const char* src, 
   size_t len = strlen(src) + 1;
   JvmtiUniquePtr<char[]> ret = AllocJvmtiUniquePtr<char[]>(env, len, error);
   if (ret != nullptr) {
-    strcpy(ret.get(), src);
+    strlcpy(ret.get(), src, len);
   }
   return ret;
 }
@@ -217,8 +218,8 @@ const jvmtiCapabilities kPotentialCapabilities = {
     .can_redefine_any_class                          = 0,
     .can_get_current_thread_cpu_time                 = 0,
     .can_get_thread_cpu_time                         = 0,
-    .can_generate_method_entry_events                = 0,
-    .can_generate_method_exit_events                 = 0,
+    .can_generate_method_entry_events                = 1,
+    .can_generate_method_exit_events                 = 1,
     .can_generate_all_class_hook_events              = 0,
     .can_generate_compiled_method_load_events        = 0,
     .can_generate_monitor_events                     = 0,

@@ -290,9 +290,9 @@ inline void CompilationHelper::Compile(CompilerDriver* driver,
 
       if (kIsVdexEnabled) {
         for (size_t i = 0, size = vdex_files.size(); i != size; ++i) {
-          std::unique_ptr<BufferedOutputStream> vdex_out(
-              MakeUnique<BufferedOutputStream>(
-                  MakeUnique<FileOutputStream>(vdex_files[i].GetFile())));
+          std::unique_ptr<BufferedOutputStream> vdex_out =
+              std::make_unique<BufferedOutputStream>(
+                  std::make_unique<FileOutputStream>(vdex_files[i].GetFile()));
           oat_writers[i]->WriteVerifierDeps(vdex_out.get(), nullptr);
           oat_writers[i]->WriteChecksumsAndVdexHeader(vdex_out.get());
         }
@@ -311,6 +311,7 @@ inline void CompilationHelper::Compile(CompilerDriver* driver,
         elf_writer->PrepareDynamicSection(rodata_size,
                                           text_size,
                                           oat_writer->GetBssSize(),
+                                          oat_writer->GetBssMethodsOffset(),
                                           oat_writer->GetBssRootsOffset());
 
         writer->UpdateOatFileLayout(i,

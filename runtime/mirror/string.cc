@@ -19,6 +19,7 @@
 #include "arch/memcmp16.h"
 #include "array.h"
 #include "base/array_ref.h"
+#include "base/stl_util.h"
 #include "class-inl.h"
 #include "gc/accounting/card_table-inl.h"
 #include "gc_root-inl.h"
@@ -418,6 +419,10 @@ std::string String::PrettyStringDescriptor(ObjPtr<mirror::String> java_descripto
 
 std::string String::PrettyStringDescriptor() {
   return PrettyDescriptor(ToModifiedUtf8().c_str());
+}
+
+ObjPtr<String> String::Intern() {
+  return Runtime::Current()->GetInternTable()->InternWeak(this);
 }
 
 }  // namespace mirror

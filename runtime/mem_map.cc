@@ -23,6 +23,7 @@
 #include <sys/resource.h>
 #endif
 
+#include <map>
 #include <memory>
 #include <sstream>
 
@@ -32,6 +33,7 @@
 #include "cutils/ashmem.h"
 
 #include "base/allocator.h"
+#include "base/bit_utils.h"
 #include "base/memory_tool.h"
 #include "globals.h"
 #include "utils.h"
@@ -45,6 +47,10 @@ namespace art {
 
 using android::base::StringPrintf;
 using android::base::unique_fd;
+
+template<class Key, class T, AllocatorTag kTag, class Compare = std::less<Key>>
+using AllocationTrackingMultiMap =
+    std::multimap<Key, T, Compare, TrackingAllocator<std::pair<const Key, T>, kTag>>;
 
 using Maps = AllocationTrackingMultiMap<void*, MemMap*, kAllocatorTagMaps>;
 
@@ -187,7 +193,7 @@ static bool CheckNonOverlapping(uintptr_t begin,
     *error_msg = StringPrintf("Failed to build process map");
     return false;
   }
-  ScopedBacktraceMapIteratorLock(map.get());
+  ScopedBacktraceMapIteratorLock lock(map.get());
   for (BacktraceMap::const_iterator it = map->begin(); it != map->end(); ++it) {
     if ((begin >= it->start && begin < it->end)      // start of new within old
         || (end > it->start && end < it->end)        // end of new within old

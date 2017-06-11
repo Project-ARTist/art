@@ -22,7 +22,6 @@
 
 #include "base/casts.h"
 #include "base/logging.h"
-#include "base/stl_util.h"
 #include "compiled_method.h"
 #include "debug/elf_debug_writer.h"
 #include "debug/method_debug_info.h"
@@ -97,6 +96,7 @@ class ElfWriterQuick FINAL : public ElfWriter {
   void PrepareDynamicSection(size_t rodata_size,
                              size_t text_size,
                              size_t bss_size,
+                             size_t bss_methods_offset,
                              size_t bss_roots_offset) OVERRIDE;
   void PrepareDebugInfo(const ArrayRef<const debug::MethodDebugInfo>& method_infos) OVERRIDE;
   OutputStream* StartRoData() OVERRIDE;
@@ -136,15 +136,15 @@ std::unique_ptr<ElfWriter> CreateElfWriterQuick(InstructionSet instruction_set,
                                                 const CompilerOptions* compiler_options,
                                                 File* elf_file) {
   if (Is64BitInstructionSet(instruction_set)) {
-    return MakeUnique<ElfWriterQuick<ElfTypes64>>(instruction_set,
-                                                  features,
-                                                  compiler_options,
-                                                  elf_file);
+    return std::make_unique<ElfWriterQuick<ElfTypes64>>(instruction_set,
+                                                        features,
+                                                        compiler_options,
+                                                        elf_file);
   } else {
-    return MakeUnique<ElfWriterQuick<ElfTypes32>>(instruction_set,
-                                                  features,
-                                                  compiler_options,
-                                                  elf_file);
+    return std::make_unique<ElfWriterQuick<ElfTypes32>>(instruction_set,
+                                                        features,
+                                                        compiler_options,
+                                                        elf_file);
   }
 }
 
@@ -160,7 +160,8 @@ ElfWriterQuick<ElfTypes>::ElfWriterQuick(InstructionSet instruction_set,
       rodata_size_(0u),
       text_size_(0u),
       bss_size_(0u),
-      output_stream_(MakeUnique<BufferedOutputStream>(MakeUnique<FileOutputStream>(elf_file))),
+      output_stream_(
+          std::make_unique<BufferedOutputStream>(std::make_unique<FileOutputStream>(elf_file))),
       builder_(new ElfBuilder<ElfTypes>(instruction_set, features, output_stream_.get())) {}
 
 template <typename ElfTypes>
@@ -178,6 +179,7 @@ template <typename ElfTypes>
 void ElfWriterQuick<ElfTypes>::PrepareDynamicSection(size_t rodata_size,
                                                      size_t text_size,
                                                      size_t bss_size,
+                                                     size_t bss_methods_offset,
                                                      size_t bss_roots_offset) {
   DCHECK_EQ(rodata_size_, 0u);
   rodata_size_ = rodata_size;
@@ -189,6 +191,7 @@ void ElfWriterQuick<ElfTypes>::PrepareDynamicSection(size_t rodata_size,
                                   rodata_size_,
                                   text_size_,
                                   bss_size_,
+                                  bss_methods_offset,
                                   bss_roots_offset);
 }
 

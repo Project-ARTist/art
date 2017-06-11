@@ -245,7 +245,6 @@ cc_defaults {
         "entrypoints/quick/quick_entrypoints_enum.cc",
         "entrypoints/quick/quick_field_entrypoints.cc",
         "entrypoints/quick/quick_fillarray_entrypoints.cc",
-        "entrypoints/quick/quick_instrumentation_entrypoints.cc",
         "entrypoints/quick/quick_jni_entrypoints.cc",
         "entrypoints/quick/quick_lock_entrypoints.cc",
         "entrypoints/quick/quick_math_entrypoints.cc",
@@ -429,6 +428,7 @@ gensrcs {
     srcs: [
         "arch/instruction_set.h",
         "base/allocator.h",
+        "base/callee_save_type.h",
         "base/enums.h",
         "base/mutex.h",
         "debugger.h",
@@ -456,7 +456,6 @@ gensrcs {
         "oat.h",
         "object_callbacks.h",
         "process_state.h",
-        "runtime.h",
         "stack.h",
         "thread.h",
         "thread_state.h",
