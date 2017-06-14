@@ -2272,6 +2272,8 @@ class InitializeClassVisitor : public CompilationVisitor {
     const char* descriptor = dex_file.StringDataByIdx(class_type_id.descriptor_idx_);
     ScopedObjectAccessUnchecked soa(Thread::Current());
     StackHandleScope<3> hs(soa.Self());
+    const bool is_boot_image = manager_->GetCompiler()->GetCompilerOptions().IsBootImage();
+    const bool is_app_image = manager_->GetCompiler()->GetCompilerOptions().IsAppImage();
 
     mirror::Class::Status old_status = klass->GetStatus();;
     // Only try to initialize classes that were successfully verified.
@@ -2293,32 +2295,28 @@ class InitializeClassVisitor : public CompilationVisitor {
         ObjectLock<mirror::Class> lock(soa.Self(), h_klass);
         // Attempt to initialize allowing initialization of parent classes but still not static
         // fields.
-        bool is_superclass_initialized = true;
-        if (!manager_->GetCompiler()->GetCompilerOptions().IsAppImage()) {
-          // If not an app image case, the compiler won't initialize too much things and do a fast
-          // fail, don't check dependencies.
-          manager_->GetClassLinker()->EnsureInitialized(soa.Self(), klass, false, true);
-        } else {
-          // For app images, do the initialization recursively and resolve types encountered to make
-          // sure the compiler runs without error.
-          is_superclass_initialized = InitializeDependencies(klass, class_loader, soa.Self());
-          if (is_superclass_initialized) {
-            manager_->GetClassLinker()->EnsureInitialized(soa.Self(), klass, false, true);
-          }
-        }
+        manager_->GetClassLinker()->EnsureInitialized(soa.Self(), klass, false, true);
         old_status = klass->GetStatus();
-        // If superclass cannot be initialized, no need to proceed.
+        // If the class was not initialized, we can proceed to see if we can initialize static
+        // fields.
         if (!klass->IsInitialized() &&
-            is_superclass_initialized &&
+            (is_app_image || is_boot_image) &&
             manager_->GetCompiler()->IsImageClass(descriptor)) {
           bool can_init_static_fields = false;
-          if (manager_->GetCompiler()->GetCompilerOptions().IsBootImage()) {
+          if (is_boot_image) {
             // We need to initialize static fields, we only do this for image classes that aren't
-            // marked with the $NoPreloadHolder (which implies this should not be initialized early).
+            // marked with the $NoPreloadHolder (which implies this should not be initialized
+            // early).
             can_init_static_fields = !StringPiece(descriptor).ends_with("$NoPreloadHolder;");
           } else {
-            can_init_static_fields = manager_->GetCompiler()->GetCompilerOptions().IsAppImage() &&
+            CHECK(is_app_image);
+            // The boot image case doesn't need to recursively initialize the dependencies with
+            // special logic since the class linker already does this.
+            bool is_superclass_initialized =
+                InitializeDependencies(klass, class_loader, soa.Self());
+            can_init_static_fields =
                 !soa.Self()->IsExceptionPending() &&
+                is_superclass_initialized &&
                 NoClinitInDependency(klass, soa.Self(), &class_loader);
             // TODO The checking for clinit can be removed since it's already
             // checked when init superclass. Currently keep it because it contains
@@ -2361,6 +2359,10 @@ class InitializeClassVisitor : public CompilationVisitor {
                 soa.Self()->ClearException();
                 transaction.Rollback();
                 CHECK_EQ(old_status, klass->GetStatus()) << "Previous class status not restored";
+              } else if (is_boot_image) {
+                // For boot image, we want to put the updated status in the oat class since we can't
+                // reject the image anyways.
+                old_status = klass->GetStatus();
               }
             }
 
@@ -2370,6 +2372,8 @@ class InitializeClassVisitor : public CompilationVisitor {
               // above as we will allocate strings, so must be allowed to suspend.
               if (&klass->GetDexFile() == manager_->GetDexFile()) {
                 InternStrings(klass, class_loader);
+              } else {
+                DCHECK(!is_boot_image) << "Boot image must have equal dex files";
               }
             }
           }
@@ -2462,63 +2466,63 @@ class InitializeClassVisitor : public CompilationVisitor {
 
   bool ResolveTypesOfMethods(Thread* self, ArtMethod* m)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-      auto rtn_type = m->GetReturnType(true);  // return value is discarded because resolve will be done internally.
-      if (rtn_type == nullptr) {
-        self->ClearException();
-        return false;
-      }
-      const DexFile::TypeList* types = m->GetParameterTypeList();
-      if (types != nullptr) {
-        for (uint32_t i = 0; i < types->Size(); ++i) {
-          dex::TypeIndex param_type_idx = types->GetTypeItem(i).type_idx_;
-          auto param_type = m->GetClassFromTypeIndex(param_type_idx, true);
-          if (param_type == nullptr) {
-            self->ClearException();
-            return false;
-          }
+    auto rtn_type = m->GetReturnType(true);  // return value is discarded because resolve will be done internally.
+    if (rtn_type == nullptr) {
+      self->ClearException();
+      return false;
+    }
+    const DexFile::TypeList* types = m->GetParameterTypeList();
+    if (types != nullptr) {
+      for (uint32_t i = 0; i < types->Size(); ++i) {
+        dex::TypeIndex param_type_idx = types->GetTypeItem(i).type_idx_;
+        auto param_type = m->GetClassFromTypeIndex(param_type_idx, true);
+        if (param_type == nullptr) {
+          self->ClearException();
+          return false;
         }
       }
-      return true;
+    }
+    return true;
   }
 
   // Pre resolve types mentioned in all method signatures before start a transaction
   // since ResolveType doesn't work in transaction mode.
   bool PreResolveTypes(Thread* self, const Handle<mirror::Class>& klass)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-      PointerSize pointer_size = manager_->GetClassLinker()->GetImagePointerSize();
-      for (ArtMethod& m : klass->GetMethods(pointer_size)) {
-        if (!ResolveTypesOfMethods(self, &m)) {
+    PointerSize pointer_size = manager_->GetClassLinker()->GetImagePointerSize();
+    for (ArtMethod& m : klass->GetMethods(pointer_size)) {
+      if (!ResolveTypesOfMethods(self, &m)) {
+        return false;
+      }
+    }
+    if (klass->IsInterface()) {
+      return true;
+    } else if (klass->HasSuperClass()) {
+      StackHandleScope<1> hs(self);
+      MutableHandle<mirror::Class> super_klass(hs.NewHandle<mirror::Class>(klass->GetSuperClass()));
+      for (int i = super_klass->GetVTableLength() - 1; i >= 0; --i) {
+        ArtMethod* m = klass->GetVTableEntry(i, pointer_size);
+        ArtMethod* super_m = super_klass->GetVTableEntry(i, pointer_size);
+        if (!ResolveTypesOfMethods(self, m) || !ResolveTypesOfMethods(self, super_m)) {
           return false;
         }
       }
-      if (klass->IsInterface()) {
-        return true;
-      } else if (klass->HasSuperClass()) {
-        StackHandleScope<1> hs(self);
-        MutableHandle<mirror::Class> super_klass(hs.NewHandle<mirror::Class>(klass->GetSuperClass()));
-        for (int i = super_klass->GetVTableLength() - 1; i >= 0; --i) {
-          ArtMethod* m = klass->GetVTableEntry(i, pointer_size);
-          ArtMethod* super_m = super_klass->GetVTableEntry(i, pointer_size);
-          if (!ResolveTypesOfMethods(self, m) || !ResolveTypesOfMethods(self, super_m)) {
-            return false;
-          }
-        }
-        for (int32_t i = 0; i < klass->GetIfTableCount(); ++i) {
-          super_klass.Assign(klass->GetIfTable()->GetInterface(i));
-          if (klass->GetClassLoader() != super_klass->GetClassLoader()) {
-            uint32_t num_methods = super_klass->NumVirtualMethods();
-            for (uint32_t j = 0; j < num_methods; ++j) {
-              ArtMethod* m = klass->GetIfTable()->GetMethodArray(i)->GetElementPtrSize<ArtMethod*>(
-                  j, pointer_size);
-              ArtMethod* super_m = super_klass->GetVirtualMethod(j, pointer_size);
-              if (!ResolveTypesOfMethods(self, m) || !ResolveTypesOfMethods(self, super_m)) {
-                return false;
-              }
+      for (int32_t i = 0; i < klass->GetIfTableCount(); ++i) {
+        super_klass.Assign(klass->GetIfTable()->GetInterface(i));
+        if (klass->GetClassLoader() != super_klass->GetClassLoader()) {
+          uint32_t num_methods = super_klass->NumVirtualMethods();
+          for (uint32_t j = 0; j < num_methods; ++j) {
+            ArtMethod* m = klass->GetIfTable()->GetMethodArray(i)->GetElementPtrSize<ArtMethod*>(
+                j, pointer_size);
+            ArtMethod* super_m = super_klass->GetVirtualMethod(j, pointer_size);
+            if (!ResolveTypesOfMethods(self, m) || !ResolveTypesOfMethods(self, super_m)) {
+              return false;
             }
           }
         }
       }
-      return true;
+    }
+    return true;
   }
 
   // Initialize the klass's dependencies recursively before initializing itself.
