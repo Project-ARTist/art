@@ -246,8 +246,7 @@ class OatSymbolizer FINAL {
     //       might be a static initializer.
     ClassDataItemIterator it(dex_file, class_data);
     uint32_t class_method_idx = 0;
-    for (; it.HasNextStaticField(); it.Next()) { /* skip */ }
-    for (; it.HasNextInstanceField(); it.Next()) { /* skip */ }
+    it.SkipAllFields();
     for (; it.HasNextDirectMethod() || it.HasNextVirtualMethod(); it.Next()) {
       WalkOatMethod(oat_class.GetOatMethod(class_method_idx++),
                     dex_file,
@@ -769,7 +768,7 @@ class OatDumper {
         const uint8_t* class_data = dex_file->GetClassData(class_def);
         if (class_data != nullptr) {
           ClassDataItemIterator it(*dex_file, class_data);
-          SkipAllFields(it);
+          it.SkipAllFields();
           uint32_t class_method_index = 0;
           while (it.HasNextDirectMethod()) {
             AddOffsets(oat_class.GetOatMethod(class_method_index++));
@@ -856,7 +855,7 @@ class OatDumper {
         return;
       }
       ClassDataItemIterator it(dex_file, class_data);
-      SkipAllFields(it);
+      it.SkipAllFields();
       while (it.HasNextDirectMethod()) {
         WalkCodeItem(dex_file, it.GetMethodCodeItem());
         it.Next();
@@ -1076,15 +1075,6 @@ class OatDumper {
     return true;
   }
 
-  static void SkipAllFields(ClassDataItemIterator& it) {
-    while (it.HasNextStaticField()) {
-      it.Next();
-    }
-    while (it.HasNextInstanceField()) {
-      it.Next();
-    }
-  }
-
   bool DumpOatClass(VariableIndentationOutputStream* vios,
                     const OatFile::OatClass& oat_class, const DexFile& dex_file,
                     const DexFile::ClassDef& class_def, bool* stop_analysis) {
@@ -1096,7 +1086,7 @@ class OatDumper {
       return success;
     }
     ClassDataItemIterator it(dex_file, class_data);
-    SkipAllFields(it);
+    it.SkipAllFields();
     uint32_t class_method_index = 0;
     while (it.HasNextDirectMethod()) {
       if (!DumpOatMethod(vios, class_def, class_method_index, oat_class, dex_file,
@@ -1405,6 +1395,54 @@ class OatDumper {
                    method_info);
   }
 
+  static int GetOutVROffset(uint16_t out_num, InstructionSet isa) {
+    // According to stack model, the first out is above the Method referernce.
+    return static_cast<size_t>(InstructionSetPointerSize(isa)) + out_num * sizeof(uint32_t);
+  }
+
+  static uint32_t GetVRegOffsetFromQuickCode(const DexFile::CodeItem* code_item,
+                                             uint32_t core_spills,
+                                             uint32_t fp_spills,
+                                             size_t frame_size,
+                                             int reg,
+                                             InstructionSet isa) {
+    PointerSize pointer_size = InstructionSetPointerSize(isa);
+    if (kIsDebugBuild) {
+      auto* runtime = Runtime::Current();
+      if (runtime != nullptr) {
+        CHECK_EQ(runtime->GetClassLinker()->GetImagePointerSize(), pointer_size);
+      }
+    }
+    DCHECK_ALIGNED(frame_size, kStackAlignment);
+    DCHECK_NE(reg, -1);
+    int spill_size = POPCOUNT(core_spills) * GetBytesPerGprSpillLocation(isa)
+        + POPCOUNT(fp_spills) * GetBytesPerFprSpillLocation(isa)
+        + sizeof(uint32_t);  // Filler.
+    int num_regs = code_item->registers_size_ - code_item->ins_size_;
+    int temp_threshold = code_item->registers_size_;
+    const int max_num_special_temps = 1;
+    if (reg == temp_threshold) {
+      // The current method pointer corresponds to special location on stack.
+      return 0;
+    } else if (reg >= temp_threshold + max_num_special_temps) {
+      /*
+       * Special temporaries may have custom locations and the logic above deals with that.
+       * However, non-special temporaries are placed relative to the outs.
+       */
+      int temps_start = code_item->outs_size_ * sizeof(uint32_t)
+          + static_cast<size_t>(pointer_size) /* art method */;
+      int relative_offset = (reg - (temp_threshold + max_num_special_temps)) * sizeof(uint32_t);
+      return temps_start + relative_offset;
+    } else if (reg < num_regs) {
+      int locals_start = frame_size - spill_size - num_regs * sizeof(uint32_t);
+      return locals_start + (reg * sizeof(uint32_t));
+    } else {
+      // Handle ins.
+      return frame_size + ((reg - num_regs) * sizeof(uint32_t))
+          + static_cast<size_t>(pointer_size) /* art method */;
+    }
+  }
+
   void DumpVregLocations(std::ostream& os, const OatFile::OatMethod& oat_method,
                          const DexFile::CodeItem* code_item) {
     if (code_item != nullptr) {
@@ -1424,13 +1462,12 @@ class OatDumper {
           os << "\n\tlocals:";
         }
 
-        uint32_t offset = StackVisitor::GetVRegOffsetFromQuickCode(
-            code_item,
-            oat_method.GetCoreSpillMask(),
-            oat_method.GetFpSpillMask(),
-            oat_method.GetFrameSizeInBytes(),
-            reg,
-            GetInstructionSet());
+        uint32_t offset = GetVRegOffsetFromQuickCode(code_item,
+                                                     oat_method.GetCoreSpillMask(),
+                                                     oat_method.GetFpSpillMask(),
+                                                     oat_method.GetFrameSizeInBytes(),
+                                                     reg,
+                                                     GetInstructionSet());
         os << " v" << reg << "[sp + #" << offset << "]";
       }
 
@@ -1439,7 +1476,7 @@ class OatDumper {
           os << "\n\touts:";
         }
 
-        uint32_t offset = StackVisitor::GetOutVROffset(out_reg, GetInstructionSet());
+        uint32_t offset = GetOutVROffset(out_reg, GetInstructionSet());
         os << " v" << out_reg << "[sp + #" << offset << "]";
       }
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright 2016 The Android Open Source Project
+# Copyright 2017 The Android Open Source Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,16 +13,29 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# Make us exit on a failure.
+
 #
-set -e
+# Perform a mostly normal build.
+# Since this test imports 'dalvik.annotation.optimization.FastNative' (and CriticalNative),
+# we do a bit of trickery to allow the annotations to be used at javac-compile time,
+# but remove them afterwards so it doesn't end up in the dex file.
+#
+# This enables the test to compile with vanilla RI javac and work on either ART or RI.
+#
 
-# Hard-wired use of experimental jack.
-# TODO: fix this temporary work-around for lambdas, see b/19467889
-export USE_JACK=true
-# export JACK_SERVER=false
-# export JACK_REPOSITORY="${ANDROID_BUILD_TOP}/prebuilts/sdk/tools/jacks"
+export ORIGINAL_JAVAC="$JAVAC"
 
-# e.g. /foo/bar/jack-3.10.ALPHA.jar -> 3.10.ALPHA
-# export JACK_VERSION="$(find "$JACK_REPOSITORY" -name '*ALPHA*' | sed 's/.*jack-//g' | sed 's/[.]jar//g')"
-./default-build "$@" --experimental lambdas
+# Delete CriticalNative.java, FastNative.java annotations after building the .class files.
+function javac_wrapper {
+  $ORIGINAL_JAVAC "$@"
+  local stat=$?
+
+  [[ -d classes ]] && (find classes/dalvik -name '*.class' | xargs rm -rf)
+
+  return $stat
+}
+
+export -f javac_wrapper
+export JAVAC=javac_wrapper
+
+./default-build "$@"
