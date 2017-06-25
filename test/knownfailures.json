@@ -143,15 +143,6 @@
                        "complete test) JDWP must be set up."]
     },
     {
-        "tests": "131-structural-change",
-        "variant": "debug",
-        "description": ["131 is an old test. The functionality has been",
-                        "implemented at an earlier stage and is checked",
-                        "in tests 138. Blacklisted for debug builds since",
-                        "these builds have duplicate classes checks which",
-                        "punt to interpreter"]
-    },
-    {
         "tests": "138-duplicate-classes-check",
         "variant": "ndebug",
         "description": ["Turned on for debug builds since debug builds have",
@@ -603,22 +594,11 @@
     },
     {
         "tests": [
-            "004-ReferenceMap",
-            "004-StackWalk",
-            "089-many-methods",
-            "580-checker-string-fact-intrinsics",
-            "616-cha-interface-default",
-            "636-wrong-static-access",
-            "910-methods",
-            "911-get-stack-trace",
-            "913-heaps",
-            "948-change-annotations",
-            "953-invoke-polymorphic-compiler",
-            "958-methodhandle-stackframe"
+            "953-invoke-polymorphic-compiler"
         ],
-        "description": "The tests above fail with --build-with-javac-dx.",
+        "description": "Test throws VerifyError when run with --build-with-javac-dx.",
         "env_vars": {"ANDROID_COMPILE_WITH_JACK": "false"},
-        "bug": "b/37636792"
+        "bug": "b/62722425"
     },
     {
         "tests": [

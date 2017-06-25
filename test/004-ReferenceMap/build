@@ -14,5 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Use secondary switch to add secondary dex file to class path.
-exec ${RUN} "${@}" --secondary
+# Stop if something fails.
+set -e
+
+# The test relies on DEX file produced by javac+dx so keep building with them for now
+# (see b/19467889)
+mkdir classes
+${JAVAC} -d classes `find src -name '*.java'`
+${DX} -JXmx256m --debug --dex --dump-to=classes.lst --output=classes.dex \
+  --dump-width=1000 ${DX_FLAGS} classes
+zip $TEST_NAME.jar classes.dex

@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
   // everything else. In case you want to see all messages, comment out the line.
   setenv("ANDROID_LOG_TAGS", "*:e", 1);
 
-  art::InitLogging(argv, art::Runtime::Aborter);
+  art::InitLogging(argv, art::Runtime::Abort);
   LOG(INFO) << "Running main() from common_runtime_test.cc...";
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
@@ -405,6 +405,8 @@ void CommonRuntimeTestImpl::SetUp() {
   options.push_back(std::make_pair(min_heap_string, nullptr));
   options.push_back(std::make_pair(max_heap_string, nullptr));
   options.push_back(std::make_pair("-XX:SlowDebug=true", nullptr));
+  static bool gSlowDebugTestFlag = false;
+  RegisterRuntimeDebugFlag(&gSlowDebugTestFlag);
 
   callbacks_.reset(new NoopCompilerCallbacks());
 
@@ -435,6 +437,9 @@ void CommonRuntimeTestImpl::SetUp() {
   java_lang_dex_file_ = boot_class_path_[0];
 
   FinalizeSetup();
+
+  // Ensure that we're really running with debug checks enabled.
+  CHECK(gSlowDebugTestFlag);
 }
 
 void CommonRuntimeTestImpl::FinalizeSetup() {
@@ -461,7 +466,7 @@ void CommonRuntimeTestImpl::FinalizeSetup() {
   runtime_->GetHeap()->SetMinIntervalHomogeneousSpaceCompactionByOom(0U);
 }
 
-void CommonRuntimeTestImpl::ClearDirectory(const char* dirpath) {
+void CommonRuntimeTestImpl::ClearDirectory(const char* dirpath, bool recursive) {
   ASSERT_TRUE(dirpath != nullptr);
   DIR* dir = opendir(dirpath);
   ASSERT_TRUE(dir != nullptr);
@@ -477,9 +482,11 @@ void CommonRuntimeTestImpl::ClearDirectory(const char* dirpath) {
     int stat_result = lstat(filename.c_str(), &s);
     ASSERT_EQ(0, stat_result) << "unable to stat " << filename;
     if (S_ISDIR(s.st_mode)) {
-      ClearDirectory(filename.c_str());
-      int rmdir_result = rmdir(filename.c_str());
-      ASSERT_EQ(0, rmdir_result) << filename;
+      if (recursive) {
+        ClearDirectory(filename.c_str());
+        int rmdir_result = rmdir(filename.c_str());
+        ASSERT_EQ(0, rmdir_result) << filename;
+      }
     } else {
       int unlink_result = unlink(filename.c_str());
       ASSERT_EQ(0, unlink_result) << filename;

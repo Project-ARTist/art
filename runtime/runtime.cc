@@ -483,7 +483,20 @@ struct AbortState {
 };
 
 void Runtime::Abort(const char* msg) {
-  gAborting++;  // set before taking any locks
+  auto old_value = gAborting.fetch_add(1);  // set before taking any locks
+
+#ifdef ART_TARGET_ANDROID
+  if (old_value == 0) {
+    // Only set the first abort message.
+    android_set_abort_message(msg);
+  }
+#else
+  UNUSED(old_value);
+#endif
+
+#ifdef ART_TARGET_ANDROID
+  android_set_abort_message(msg);
+#endif
 
   // Ensure that we don't have multiple threads trying to abort at once,
   // which would result in significantly worse diagnostics.
@@ -570,7 +583,7 @@ void Runtime::SweepSystemWeaks(IsMarkedVisitor* visitor) {
 bool Runtime::ParseOptions(const RuntimeOptions& raw_options,
                            bool ignore_unrecognized,
                            RuntimeArgumentMap* runtime_options) {
-  InitLogging(/* argv */ nullptr, Aborter);  // Calls Locks::Init() as a side effect.
+  InitLogging(/* argv */ nullptr, Abort);  // Calls Locks::Init() as a side effect.
   bool parsed = ParsedOptions::Parse(raw_options, ignore_unrecognized, runtime_options);
   if (!parsed) {
     LOG(ERROR) << "Failed to parse options";
@@ -1055,7 +1068,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   oat_file_manager_ = new OatFileManager;
 
   Thread::SetSensitiveThreadHook(runtime_options.GetOrDefault(Opt::HookIsSensitiveThread));
-  Monitor::Init(runtime_options.GetOrDefault(Opt::LockProfThreshold));
+  Monitor::Init(runtime_options.GetOrDefault(Opt::LockProfThreshold),
+                runtime_options.GetOrDefault(Opt::StackDumpLockProfThreshold));
 
   boot_class_path_string_ = runtime_options.ReleaseOrDefault(Opt::BootClassPath);
   class_path_string_ = runtime_options.ReleaseOrDefault(Opt::ClassPath);
@@ -2356,14 +2370,6 @@ void Runtime::RemoveSystemWeakHolder(gc::AbstractSystemWeakHolder* holder) {
   if (it != system_weak_holders_.end()) {
     system_weak_holders_.erase(it);
   }
-}
-
-NO_RETURN
-void Runtime::Aborter(const char* abort_message) {
-#ifdef ART_TARGET_ANDROID
-  android_set_abort_message(abort_message);
-#endif
-  Runtime::Abort(abort_message);
 }
 
 RuntimeCallbacks* Runtime::GetRuntimeCallbacks() {
