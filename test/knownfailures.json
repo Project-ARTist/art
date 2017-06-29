@@ -502,7 +502,7 @@
             "645-checker-abs-simd",
             "706-checker-scheduler"],
         "description": ["Checker tests are not compatible with jvmti."],
-        "variant": "jvmti-stress | redefine-stress | trace-stress | field-stress"
+        "variant": "jvmti-stress | redefine-stress | trace-stress | field-stress | step-stress"
     },
     {
         "tests": [
@@ -510,7 +510,7 @@
             "964-default-iface-init-gen"
         ],
         "description": ["Tests that just take too long with jvmti-stress"],
-        "variant": "jvmti-stress | redefine-stress | trace-stress"
+        "variant": "jvmti-stress | redefine-stress | trace-stress | step-stress"
     },
     {
         "tests": [
@@ -541,7 +541,7 @@
             "981-dedup-original-dex"
         ],
         "description": ["Tests that require exact knowledge of the number of plugins and agents."],
-        "variant": "jvmti-stress | redefine-stress | trace-stress | field-stress"
+        "variant": "jvmti-stress | redefine-stress | trace-stress | field-stress | step-stress"
     },
     {
         "tests": [
@@ -579,7 +579,7 @@
             "004-ThreadStress"
         ],
         "description": "The thread stress test just takes too long with field-stress",
-        "variant": "jvmti-stress | field-stress"
+        "variant": "jvmti-stress | field-stress | step-stress"
     },
     {
         "tests": [
@@ -602,10 +602,7 @@
     },
     {
         "tests": [
-            "565-checker-doublenegbitwise",
-            "567-checker-compare",
-            "586-checker-null-array-get",
-            "633-checker-rtp-getclass"
+            "567-checker-compare"
         ],
         "description": "Checker tests failing when run with --build-with-javac-dx.",
         "env_vars": {"ANDROID_COMPILE_WITH_JACK": "false"},
@@ -676,5 +673,12 @@
         "description": [ "Flake on gcstress" ],
         "bug": "b/62562923",
         "variant": "gcstress & jit & target"
+    },
+    {
+        "tests": ["004-JniTest"],
+        "description": [ "Tests failing with --build-with-javac-dx since the new annotation",
+                         "lookup changes" ],
+        "bug": "b/63089991",
+        "env_vars": {"ANDROID_COMPILE_WITH_JACK": "false"}
     }
 ]

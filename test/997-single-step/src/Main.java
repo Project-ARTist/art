@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
-package art;
-
-public class Test2 {}
+public class Main {
+  public static void main(String[] args) throws Exception {
+    art.Test997.run();
+  }
+}
