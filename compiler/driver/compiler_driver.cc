@@ -507,7 +507,9 @@ void CompilerDriver::CompileAll(jobject class_loader,
   VLOG(compiler) << "Before precompile " << GetMemoryUsageString(false);
   PreCompile(class_loader, dex_files, thread_pool.get(), timings);
   // <PreInit all Environments>
-  CodeLibEnvironment::PreInitializeEnvironmentCodeLib(class_loader, this, dex_files);
+  CodeLibEnvironment& env = CodeLibEnvironment::GetInstance();
+  env.PreInitializeEnvironmentCodeLib(class_loader, this, dex_files);
+  VLOG(compiler) << "CodeLib available: " << env.IsCodeLibAvailable();
   // </PreInit all Environments>
   Compile(class_loader, dex_files, thread_pool.get(), timings);
   if (dump_stats_) {

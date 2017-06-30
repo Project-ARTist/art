@@ -109,6 +109,8 @@ class OatWriter {
     return absolute_patch_locations_;
   }
 
+  bool RewriteLocationChecksum();
+
   bool WriteRodata(OutputStream* out);
   bool WriteCode(OutputStream* out);
 
