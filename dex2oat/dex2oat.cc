@@ -234,6 +234,10 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("  --compile-pic: Force indirect use of code, methods, and classes");
   UsageError("      Default: disabled");
   UsageError("");
+  UsageError("  --checksum-rewriting: Force dex2oat to write a fake location checksum (write the original");
+  UsageError("      checksum instead of the correct location checksum of the modified APK file)");
+  UsageError("      Default: disabled");
+  UsageError("");
   UsageError("  --compiler-backend=(Quick|Optimizing): select compiler backend");
   UsageError("      set.");
   UsageError("      Example: --compiler-backend=Optimizing");
@@ -523,6 +527,7 @@ class Dex2Oat FINAL {
       image_(false),
       is_host_(false),
       driver_(nullptr),
+      rewrite_dex_location_checksums_(false),
       dump_stats_(false),
       dump_passes_(false),
       dump_timing_(false),
@@ -844,6 +849,8 @@ class Dex2Oat FINAL {
         }
       } else if (option == "--abort-on-hard-verifier-error") {
         abort_on_hard_verifier_error = true;
+      } else if (option == "--checksum-rewriting") {
+        rewrite_dex_location_checksums_ = true;
       } else {
         Usage("Unknown argument %s", option.data());
       }
@@ -1191,6 +1198,20 @@ class Dex2Oat FINAL {
     // have been stripped in preopting, anyways).
     if (!image_) {
       runtime_options.push_back(std::make_pair("-Xno-dex-file-fallback", nullptr));
+    }
+    if (dex_locations_.size() == dex_filenames_.size()) {
+      for (uint32_t i = 0; i < dex_locations_.size(); i++) {
+        VLOG(artist) << "DexLocation: " << dex_locations_.at(i) << " <> " << dex_filenames_.at(i);
+        if (rewrite_dex_location_checksums_) {
+          if (strcmp(dex_locations_.at(i), dex_filenames_.at(i)) != 0) {
+            VLOG(artist) << "> Rewriting Dex LocationChecksum";
+            rewrite_dex_location_checksums_ = true;
+          } else {
+            VLOG(artist) << "> NOT Rewriting Dex LocationChecksum";
+          }
+          break;
+        }
+      }
     }
 
     if (!CreateRuntime(runtime_options)) {
@@ -1911,6 +1932,8 @@ class Dex2Oat FINAL {
   // Not a unique_ptr as we want to just exit on non-debug builds, not bringing the driver down
   // in an orderly fashion. The destructor takes care of deleting this.
   CompilerDriver* driver_;
+
+  bool rewrite_dex_location_checksums_;
 
   std::vector<std::string> verbose_methods_;
   bool dump_stats_;

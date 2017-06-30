@@ -373,6 +373,8 @@ bool ParsedOptions::ProcessSpecialOptions(const RuntimeOptions& options,
 
 bool ParsedOptions::Parse(const RuntimeOptions& options, bool ignore_unrecognized,
                           RuntimeArgumentMap* runtime_options) {
+  //  gLogVerbosity.artist = true;  // TODO: don't check this in!
+  //  gLogVerbosity.artistd = true;  // TODO: don't check this in!
   //  gLogVerbosity.class_linker = true;  // TODO: don't check this in!
   //  gLogVerbosity.compiler = true;  // TODO: don't check this in!
   //  gLogVerbosity.gc = true;  // TODO: don't check this in!

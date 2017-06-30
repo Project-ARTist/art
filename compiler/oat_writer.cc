@@ -1128,6 +1128,17 @@ size_t OatWriter::InitOatCodeDexFiles(size_t offset) {
   return offset;
 }
 
+bool OatWriter::RewriteLocationChecksum() {
+  // const bool rewrite_location_checksum = GetCompilerDriver()->GetCompilerOptions().GetRewriteLocationChecksum();
+  if (dex_locations_ != nullptr && dex_locations_->size() > 0) {
+    VLOG(artistd) << "RewriteLocationChecksum() true";
+    return true;
+  } else {
+    VLOG(artistd) << "RewriteLocationChecksum() false";
+    return false;
+  }
+}
+
 bool OatWriter::WriteRodata(OutputStream* out) {
   const off_t raw_file_offset = out->Seek(0, kSeekCurrent);
   if (raw_file_offset == (off_t) -1) {
@@ -1270,22 +1281,30 @@ bool OatWriter::WriteCode(OutputStream* out) {
 bool OatWriter::WriteTables(OutputStream* out, const size_t file_offset) {
   VLOG(artistd) << "OatWriter::WriteTables()";
   // <Probe-Dex-Checksums>
+  VLOG(artist) << "WriteOatDexFiles() " << reinterpret_cast<const void*>(compiler_driver_) << std::flush;
+  VLOG(artist) << "WriteOatDexFiles() BootImage: " << compiler_driver_->IsImage();
+  if (dex_locations_ != nullptr) {
+    VLOG(artist) << "WriteOatDexFiles() BootImage: " << this->dex_locations_->size();
+  } else {
+    VLOG(artist) << "WriteOatDexFiles() BootImage: 0";
+  }
   std::vector<uint32_t> dex_checksums;
-  if (dex_locations_ != nullptr && dex_locations_->size() > 0) {
+  if (RewriteLocationChecksum()) {
+    VLOG(artist) << "Rewriting DexLocation Checksum";
     std::vector<std::unique_ptr<const DexFile>> temp_dex_files;
     for (auto && dexLoc : *dex_locations_) {
-      VLOG(artistd) << "WriteOatDexFiles() DexLocation: " << dexLoc;
+      VLOG(artistd) << "WriteTables() DexLocation: " << dexLoc;
       std::string openErrors;
       bool openSuccess = DexFile::Open(dexLoc, dexLoc, &openErrors, &temp_dex_files);
       if (openSuccess) {
-        VLOG(artistd) << "WriteOatDexFiles() DexLocation: " << dexLoc << " SUCCESS! [Files: " << temp_dex_files.size() << "]";
+        VLOG(artistd) << "WriteTables() DexLocation: " << dexLoc << " SUCCESS! [Files: " << temp_dex_files.size() << "]";
       } else {
-        VLOG(artist) << "WriteOatDexFiles() DexLocation: " << dexLoc << " FAILED: " << openErrors;
+        VLOG(artist) << "WriteTables() DexLocation: " << dexLoc << " FAILED: " << openErrors;
       }
     }
     for (auto && tmpDexFile : temp_dex_files) {
       const DexFile* dexPointer = tmpDexFile.get();
-      VLOG(artist) << "WriteOatDexFiles() DexFile Location: " << dexPointer->GetLocation() << " ["
+      VLOG(artist) << "WriteTables() DexFile Location: " << dexPointer->GetLocation() << " ["
                    << std::hex << dexPointer->GetLocationChecksum() << "]";
       dex_checksums.push_back(dexPointer->GetLocationChecksum());
       tmpDexFile.release();
@@ -1294,7 +1313,7 @@ bool OatWriter::WriteTables(OutputStream* out, const size_t file_offset) {
   // </Probe-Dex-Checksums>
   for (size_t i = 0; i != oat_dex_files_.size(); ++i) {
     // <Rewrite-Dex-Checksums>
-    if (dex_locations_ != nullptr && dex_locations_->size() > 0) {
+    if (RewriteLocationChecksum()) {
       VLOG(artist) << "WriteOatDexFiles() Rewrite DexLocationChecksum old: " << std::hex
                    << oat_dex_files_[i]->dex_file_location_checksum_;
 
