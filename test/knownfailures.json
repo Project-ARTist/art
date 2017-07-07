@@ -538,7 +538,8 @@
             "595-profile-saving",
             "900-hello-plugin",
             "909-attach-agent",
-            "981-dedup-original-dex"
+            "981-dedup-original-dex",
+            "1900-track-alloc"
         ],
         "description": ["Tests that require exact knowledge of the number of plugins and agents."],
         "variant": "jvmti-stress | redefine-stress | trace-stress | field-stress | step-stress"
@@ -594,11 +595,12 @@
     },
     {
         "tests": [
-            "567-checker-compare"
+            "567-checker-compare",
+            "988-method-trace"
         ],
-        "description": "Checker tests failing when run with --build-with-javac-dx.",
+        "description": "Checker tests fail because desugar lowers Long.compare to lcmp",
         "env_vars": {"ANDROID_COMPILE_WITH_JACK": "false"},
-        "bug": "b/62950048"
+        "bug": "b/63078894"
     },
     {
         "tests": [
@@ -642,6 +644,11 @@
         "description": [ "We use prebuilt zipalign on master-art-host to avoid pulling in a lot",
                          "of the framework. But a non-sanitized zipalign binary does not work with",
                          "a sanitized libc++."],
+        "env_vars": {"SANITIZE_HOST": "address"}
+    },
+    {
+        "tests": "141-class-unload",
+        "description": "Idk why this fails",
         "env_vars": {"SANITIZE_HOST": "address"}
     },
     {

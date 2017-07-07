@@ -286,6 +286,8 @@ art_cc_defaults {
         "992-source-data/source_file.cc",
         "993-breakpoints/breakpoints.cc",
         "996-breakpoint-obsolete/obsolete_breakpoints.cc",
+        "1900-track-alloc/alloc.cc",
+        "1901-get-bytecodes/bytecodes.cc",
     ],
     shared_libs: [
         "libbase",
@@ -445,6 +447,7 @@ art_cc_test_library {
         "art_debug_defaults",
         "art_defaults",
     ],
+    header_libs: ["libnativebridge-dummy-headers"],
     srcs: ["115-native-bridge/nativebridge.cc"],
     target: {
         android: {

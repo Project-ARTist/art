@@ -913,12 +913,12 @@ class JvmtiFunctions {
   }
 
   static jvmtiError GetBytecodes(jvmtiEnv* env,
-                                 jmethodID method ATTRIBUTE_UNUSED,
-                                 jint* bytecode_count_ptr ATTRIBUTE_UNUSED,
-                                 unsigned char** bytecodes_ptr ATTRIBUTE_UNUSED) {
+                                 jmethodID method,
+                                 jint* bytecode_count_ptr,
+                                 unsigned char** bytecodes_ptr) {
     ENSURE_VALID_ENV(env);
     ENSURE_HAS_CAP(env, can_get_bytecodes);
-    return ERR(NOT_IMPLEMENTED);
+    return MethodUtil::GetBytecodes(env, method, bytecode_count_ptr, bytecodes_ptr);
   }
 
   static jvmtiError IsMethodNative(jvmtiEnv* env, jmethodID method, jboolean* is_native_ptr) {
@@ -1204,6 +1204,23 @@ class JvmtiFunctions {
             JVMTI_ERROR_INVALID_CLASS,
             JVMTI_ERROR_NULL_POINTER
         });
+    if (error != ERR(NONE)) {
+      return error;
+    }
+
+    error = add_extension(
+        reinterpret_cast<jvmtiExtensionFunction>(AllocUtil::GetGlobalJvmtiAllocationState),
+        "com.android.art.alloc.get_global_jvmti_allocation_state",
+        "Returns the total amount of memory currently allocated by all jvmtiEnvs through the"
+        " 'Allocate' jvmti function. This does not include any memory that has been deallocated"
+        " through the 'Deallocate' function. This number is approximate and might not correspond"
+        " exactly to the sum of the sizes of all not freed allocations.",
+        1,
+        {                                                          // NOLINT [whitespace/braces] [4]
+            { "currently_allocated", JVMTI_KIND_OUT, JVMTI_TYPE_JLONG, false},
+        },
+        1,
+        { ERR(NULL_POINTER) });
     if (error != ERR(NONE)) {
       return error;
     }

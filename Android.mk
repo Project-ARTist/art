@@ -81,7 +81,6 @@ include $(art_path)/tools/Android.mk
 include $(art_path)/tools/ahat/Android.mk
 include $(art_path)/tools/dexfuzz/Android.mk
 include $(art_path)/libart_fake/Android.mk
-include $(art_path)/test/Android.run-test-jvmti-java-library.mk
 
 ART_HOST_DEPENDENCIES := \
   $(ART_HOST_EXECUTABLES) \
@@ -380,11 +379,12 @@ LOCAL_REQUIRED_MODULES += libart_fake
 # * We will never add them if PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD = false.
 # * We will always add them if PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD = true.
 # * Otherwise, we will add them by default to userdebug and eng builds.
-ifneq (false,$(PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD))
-ifneq (,$(filter userdebug eng,$(PRODUCT_TARGET_BUILD_VARIANT)))
-  PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD := true
+art_target_include_debug_build := $(PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD)
+ifneq (false,$(art_target_include_debug_build))
+ifneq (,$(filter userdebug eng,$(TARGET_BUILD_VARIANT)))
+  art_target_include_debug_build := true
 endif
-ifeq (true,$(PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD))
+ifeq (true,$(art_target_include_debug_build))
 LOCAL_REQUIRED_MODULES += \
     libartd \
     libartd-compiler \
