@@ -100,6 +100,11 @@
         "bug": "http://b/35800768"
     },
     {
+        "tests": "163-app-image-methods",
+        "variant": "gcstress",
+        "description": ["This test sometimes runs out of memory initializing the boot classpath."]
+    },
+    {
         "tests": ["908-gc-start-finish",
                   "913-heaps"],
         "variant": "gcstress",
@@ -637,6 +642,36 @@
         "tests": "202-thread-oome",
         "description": "ASAN aborts when large thread stacks are requested.",
         "variant": "target",
+        "env_vars": {"SANITIZE_TARGET": "address"}
+    },
+    {
+        "tests": [
+            "059-finalizer-throw",
+            "074-gc-thrash",
+            "911-get-stack-trace",
+            "913-heaps",
+            "980-redefine-object"
+        ],
+        "description": [
+            "Interpreter with access checks stack frames are too large and result in",
+            "StackOverFlow errors being thrown."
+        ],
+        "variant": "interp-ac & host",
+        "env_vars": {"SANITIZE_HOST": "address"}
+    },
+    {
+        "tests": [
+            "059-finalizer-throw",
+            "074-gc-thrash",
+            "911-get-stack-trace",
+            "913-heaps",
+            "980-redefine-object"
+        ],
+        "description": [
+            "Interpreter with access checks stack frames are too large and result in",
+            "StackOverFlow errors being thrown."
+        ],
+        "variant": "interp-ac & target",
         "env_vars": {"SANITIZE_TARGET": "address"}
     },
     {
