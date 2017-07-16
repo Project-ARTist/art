@@ -100,7 +100,12 @@ bool DexDecompiler::Decompile() {
         break;
 
       case Instruction::NOP:
-        DecompileNop(inst);
+        if (quicken_info_number_of_indices_ > 0) {
+          // Only try to decompile NOP if there are more than 0 indices. Not having
+          // any index happens when we unquicken a code item that only has
+          // RETURN_VOID_NO_BARRIER as quickened instruction.
+          DecompileNop(inst);
+        }
         break;
 
       case Instruction::IGET_QUICK:

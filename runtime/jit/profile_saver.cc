@@ -293,7 +293,13 @@ static void SampleClassesAndExecutedMethods(pthread_t profiler_pthread,
   ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
   // Restore profile saver thread priority during the GC critical section. This helps prevent
   // priority inversions blocking the GC for long periods of time.
-  ScopedDefaultPriority sdp(profiler_pthread);
+  std::unique_ptr<ScopedDefaultPriority> sdp;
+  // Only restore default priority if we are the profile saver thread. Other threads that call this
+  // are threads calling Stop and the signal catcher (for SIGUSR1).
+  if (pthread_self() == profiler_pthread) {
+    sdp.reset(new ScopedDefaultPriority(profiler_pthread));
+  }
+
   // Do ScopedGCCriticalSection before acquiring mutator lock to prevent the GC running and
   // blocking threads during thread root flipping. Since the GC is a background thread, blocking it
   // is not a problem.
@@ -700,11 +706,12 @@ void ProfileSaver::Stop(bool dump_info) {
     profile_saver->period_condition_.Signal(Thread::Current());
   }
 
+  // Force save everything before destroying the thread since we want profiler_pthread_ to remain
+  // valid.
+  instance_->ProcessProfilingInfo(/*force_save*/true, /*number_of_new_methods*/nullptr);
+
   // Wait for the saver thread to stop.
   CHECK_PTHREAD_CALL(pthread_join, (profiler_pthread, nullptr), "profile saver thread shutdown");
-
-  // Force save everything before destroying the instance.
-  instance_->ProcessProfilingInfo(/*force_save*/true, /*number_of_new_methods*/nullptr);
 
   {
     MutexLock profiler_mutex(Thread::Current(), *Locks::profiler_lock_);

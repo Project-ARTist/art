@@ -133,34 +133,34 @@ class JvmtiFunctions {
     return ThreadUtil::GetAllThreads(env, threads_count_ptr, threads_ptr);
   }
 
-  static jvmtiError SuspendThread(jvmtiEnv* env, jthread thread ATTRIBUTE_UNUSED) {
+  static jvmtiError SuspendThread(jvmtiEnv* env, jthread thread) {
     ENSURE_VALID_ENV(env);
     ENSURE_HAS_CAP(env, can_suspend);
-    return ERR(NOT_IMPLEMENTED);
+    return ThreadUtil::SuspendThread(env, thread);
   }
 
   static jvmtiError SuspendThreadList(jvmtiEnv* env,
-                                      jint request_count ATTRIBUTE_UNUSED,
-                                      const jthread* request_list ATTRIBUTE_UNUSED,
-                                      jvmtiError* results ATTRIBUTE_UNUSED) {
+                                      jint request_count,
+                                      const jthread* request_list,
+                                      jvmtiError* results) {
     ENSURE_VALID_ENV(env);
     ENSURE_HAS_CAP(env, can_suspend);
-    return ERR(NOT_IMPLEMENTED);
+    return ThreadUtil::SuspendThreadList(env, request_count, request_list, results);
   }
 
-  static jvmtiError ResumeThread(jvmtiEnv* env, jthread thread ATTRIBUTE_UNUSED) {
+  static jvmtiError ResumeThread(jvmtiEnv* env, jthread thread) {
     ENSURE_VALID_ENV(env);
     ENSURE_HAS_CAP(env, can_suspend);
-    return ERR(NOT_IMPLEMENTED);
+    return ThreadUtil::ResumeThread(env, thread);
   }
 
   static jvmtiError ResumeThreadList(jvmtiEnv* env,
-                                     jint request_count ATTRIBUTE_UNUSED,
-                                     const jthread* request_list ATTRIBUTE_UNUSED,
-                                     jvmtiError* results ATTRIBUTE_UNUSED) {
+                                     jint request_count,
+                                     const jthread* request_list,
+                                     jvmtiError* results) {
     ENSURE_VALID_ENV(env);
     ENSURE_HAS_CAP(env, can_suspend);
-    return ERR(NOT_IMPLEMENTED);
+    return ThreadUtil::ResumeThreadList(env, request_count, request_list, results);
   }
 
   static jvmtiError StopThread(jvmtiEnv* env,
@@ -1498,10 +1498,11 @@ class JvmtiFunctions {
 
   static jvmtiError DisposeEnvironment(jvmtiEnv* env) {
     ENSURE_VALID_ENV(env);
-    gEventHandler.RemoveArtJvmTiEnv(ArtJvmTiEnv::AsArtJvmTiEnv(env));
-    art::Runtime::Current()->RemoveSystemWeakHolder(
-        ArtJvmTiEnv::AsArtJvmTiEnv(env)->object_tag_table.get());
-    delete env;
+    ArtJvmTiEnv* tienv = ArtJvmTiEnv::AsArtJvmTiEnv(env);
+    gEventHandler.RemoveArtJvmTiEnv(tienv);
+    art::Runtime::Current()->RemoveSystemWeakHolder(tienv->object_tag_table.get());
+    ThreadUtil::RemoveEnvironment(tienv);
+    delete tienv;
     return OK;
   }
 
@@ -1671,6 +1672,7 @@ static bool IsJvmtiVersion(jint version) {
 }
 
 extern const jvmtiInterface_1 gJvmtiInterface;
+
 ArtJvmTiEnv::ArtJvmTiEnv(art::JavaVMExt* runtime, EventHandler* event_handler)
     : art_vm(runtime),
       local_data(nullptr),
