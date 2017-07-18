@@ -71,7 +71,7 @@
 #include "thread_pool.h"
 #include "trampolines/trampoline_compiler.h"
 #include "transaction.h"
-#include "utils/atomic_method_ref_map-inl.h"
+#include "utils/atomic_dex_ref_map-inl.h"
 #include "utils/dex_cache_arrays_layout-inl.h"
 #include "utils/swap_space.h"
 #include "vdex_file.h"
@@ -321,7 +321,7 @@ CompilerDriver::CompilerDriver(
 }
 
 CompilerDriver::~CompilerDriver() {
-  compiled_methods_.Visit([this](const MethodReference& ref ATTRIBUTE_UNUSED,
+  compiled_methods_.Visit([this](const DexFileReference& ref ATTRIBUTE_UNUSED,
                                  CompiledMethod* method) {
     if (method != nullptr) {
       CompiledMethod::ReleaseSwapAllocatedCompiledMethod(this, method);
@@ -514,8 +514,9 @@ static void CompileMethod(Thread* self,
     // TODO: Refactor the compilation to avoid having to distinguish the two passes
     // here. That should be done on a higher level. http://b/29089975
     if (driver->GetCurrentDexToDexMethods()->IsBitSet(method_idx)) {
-      const VerifiedMethod* verified_method =
-          driver->GetVerificationResults()->GetVerifiedMethod(method_ref);
+      VerificationResults* results = driver->GetVerificationResults();
+      DCHECK(results != nullptr);
+      const VerifiedMethod* verified_method = results->GetVerifiedMethod(method_ref);
       // Do not optimize if a VerifiedMethod is missing. SafeCast elision,
       // for example, relies on it.
       compiled_method = optimizer::ArtCompileDEX(
@@ -576,12 +577,12 @@ static void CompileMethod(Thread* self,
   } else if ((access_flags & kAccAbstract) != 0) {
     // Abstract methods don't have code.
   } else {
-    const VerifiedMethod* verified_method =
-        driver->GetVerificationResults()->GetVerifiedMethod(method_ref);
+    VerificationResults* results = driver->GetVerificationResults();
+    DCHECK(results != nullptr);
+    const VerifiedMethod* verified_method = results->GetVerifiedMethod(method_ref);
     bool compile = compilation_enabled &&
         // Basic checks, e.g., not <clinit>.
-        driver->GetVerificationResults()
-            ->IsCandidateForCompilation(method_ref, access_flags) &&
+        results->IsCandidateForCompilation(method_ref, access_flags) &&
         // Did not fail to create VerifiedMethod metadata.
         verified_method != nullptr &&
         // Do not have failures that should punt to the interpreter.
@@ -890,17 +891,18 @@ void CompilerDriver::PreCompile(jobject class_loader,
                                 TimingLogger* timings) {
   CheckThreadPools();
 
-  for (const DexFile* dex_file : dex_files) {
-    // Can be already inserted if the caller is CompileOne. This happens for gtests.
-    if (!compiled_methods_.HaveDexFile(dex_file)) {
-      compiled_methods_.AddDexFile(dex_file);
-    }
-  }
-
   LoadImageClasses(timings);
   VLOG(compiler) << "LoadImageClasses: " << GetMemoryUsageString(false);
 
   if (compiler_options_->IsAnyCompilationEnabled()) {
+    // Avoid adding the dex files in the case where we aren't going to add compiled methods.
+    // This reduces RAM usage for this case.
+    for (const DexFile* dex_file : dex_files) {
+      // Can be already inserted if the caller is CompileOne. This happens for gtests.
+      if (!compiled_methods_.HaveDexFile(dex_file)) {
+        compiled_methods_.AddDexFile(dex_file, dex_file->NumMethodIds());
+      }
+    }
     // Resolve eagerly to prepare for compilation.
     Resolve(class_loader, dex_files, timings);
     VLOG(compiler) << "Resolve: " << GetMemoryUsageString(false);
@@ -2245,7 +2247,7 @@ class InitializeClassVisitor : public CompilationVisitor {
     const bool is_boot_image = manager_->GetCompiler()->GetCompilerOptions().IsBootImage();
     const bool is_app_image = manager_->GetCompiler()->GetCompilerOptions().IsAppImage();
 
-    mirror::Class::Status old_status = klass->GetStatus();;
+    mirror::Class::Status old_status = klass->GetStatus();
     // Only try to initialize classes that were successfully verified.
     if (klass->IsVerified()) {
       // Don't initialize classes in boot space when compiling app image
@@ -2362,6 +2364,14 @@ class InitializeClassVisitor : public CompilationVisitor {
               }
             }
           }
+        }
+        // If the class still isn't initialized, at least try some checks that initialization
+        // would do so they can be skipped at runtime.
+        if (!klass->IsInitialized() &&
+            manager_->GetClassLinker()->ValidateSuperClassDescriptors(klass)) {
+          old_status = mirror::Class::kStatusSuperclassValidated;
+        } else {
+          soa.Self()->ClearException();
         }
         soa.Self()->AssertNoPendingException();
       }
@@ -2838,9 +2848,10 @@ void CompilerDriver::AddCompiledMethod(const MethodReference& method_ref,
                                        size_t non_relative_linker_patch_count) {
   DCHECK(GetCompiledMethod(method_ref) == nullptr)
       << method_ref.dex_file->PrettyMethod(method_ref.dex_method_index);
-  MethodTable::InsertResult result = compiled_methods_.Insert(method_ref,
-                                                              /*expected*/ nullptr,
-                                                              compiled_method);
+  MethodTable::InsertResult result = compiled_methods_.Insert(
+      DexFileReference(method_ref.dex_file, method_ref.dex_method_index),
+      /*expected*/ nullptr,
+      compiled_method);
   CHECK(result == MethodTable::kInsertResultSuccess);
   non_relative_linker_patch_count_.FetchAndAddRelaxed(non_relative_linker_patch_count);
   DCHECK(GetCompiledMethod(method_ref) != nullptr)
@@ -2860,13 +2871,14 @@ bool CompilerDriver::GetCompiledClass(ClassReference ref, mirror::Class::Status*
 
 void CompilerDriver::RecordClassStatus(ClassReference ref, mirror::Class::Status status) {
   switch (status) {
-    case mirror::Class::kStatusNotReady:
     case mirror::Class::kStatusErrorResolved:
     case mirror::Class::kStatusErrorUnresolved:
+    case mirror::Class::kStatusNotReady:
+    case mirror::Class::kStatusResolved:
     case mirror::Class::kStatusRetryVerificationAtRuntime:
     case mirror::Class::kStatusVerified:
+    case mirror::Class::kStatusSuperclassValidated:
     case mirror::Class::kStatusInitialized:
-    case mirror::Class::kStatusResolved:
       break;  // Expected states.
     default:
       LOG(FATAL) << "Unexpected class status for class "
@@ -2887,7 +2899,7 @@ void CompilerDriver::RecordClassStatus(ClassReference ref, mirror::Class::Status
 
 CompiledMethod* CompilerDriver::GetCompiledMethod(MethodReference ref) const {
   CompiledMethod* compiled_method = nullptr;
-  compiled_methods_.Get(ref, &compiled_method);
+  compiled_methods_.Get(DexFileReference(ref.dex_file, ref.dex_method_index), &compiled_method);
   return compiled_method;
 }
 
