@@ -16,14 +16,20 @@
 
 #include "class_loader_context.h"
 
+#include "art_field-inl.h"
 #include "base/dchecked_vector.h"
 #include "base/stl_util.h"
 #include "class_linker.h"
+#include "class_loader_utils.h"
 #include "dex_file.h"
+#include "handle_scope-inl.h"
+#include "jni_internal.h"
 #include "oat_file_assistant.h"
+#include "obj_ptr-inl.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread.h"
+#include "well_known_classes.h"
 
 namespace art {
 
@@ -38,7 +44,29 @@ static constexpr char kDexFileChecksumSeparator = '*';
 ClassLoaderContext::ClassLoaderContext()
     : special_shared_library_(false),
       dex_files_open_attempted_(false),
-      dex_files_open_result_(false) {}
+      dex_files_open_result_(false),
+      owns_the_dex_files_(true) {}
+
+ClassLoaderContext::ClassLoaderContext(bool owns_the_dex_files)
+    : special_shared_library_(false),
+      dex_files_open_attempted_(true),
+      dex_files_open_result_(true),
+      owns_the_dex_files_(owns_the_dex_files) {}
+
+ClassLoaderContext::~ClassLoaderContext() {
+  if (!owns_the_dex_files_) {
+    // If the context does not own the dex/oat files release the unique pointers to
+    // make sure we do not de-allocate them.
+    for (ClassLoaderInfo& info : class_loader_chain_) {
+      for (std::unique_ptr<OatFile>& oat_file : info.opened_oat_files) {
+        oat_file.release();
+      }
+      for (std::unique_ptr<const DexFile>& dex_file : info.opened_dex_files) {
+        dex_file.release();
+      }
+    }
+  }
+}
 
 std::unique_ptr<ClassLoaderContext> ClassLoaderContext::Create(const std::string& spec) {
   std::unique_ptr<ClassLoaderContext> result(new ClassLoaderContext());
@@ -277,24 +305,41 @@ jobject ClassLoaderContext::CreateClassLoader(
   Thread* self = Thread::Current();
   ScopedObjectAccess soa(self);
 
-  std::vector<const DexFile*> class_path_files;
+  ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
 
-  // TODO(calin): Transition period: assume we only have a classloader until
-  // the oat file assistant implements the full class loader check.
-  if (!class_loader_chain_.empty()) {
-    CHECK_EQ(1u, class_loader_chain_.size());
-    CHECK_EQ(kPathClassLoader, class_loader_chain_[0].type);
-    class_path_files = MakeNonOwningPointerVector(class_loader_chain_[0].opened_dex_files);
+  if (class_loader_chain_.empty()) {
+    return class_linker->CreatePathClassLoader(self, compilation_sources);
   }
 
-  // Classpath: first the class-path given; then the dex files we'll compile.
-  // Thus we'll resolve the class-path first.
-  class_path_files.insert(class_path_files.end(),
-                          compilation_sources.begin(),
-                          compilation_sources.end());
+  // Create the class loaders starting from the top most parent (the one on the last position
+  // in the chain) but omit the first class loader which will contain the compilation_sources and
+  // needs special handling.
+  jobject current_parent = nullptr;  // the starting parent is the BootClassLoader.
+  for (size_t i = class_loader_chain_.size() - 1; i > 0; i--) {
+    std::vector<const DexFile*> class_path_files = MakeNonOwningPointerVector(
+        class_loader_chain_[i].opened_dex_files);
+    current_parent = class_linker->CreateWellKnownClassLoader(
+        self,
+        class_path_files,
+        GetClassLoaderClass(class_loader_chain_[i].type),
+        current_parent);
+  }
 
-  ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
-  return class_linker->CreatePathClassLoader(self, class_path_files);
+  // We set up all the parents. Move on to create the first class loader.
+  // Its classpath comes first, followed by compilation sources. This ensures that whenever
+  // we need to resolve classes from it the classpath elements come first.
+
+  std::vector<const DexFile*> first_class_loader_classpath = MakeNonOwningPointerVector(
+      class_loader_chain_[0].opened_dex_files);
+  first_class_loader_classpath.insert(first_class_loader_classpath.end(),
+                                    compilation_sources.begin(),
+                                    compilation_sources.end());
+
+  return class_linker->CreateWellKnownClassLoader(
+      self,
+      first_class_loader_classpath,
+      GetClassLoaderClass(class_loader_chain_[0].type),
+      current_parent);
 }
 
 std::vector<const DexFile*> ClassLoaderContext::FlattenOpenedDexFiles() const {
@@ -325,36 +370,285 @@ void ClassLoaderContext::CheckDexFilesOpened(const std::string& calling_method) 
       << "attempt=" << dex_files_open_attempted_ << ", result=" << dex_files_open_result_;
 }
 
-bool ClassLoaderContext::DecodePathClassLoaderContextFromOatFileKey(
-    const std::string& context_spec,
-    std::vector<std::string>* out_classpath,
-    std::vector<uint32_t>* out_checksums,
-    bool* out_is_special_shared_library) {
-  ClassLoaderContext context;
-  if (!context.Parse(context_spec, /*parse_checksums*/ true)) {
-    LOG(ERROR) << "Invalid class loader context: " << context_spec;
+// Collects the dex files from the give Java dex_file object. Only the dex files with
+// at least 1 class are collected. If a null java_dex_file is passed this method does nothing.
+static bool CollectDexFilesFromJavaDexFile(ObjPtr<mirror::Object> java_dex_file,
+                                           ArtField* const cookie_field,
+                                           std::vector<const DexFile*>* out_dex_files)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (java_dex_file == nullptr) {
+    return true;
+  }
+  // On the Java side, the dex files are stored in the cookie field.
+  mirror::LongArray* long_array = cookie_field->GetObject(java_dex_file)->AsLongArray();
+  if (long_array == nullptr) {
+    // This should never happen so log a warning.
+    LOG(ERROR) << "Unexpected null cookie";
+    return false;
+  }
+  int32_t long_array_size = long_array->GetLength();
+  // Index 0 from the long array stores the oat file. The dex files start at index 1.
+  for (int32_t j = 1; j < long_array_size; ++j) {
+    const DexFile* cp_dex_file = reinterpret_cast<const DexFile*>(static_cast<uintptr_t>(
+        long_array->GetWithoutChecks(j)));
+    if (cp_dex_file != nullptr && cp_dex_file->NumClassDefs() > 0) {
+      // TODO(calin): It's unclear why the dex files with no classes are skipped here and when
+      // cp_dex_file can be null.
+      out_dex_files->push_back(cp_dex_file);
+    }
+  }
+  return true;
+}
+
+// Collects all the dex files loaded by the given class loader.
+// Returns true for success or false if an unexpected state is discovered (e.g. a null dex cookie,
+// a null list of dex elements or a null dex element).
+static bool CollectDexFilesFromSupportedClassLoader(ScopedObjectAccessAlreadyRunnable& soa,
+                                                    Handle<mirror::ClassLoader> class_loader,
+                                                    std::vector<const DexFile*>* out_dex_files)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+  CHECK(IsPathOrDexClassLoader(soa, class_loader) || IsDelegateLastClassLoader(soa, class_loader));
+
+  // All supported class loaders inherit from BaseDexClassLoader.
+  // We need to get the DexPathList and loop through it.
+  ArtField* const cookie_field =
+      jni::DecodeArtField(WellKnownClasses::dalvik_system_DexFile_cookie);
+  ArtField* const dex_file_field =
+      jni::DecodeArtField(WellKnownClasses::dalvik_system_DexPathList__Element_dexFile);
+  ObjPtr<mirror::Object> dex_path_list =
+      jni::DecodeArtField(WellKnownClasses::dalvik_system_BaseDexClassLoader_pathList)->
+          GetObject(class_loader.Get());
+  CHECK(cookie_field != nullptr);
+  CHECK(dex_file_field != nullptr);
+  if (dex_path_list == nullptr) {
+    // This may be null if the current class loader is under construction and it does not
+    // have its fields setup yet.
+    return true;
+  }
+  // DexPathList has an array dexElements of Elements[] which each contain a dex file.
+  ObjPtr<mirror::Object> dex_elements_obj =
+      jni::DecodeArtField(WellKnownClasses::dalvik_system_DexPathList_dexElements)->
+          GetObject(dex_path_list);
+  // Loop through each dalvik.system.DexPathList$Element's dalvik.system.DexFile and look
+  // at the mCookie which is a DexFile vector.
+  if (dex_elements_obj == nullptr) {
+    // TODO(calin): It's unclear if we should just assert here. For now be prepared for the worse
+    // and assume we have no elements.
+    return true;
+  } else {
+    StackHandleScope<1> hs(soa.Self());
+    Handle<mirror::ObjectArray<mirror::Object>> dex_elements(
+        hs.NewHandle(dex_elements_obj->AsObjectArray<mirror::Object>()));
+    for (int32_t i = 0; i < dex_elements->GetLength(); ++i) {
+      mirror::Object* element = dex_elements->GetWithoutChecks(i);
+      if (element == nullptr) {
+        // Should never happen, log an error and break.
+        // TODO(calin): It's unclear if we should just assert here.
+        // This code was propagated to oat_file_manager from the class linker where it would
+        // throw a NPE. For now, return false which will mark this class loader as unsupported.
+        LOG(ERROR) << "Unexpected null in the dex element list";
+        return false;
+      }
+      ObjPtr<mirror::Object> dex_file = dex_file_field->GetObject(element);
+      if (!CollectDexFilesFromJavaDexFile(dex_file, cookie_field, out_dex_files)) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+static bool GetDexFilesFromDexElementsArray(
+    ScopedObjectAccessAlreadyRunnable& soa,
+    Handle<mirror::ObjectArray<mirror::Object>> dex_elements,
+    std::vector<const DexFile*>* out_dex_files) REQUIRES_SHARED(Locks::mutator_lock_) {
+  DCHECK(dex_elements != nullptr);
+
+  ArtField* const cookie_field =
+      jni::DecodeArtField(WellKnownClasses::dalvik_system_DexFile_cookie);
+  ArtField* const dex_file_field =
+      jni::DecodeArtField(WellKnownClasses::dalvik_system_DexPathList__Element_dexFile);
+  ObjPtr<mirror::Class> const element_class = soa.Decode<mirror::Class>(
+      WellKnownClasses::dalvik_system_DexPathList__Element);
+  ObjPtr<mirror::Class> const dexfile_class = soa.Decode<mirror::Class>(
+      WellKnownClasses::dalvik_system_DexFile);
+
+  for (int32_t i = 0; i < dex_elements->GetLength(); ++i) {
+    mirror::Object* element = dex_elements->GetWithoutChecks(i);
+    // We can hit a null element here because this is invoked with a partially filled dex_elements
+    // array from DexPathList. DexPathList will open each dex sequentially, each time passing the
+    // list of dex files which were opened before.
+    if (element == nullptr) {
+      continue;
+    }
+
+    // We support this being dalvik.system.DexPathList$Element and dalvik.system.DexFile.
+    // TODO(calin): Code caried over oat_file_manager: supporting both classes seem to be
+    // a historical glitch. All the java code opens dex files using an array of Elements.
+    ObjPtr<mirror::Object> dex_file;
+    if (element_class == element->GetClass()) {
+      dex_file = dex_file_field->GetObject(element);
+    } else if (dexfile_class == element->GetClass()) {
+      dex_file = element;
+    } else {
+      LOG(ERROR) << "Unsupported element in dex_elements: "
+                 << mirror::Class::PrettyClass(element->GetClass());
+      return false;
+    }
+
+    if (!CollectDexFilesFromJavaDexFile(dex_file, cookie_field, out_dex_files)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Adds the `class_loader` info to the `context`.
+// The dex file present in `dex_elements` array (if not null) will be added at the end of
+// the classpath.
+// This method is recursive (w.r.t. the class loader parent) and will stop once it reaches the
+// BootClassLoader. Note that the class loader chain is expected to be short.
+bool ClassLoaderContext::AddInfoToContextFromClassLoader(
+      ScopedObjectAccessAlreadyRunnable& soa,
+      Handle<mirror::ClassLoader> class_loader,
+      Handle<mirror::ObjectArray<mirror::Object>> dex_elements)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (ClassLinker::IsBootClassLoader(soa, class_loader.Get())) {
+    // Nothing to do for the boot class loader as we don't add its dex files to the context.
+    return true;
+  }
+
+  ClassLoaderContext::ClassLoaderType type;
+  if (IsPathOrDexClassLoader(soa, class_loader)) {
+    type = kPathClassLoader;
+  } else if (IsDelegateLastClassLoader(soa, class_loader)) {
+    type = kDelegateLastClassLoader;
+  } else {
+    LOG(WARNING) << "Unsupported class loader";
     return false;
   }
 
-  *out_is_special_shared_library = context.special_shared_library_;
-  if (context.special_shared_library_) {
+  // Inspect the class loader for its dex files.
+  std::vector<const DexFile*> dex_files_loaded;
+  CollectDexFilesFromSupportedClassLoader(soa, class_loader, &dex_files_loaded);
+
+  // If we have a dex_elements array extract its dex elements now.
+  // This is used in two situations:
+  //   1) when a new ClassLoader is created DexPathList will open each dex file sequentially
+  //      passing the list of already open dex files each time. This ensures that we see the
+  //      correct context even if the ClassLoader under construction is not fully build.
+  //   2) when apk splits are loaded on the fly, the framework will load their dex files by
+  //      appending them to the current class loader. When the new code paths are loaded in
+  //      BaseDexClassLoader, the paths already present in the class loader will be passed
+  //      in the dex_elements array.
+  if (dex_elements != nullptr) {
+    GetDexFilesFromDexElementsArray(soa, dex_elements, &dex_files_loaded);
+  }
+
+  class_loader_chain_.push_back(ClassLoaderContext::ClassLoaderInfo(type));
+  ClassLoaderInfo& info = class_loader_chain_.back();
+  for (const DexFile* dex_file : dex_files_loaded) {
+    info.classpath.push_back(dex_file->GetLocation());
+    info.checksums.push_back(dex_file->GetLocationChecksum());
+    info.opened_dex_files.emplace_back(dex_file);
+  }
+
+  // We created the ClassLoaderInfo for the current loader. Move on to its parent.
+
+  StackHandleScope<1> hs(Thread::Current());
+  Handle<mirror::ClassLoader> parent = hs.NewHandle(class_loader->GetParent());
+
+  // Note that dex_elements array is null here. The elements are considered to be part of the
+  // current class loader and are not passed to the parents.
+  ScopedNullHandle<mirror::ObjectArray<mirror::Object>> null_dex_elements;
+  return AddInfoToContextFromClassLoader(soa, parent, null_dex_elements);
+}
+
+std::unique_ptr<ClassLoaderContext> ClassLoaderContext::CreateContextForClassLoader(
+    jobject class_loader,
+    jobjectArray dex_elements) {
+  CHECK(class_loader != nullptr);
+
+  ScopedObjectAccess soa(Thread::Current());
+  StackHandleScope<2> hs(soa.Self());
+  Handle<mirror::ClassLoader> h_class_loader =
+      hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader));
+  Handle<mirror::ObjectArray<mirror::Object>> h_dex_elements =
+      hs.NewHandle(soa.Decode<mirror::ObjectArray<mirror::Object>>(dex_elements));
+
+  std::unique_ptr<ClassLoaderContext> result(new ClassLoaderContext(/*owns_the_dex_files*/ false));
+  if (result->AddInfoToContextFromClassLoader(soa, h_class_loader, h_dex_elements)) {
+    return result;
+  } else {
+    return nullptr;
+  }
+}
+
+bool ClassLoaderContext::VerifyClassLoaderContextMatch(const std::string& context_spec) {
+  ClassLoaderContext expected_context;
+  if (!expected_context.Parse(context_spec, /*parse_checksums*/ true)) {
+    LOG(WARNING) << "Invalid class loader context: " << context_spec;
+    return false;
+  }
+
+  if (expected_context.special_shared_library_) {
     return true;
   }
 
-  if (context.class_loader_chain_.empty()) {
-    return true;
+  if (expected_context.class_loader_chain_.size() != class_loader_chain_.size()) {
+    LOG(WARNING) << "ClassLoaderContext size mismatch. expected="
+        << expected_context.class_loader_chain_.size()
+        << ", actual=" << class_loader_chain_.size();
+    return false;
   }
 
-  // TODO(calin): assert that we only have a PathClassLoader until the logic for
-  // checking the context covers all case.
-  CHECK_EQ(1u, context.class_loader_chain_.size());
-  const ClassLoaderInfo& info = context.class_loader_chain_[0];
-  CHECK_EQ(kPathClassLoader, info.type);
-  DCHECK_EQ(info.classpath.size(), info.checksums.size());
+  for (size_t i = 0; i < class_loader_chain_.size(); i++) {
+    const ClassLoaderInfo& info = class_loader_chain_[i];
+    const ClassLoaderInfo& expected_info = expected_context.class_loader_chain_[i];
+    if (info.type != expected_info.type) {
+      LOG(WARNING) << "ClassLoaderContext type mismatch for position " << i
+          << ". expected=" << GetClassLoaderTypeName(expected_info.type)
+          << ", found=" << GetClassLoaderTypeName(info.type);
+      return false;
+    }
+    if (info.classpath.size() != expected_info.classpath.size()) {
+      LOG(WARNING) << "ClassLoaderContext classpath size mismatch for position " << i
+            << ". expected=" << expected_info.classpath.size()
+            << ", found=" << info.classpath.size();
+      return false;
+    }
 
-  *out_classpath = info.classpath;
-  *out_checksums = info.checksums;
+    DCHECK_EQ(info.classpath.size(), info.checksums.size());
+    DCHECK_EQ(expected_info.classpath.size(), expected_info.checksums.size());
+
+    for (size_t k = 0; k < info.classpath.size(); k++) {
+      if (info.classpath[k] != expected_info.classpath[k]) {
+        LOG(WARNING) << "ClassLoaderContext classpath element mismatch for position " << i
+            << ". expected=" << expected_info.classpath[k]
+            << ", found=" << info.classpath[k];
+        return false;
+      }
+      if (info.checksums[k] != expected_info.checksums[k]) {
+        LOG(WARNING) << "ClassLoaderContext classpath element checksum mismatch for position " << i
+            << ". expected=" << expected_info.checksums[k]
+            << ", found=" << info.checksums[k];
+        return false;
+      }
+    }
+  }
   return true;
 }
+
+jclass ClassLoaderContext::GetClassLoaderClass(ClassLoaderType type) {
+  switch (type) {
+    case kPathClassLoader: return WellKnownClasses::dalvik_system_PathClassLoader;
+    case kDelegateLastClassLoader: return WellKnownClasses::dalvik_system_DelegateLastClassLoader;
+    case kInvalidClassLoader: break;  // will fail after the switch.
+  }
+  LOG(FATAL) << "Invalid class loader type " << type;
+  UNREACHABLE();
+}
+
 }  // namespace art
 

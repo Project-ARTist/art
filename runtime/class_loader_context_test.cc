@@ -45,16 +45,30 @@ class ClassLoaderContextTest : public CommonRuntimeTest {
 
   void VerifyClassLoaderPCL(ClassLoaderContext* context,
                             size_t index,
-                            std::string classpath) {
+                            const std::string& classpath) {
     VerifyClassLoaderInfo(
         context, index, ClassLoaderContext::kPathClassLoader, classpath);
   }
 
   void VerifyClassLoaderDLC(ClassLoaderContext* context,
                             size_t index,
-                            std::string classpath) {
+                            const std::string& classpath) {
     VerifyClassLoaderInfo(
         context, index, ClassLoaderContext::kDelegateLastClassLoader, classpath);
+  }
+
+  void VerifyClassLoaderPCLFromTestDex(ClassLoaderContext* context,
+                                       size_t index,
+                                       const std::string& test_name) {
+    VerifyClassLoaderFromTestDex(
+        context, index, ClassLoaderContext::kPathClassLoader, test_name);
+  }
+
+  void VerifyClassLoaderDLCFromTestDex(ClassLoaderContext* context,
+                                       size_t index,
+                                       const std::string& test_name) {
+    VerifyClassLoaderFromTestDex(
+        context, index, ClassLoaderContext::kDelegateLastClassLoader, test_name);
   }
 
   void VerifyOpenDexFiles(
@@ -83,11 +97,49 @@ class ClassLoaderContextTest : public CommonRuntimeTest {
     }
   }
 
+  std::unique_ptr<ClassLoaderContext> CreateContextForClassLoader(jobject class_loader) {
+    return ClassLoaderContext::CreateContextForClassLoader(class_loader, nullptr);
+  }
+
+  std::unique_ptr<ClassLoaderContext> ParseContextWithChecksums(const std::string& context_spec) {
+    std::unique_ptr<ClassLoaderContext> context(new ClassLoaderContext());
+    if (!context->Parse(context_spec, /*parse_checksums*/ true)) {
+      return nullptr;
+    }
+    return context;
+  }
+
+  void VerifyContextForClassLoader(ClassLoaderContext* context) {
+    ASSERT_TRUE(context != nullptr);
+    ASSERT_TRUE(context->dex_files_open_attempted_);
+    ASSERT_TRUE(context->dex_files_open_result_);
+    ASSERT_FALSE(context->owns_the_dex_files_);
+    ASSERT_FALSE(context->special_shared_library_);
+  }
+
+  void VerifyClassLoaderDexFiles(ScopedObjectAccess& soa,
+                                 Handle<mirror::ClassLoader> class_loader,
+                                 jclass type,
+                                 std::vector<const DexFile*>& expected_dex_files)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    ASSERT_TRUE(class_loader->GetClass() == soa.Decode<mirror::Class>(type));
+
+    std::vector<const DexFile*> class_loader_dex_files = GetDexFiles(soa, class_loader);
+    ASSERT_EQ(expected_dex_files.size(), class_loader_dex_files.size());
+
+    for (size_t i = 0; i < expected_dex_files.size(); i++) {
+      ASSERT_EQ(expected_dex_files[i]->GetLocation(),
+                class_loader_dex_files[i]->GetLocation());
+      ASSERT_EQ(expected_dex_files[i]->GetLocationChecksum(),
+                class_loader_dex_files[i]->GetLocationChecksum());
+    }
+  }
+
  private:
   void VerifyClassLoaderInfo(ClassLoaderContext* context,
                              size_t index,
                              ClassLoaderContext::ClassLoaderType type,
-                             std::string classpath) {
+                             const std::string& classpath) {
     ASSERT_TRUE(context != nullptr);
     ASSERT_GT(context->class_loader_chain_.size(), index);
     ClassLoaderContext::ClassLoaderInfo& info = context->class_loader_chain_[index];
@@ -95,6 +147,18 @@ class ClassLoaderContextTest : public CommonRuntimeTest {
     std::vector<std::string> expected_classpath;
     Split(classpath, ':', &expected_classpath);
     ASSERT_EQ(expected_classpath, info.classpath);
+  }
+
+  void VerifyClassLoaderFromTestDex(ClassLoaderContext* context,
+                                    size_t index,
+                                    ClassLoaderContext::ClassLoaderType type,
+                                    const std::string& test_name) {
+    std::vector<std::unique_ptr<const DexFile>> dex_files = OpenTestDexFiles(test_name.c_str());
+    std::vector<std::vector<std::unique_ptr<const DexFile>>*> all_dex_files;
+    all_dex_files.push_back(&dex_files);
+
+    VerifyClassLoaderInfo(context, index, type, GetTestDexFileName(test_name.c_str()));
+    VerifyOpenDexFiles(context, index, all_dex_files);
   }
 };
 
@@ -200,7 +264,7 @@ TEST_F(ClassLoaderContextTest, CreateClassLoader) {
 
   ScopedObjectAccess soa(Thread::Current());
 
-  StackHandleScope<2> hs(soa.Self());
+  StackHandleScope<1> hs(soa.Self());
   Handle<mirror::ClassLoader> class_loader = hs.NewHandle(
       soa.Decode<mirror::ClassLoader>(jclass_loader));
 
@@ -209,25 +273,17 @@ TEST_F(ClassLoaderContextTest, CreateClassLoader) {
   ASSERT_TRUE(class_loader->GetParent()->GetClass() ==
       soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
 
-
-  std::vector<const DexFile*> class_loader_dex_files = GetDexFiles(jclass_loader);
-  ASSERT_EQ(classpath_dex.size() + compilation_sources.size(), class_loader_dex_files.size());
-
-  // The classpath dex files must come first.
-  for (size_t i = 0; i < classpath_dex.size(); i++) {
-    ASSERT_EQ(classpath_dex[i]->GetLocation(),
-              class_loader_dex_files[i]->GetLocation());
-    ASSERT_EQ(classpath_dex[i]->GetLocationChecksum(),
-              class_loader_dex_files[i]->GetLocationChecksum());
+  // For the first class loader the class path dex files must come first and then the
+  // compilation sources.
+  std::vector<const DexFile*> expected_classpath = MakeNonOwningPointerVector(classpath_dex);
+  for (auto& dex : compilation_sources_raw) {
+    expected_classpath.push_back(dex);
   }
 
-  // The compilation dex files must come second.
-  for (size_t i = 0, k = classpath_dex.size(); i < compilation_sources.size(); i++, k++) {
-    ASSERT_EQ(compilation_sources[i]->GetLocation(),
-              class_loader_dex_files[k]->GetLocation());
-    ASSERT_EQ(compilation_sources[i]->GetLocationChecksum(),
-              class_loader_dex_files[k]->GetLocationChecksum());
-  }
+  VerifyClassLoaderDexFiles(soa,
+                            class_loader,
+                            WellKnownClasses::dalvik_system_PathClassLoader,
+                            expected_classpath);
 }
 
 TEST_F(ClassLoaderContextTest, CreateClassLoaderWithEmptyContext) {
@@ -244,27 +300,89 @@ TEST_F(ClassLoaderContextTest, CreateClassLoaderWithEmptyContext) {
 
   ScopedObjectAccess soa(Thread::Current());
 
-  StackHandleScope<2> hs(soa.Self());
+  StackHandleScope<1> hs(soa.Self());
   Handle<mirror::ClassLoader> class_loader = hs.NewHandle(
       soa.Decode<mirror::ClassLoader>(jclass_loader));
 
-  ASSERT_TRUE(class_loader->GetClass() ==
-      soa.Decode<mirror::Class>(WellKnownClasses::dalvik_system_PathClassLoader));
+  // An empty context should create a single PathClassLoader with only the compilation sources.
+  VerifyClassLoaderDexFiles(soa,
+                            class_loader,
+                            WellKnownClasses::dalvik_system_PathClassLoader,
+                            compilation_sources_raw);
   ASSERT_TRUE(class_loader->GetParent()->GetClass() ==
       soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
-
-
-  std::vector<const DexFile*> class_loader_dex_files = GetDexFiles(jclass_loader);
-
-  // The compilation sources should be the only files present in the class loader
-  ASSERT_EQ(compilation_sources.size(), class_loader_dex_files.size());
-  for (size_t i = 0; i < compilation_sources.size(); i++) {
-    ASSERT_EQ(compilation_sources[i]->GetLocation(),
-        class_loader_dex_files[i]->GetLocation());
-    ASSERT_EQ(compilation_sources[i]->GetLocationChecksum(),
-        class_loader_dex_files[i]->GetLocationChecksum());
-  }
 }
+
+TEST_F(ClassLoaderContextTest, CreateClassLoaderWithComplexChain) {
+  // Setup the context.
+  std::vector<std::unique_ptr<const DexFile>> classpath_dex_a = OpenTestDexFiles("ForClassLoaderA");
+  std::vector<std::unique_ptr<const DexFile>> classpath_dex_b = OpenTestDexFiles("ForClassLoaderB");
+  std::vector<std::unique_ptr<const DexFile>> classpath_dex_c = OpenTestDexFiles("ForClassLoaderC");
+  std::vector<std::unique_ptr<const DexFile>> classpath_dex_d = OpenTestDexFiles("ForClassLoaderD");
+
+  std::string context_spec =
+      "PCL[" + CreateClassPath(classpath_dex_a) + ":" + CreateClassPath(classpath_dex_b) + "];" +
+      "DLC[" + CreateClassPath(classpath_dex_c) + "];" +
+      "PCL[" + CreateClassPath(classpath_dex_d) + "]";
+
+  std::unique_ptr<ClassLoaderContext> context = ClassLoaderContext::Create(context_spec);
+  ASSERT_TRUE(context->OpenDexFiles(InstructionSet::kArm, ""));
+
+  // Setup the compilation sources.
+  std::vector<std::unique_ptr<const DexFile>> compilation_sources = OpenTestDexFiles("MultiDex");
+  std::vector<const DexFile*> compilation_sources_raw =
+      MakeNonOwningPointerVector(compilation_sources);
+
+  // Create the class loader.
+  jobject jclass_loader = context->CreateClassLoader(compilation_sources_raw);
+  ASSERT_TRUE(jclass_loader != nullptr);
+
+  // Verify the class loader.
+  ScopedObjectAccess soa(Thread::Current());
+
+  StackHandleScope<3> hs(soa.Self());
+  Handle<mirror::ClassLoader> class_loader_1 = hs.NewHandle(
+      soa.Decode<mirror::ClassLoader>(jclass_loader));
+
+  // Verify the first class loader
+
+  // For the first class loader the class path dex files must come first and then the
+  // compilation sources.
+  std::vector<const DexFile*> class_loader_1_dex_files =
+      MakeNonOwningPointerVector(classpath_dex_a);
+  for (auto& dex : classpath_dex_b) {
+    class_loader_1_dex_files.push_back(dex.get());
+  }
+  for (auto& dex : compilation_sources_raw) {
+    class_loader_1_dex_files.push_back(dex);
+  }
+  VerifyClassLoaderDexFiles(soa,
+                            class_loader_1,
+                            WellKnownClasses::dalvik_system_PathClassLoader,
+                            class_loader_1_dex_files);
+
+  // Verify the second class loader
+  Handle<mirror::ClassLoader> class_loader_2 = hs.NewHandle(class_loader_1->GetParent());
+  std::vector<const DexFile*> class_loader_2_dex_files =
+      MakeNonOwningPointerVector(classpath_dex_c);
+  VerifyClassLoaderDexFiles(soa,
+                            class_loader_2,
+                            WellKnownClasses::dalvik_system_DelegateLastClassLoader,
+                            class_loader_2_dex_files);
+
+  // Verify the third class loader
+  Handle<mirror::ClassLoader> class_loader_3 = hs.NewHandle(class_loader_2->GetParent());
+  std::vector<const DexFile*> class_loader_3_dex_files =
+      MakeNonOwningPointerVector(classpath_dex_d);
+  VerifyClassLoaderDexFiles(soa,
+                            class_loader_3,
+                            WellKnownClasses::dalvik_system_PathClassLoader,
+                            class_loader_3_dex_files);
+  // The last class loader should have the BootClassLoader as a parent.
+  ASSERT_TRUE(class_loader_3->GetParent()->GetClass() ==
+      soa.Decode<mirror::Class>(WellKnownClasses::java_lang_BootClassLoader));
+}
+
 
 TEST_F(ClassLoaderContextTest, RemoveSourceLocations) {
   std::unique_ptr<ClassLoaderContext> context =
@@ -292,46 +410,82 @@ TEST_F(ClassLoaderContextTest, EncodeInOatFile) {
   std::vector<std::unique_ptr<const DexFile>> dex1 = OpenTestDexFiles("Main");
   std::vector<std::unique_ptr<const DexFile>> dex2 = OpenTestDexFiles("MyClass");
   std::string encoding = context->EncodeContextForOatFile("");
-  std::string expected_encoding = "PCL[" +
-      dex1[0]->GetLocation() + "*" + std::to_string(dex1[0]->GetLocationChecksum()) + ":" +
-      dex2[0]->GetLocation() + "*" + std::to_string(dex2[0]->GetLocationChecksum()) + "]";
+  std::string expected_encoding = "PCL[" + CreateClassPathWithChecksums(dex1) + ":" +
+      CreateClassPathWithChecksums(dex2) + "]";
   ASSERT_EQ(expected_encoding, context->EncodeContextForOatFile(""));
 }
 
-TEST_F(ClassLoaderContextTest, DecodeOatFileKey) {
-  std::string oat_file_encoding = "PCL[a.dex*123:b.dex*456]";
-  std::vector<std::string> classpath;
-  std::vector<uint32_t> checksums;
-  bool is_special_shared_library;
-  bool result = ClassLoaderContext::DecodePathClassLoaderContextFromOatFileKey(
-      oat_file_encoding,
-      &classpath,
-      &checksums,
-      &is_special_shared_library);
-  ASSERT_TRUE(result);
-  ASSERT_FALSE(is_special_shared_library);
-  ASSERT_EQ(2u, classpath.size());
-  ASSERT_EQ(2u, checksums.size());
-  ASSERT_EQ("a.dex", classpath[0]);
-  ASSERT_EQ(123u, checksums[0]);
-  ASSERT_EQ("b.dex", classpath[1]);
-  ASSERT_EQ(456u, checksums[1]);
+// TODO(calin) add a test which creates the context for a class loader together with dex_elements.
+TEST_F(ClassLoaderContextTest, CreateContextForClassLoader) {
+  // The chain is
+  //    ClassLoaderA (PathClassLoader)
+  //       ^
+  //       |
+  //    ClassLoaderB (DelegateLastClassLoader)
+  //       ^
+  //       |
+  //    ClassLoaderC (PathClassLoader)
+  //       ^
+  //       |
+  //    ClassLoaderD (DelegateLastClassLoader)
+
+  jobject class_loader_a = LoadDexInPathClassLoader("ForClassLoaderA", nullptr);
+  jobject class_loader_b = LoadDexInDelegateLastClassLoader("ForClassLoaderB", class_loader_a);
+  jobject class_loader_c = LoadDexInPathClassLoader("ForClassLoaderC", class_loader_b);
+  jobject class_loader_d = LoadDexInDelegateLastClassLoader("ForClassLoaderD", class_loader_c);
+
+  std::unique_ptr<ClassLoaderContext> context = CreateContextForClassLoader(class_loader_d);
+
+  VerifyContextForClassLoader(context.get());
+  VerifyContextSize(context.get(), 4);
+
+  VerifyClassLoaderDLCFromTestDex(context.get(), 0, "ForClassLoaderD");
+  VerifyClassLoaderPCLFromTestDex(context.get(), 1, "ForClassLoaderC");
+  VerifyClassLoaderDLCFromTestDex(context.get(), 2, "ForClassLoaderB");
+  VerifyClassLoaderPCLFromTestDex(context.get(), 3, "ForClassLoaderA");
 }
 
-TEST_F(ClassLoaderContextTest, DecodeOatFileKeySpecialLibrary) {
-  std::string oat_file_encoding = "&";
-  std::vector<std::string> classpath;
-  std::vector<uint32_t> checksums;
-  bool is_special_shared_library;
-  bool result = ClassLoaderContext::DecodePathClassLoaderContextFromOatFileKey(
-      oat_file_encoding,
-      &classpath,
-      &checksums,
-      &is_special_shared_library);
-  ASSERT_TRUE(result);
-  ASSERT_TRUE(is_special_shared_library);
-  ASSERT_TRUE(classpath.empty());
-  ASSERT_TRUE(checksums.empty());
+TEST_F(ClassLoaderContextTest, VerifyClassLoaderContextMatch) {
+  std::string context_spec = "PCL[a.dex*123:b.dex*456];DLC[c.dex*890]";
+  std::unique_ptr<ClassLoaderContext> context = ParseContextWithChecksums(context_spec);
+
+  VerifyContextSize(context.get(), 2);
+  VerifyClassLoaderPCL(context.get(), 0, "a.dex:b.dex");
+  VerifyClassLoaderDLC(context.get(), 1, "c.dex");
+
+  ASSERT_TRUE(context->VerifyClassLoaderContextMatch(context_spec));
+
+  std::string wrong_class_loader_type = "PCL[a.dex*123:b.dex*456];PCL[c.dex*890]";
+  ASSERT_FALSE(context->VerifyClassLoaderContextMatch(wrong_class_loader_type));
+
+  std::string wrong_class_loader_order = "DLC[c.dex*890];PCL[a.dex*123:b.dex*456]";
+  ASSERT_FALSE(context->VerifyClassLoaderContextMatch(wrong_class_loader_order));
+
+  std::string wrong_classpath_order = "PCL[b.dex*456:a.dex*123];DLC[c.dex*890]";
+  ASSERT_FALSE(context->VerifyClassLoaderContextMatch(wrong_classpath_order));
+
+  std::string wrong_checksum = "PCL[a.dex*999:b.dex*456];DLC[c.dex*890]";
+  ASSERT_FALSE(context->VerifyClassLoaderContextMatch(wrong_checksum));
+
+  std::string wrong_extra_class_loader = "PCL[a.dex*123:b.dex*456];DLC[c.dex*890];PCL[d.dex*321]";
+  ASSERT_FALSE(context->VerifyClassLoaderContextMatch(wrong_extra_class_loader));
+
+  std::string wrong_extra_classpath = "PCL[a.dex*123:b.dex*456];DLC[c.dex*890:d.dex*321]";
+  ASSERT_FALSE(context->VerifyClassLoaderContextMatch(wrong_extra_classpath));
+
+  std::string wrong_spec = "PCL[a.dex*999:b.dex*456];DLC[";
+  ASSERT_FALSE(context->VerifyClassLoaderContextMatch(wrong_spec));
+}
+
+TEST_F(ClassLoaderContextTest, VerifyClassLoaderContextMatchAfterEncoding) {
+  jobject class_loader_a = LoadDexInPathClassLoader("ForClassLoaderA", nullptr);
+  jobject class_loader_b = LoadDexInDelegateLastClassLoader("ForClassLoaderB", class_loader_a);
+  jobject class_loader_c = LoadDexInPathClassLoader("ForClassLoaderC", class_loader_b);
+  jobject class_loader_d = LoadDexInDelegateLastClassLoader("ForClassLoaderD", class_loader_c);
+
+  std::unique_ptr<ClassLoaderContext> context = CreateContextForClassLoader(class_loader_d);
+
+  ASSERT_TRUE(context->VerifyClassLoaderContextMatch(context->EncodeContextForOatFile("")));
 }
 
 }  // namespace art

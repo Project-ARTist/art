@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 The Android Open Source Project
+ * Copyright (C) 2011 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,14 +14,19 @@
  * limitations under the License.
  */
 
-class Second {
-  public String getSecond() {
-    return "I Second That.";
-  }
+#include "constants_arm.h"
 
-  // This method makes sure the second dex file has quickening
-  // instructions.
-  public String callSecond() {
-    return getSecond();
+namespace art {
+namespace arm {
+
+std::ostream& operator<<(std::ostream& os, const DRegister& rhs) {
+  if (rhs >= D0 && rhs < kNumberOfDRegisters) {
+    os << "d" << static_cast<int>(rhs);
+  } else {
+    os << "DRegister[" << static_cast<int>(rhs) << "]";
   }
+  return os;
 }
+
+}  // namespace arm
+}  // namespace art
