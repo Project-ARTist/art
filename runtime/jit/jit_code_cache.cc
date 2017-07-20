@@ -90,7 +90,6 @@ static MemMap* SplitMemMap(MemMap* existing_map,
   return new_map;
 }
 
-
 JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
                                    size_t max_capacity,
                                    bool generate_debug_info,
@@ -101,14 +100,15 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
 
   // Generating debug information is for using the Linux perf tool on
   // host which does not work with ashmem.
-  bool use_ashmem = !generate_debug_info;
+  // Also, target linux does not support ashmem.
+  bool use_ashmem = !generate_debug_info && !kIsTargetLinux;
 
   // With 'perf', we want a 1-1 mapping between an address and a method.
   bool garbage_collect_code = !generate_debug_info;
 
   // We only use two mappings (separating rw from rx) if we are able to use ashmem.
   // See the above comment for debug information and not using ashmem.
-  bool use_two_mappings = !generate_debug_info;
+  bool use_two_mappings = use_ashmem;
 
   // We need to have 32 bit offsets from method headers in code cache which point to things
   // in the data cache. If the maps are more than 4G apart, having multiple maps wouldn't work.
@@ -802,12 +802,27 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
       //
       // For reference, this behavior is caused by this commit:
       // https://android.googlesource.com/kernel/msm/+/3fbe6bc28a6b9939d0650f2f17eb5216c719950c
-      FlushInstructionCache(reinterpret_cast<char*>(code_ptr),
-                            reinterpret_cast<char*>(code_ptr + code_size));
       if (writable_ptr != code_ptr) {
+        // When there are two mappings of the JIT code cache, RX and
+        // RW, flush the RW version first as we've just dirtied the
+        // cache lines with new code. Flushing the RX version first
+        // can cause a permission fault as the those addresses are not
+        // writable, but can appear dirty in the cache. There is a lot
+        // of potential subtlety here depending on how the cache is
+        // indexed and tagged.
+        //
+        // Flushing the RX version after the RW version is just
+        // invalidating cachelines in the instruction cache. This is
+        // necessary as the instruction cache will often have a
+        // different set of cache lines present and because the JIT
+        // code cache can start a new function at any boundary within
+        // a cache-line.
         FlushDataCache(reinterpret_cast<char*>(writable_ptr),
                        reinterpret_cast<char*>(writable_ptr + code_size));
       }
+      FlushInstructionCache(reinterpret_cast<char*>(code_ptr),
+                            reinterpret_cast<char*>(code_ptr + code_size));
+
       DCHECK(!Runtime::Current()->IsAotCompiler());
       if (has_should_deoptimize_flag) {
         writable_method_header->SetHasShouldDeoptimizeFlag();

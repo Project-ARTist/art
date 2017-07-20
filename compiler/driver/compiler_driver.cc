@@ -41,31 +41,31 @@
 #include "compiler.h"
 #include "compiler_callbacks.h"
 #include "compiler_driver-inl.h"
-#include "dex_compilation_unit.h"
-#include "dex_file-inl.h"
-#include "dex_instruction-inl.h"
 #include "dex/dex_to_dex_compiler.h"
 #include "dex/verification_results.h"
 #include "dex/verified_method.h"
+#include "dex_compilation_unit.h"
+#include "dex_file-inl.h"
+#include "dex_instruction-inl.h"
 #include "driver/compiler_options.h"
-#include "intrinsics_enum.h"
-#include "jni_internal.h"
-#include "object_lock.h"
-#include "runtime.h"
 #include "gc/accounting/card_table-inl.h"
 #include "gc/accounting/heap_bitmap.h"
 #include "gc/space/image_space.h"
 #include "gc/space/space.h"
-#include "mirror/class_loader.h"
+#include "handle_scope-inl.h"
+#include "intrinsics_enum.h"
+#include "jni_internal.h"
 #include "mirror/class-inl.h"
+#include "mirror/class_loader.h"
 #include "mirror/dex_cache-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/object-refvisitor-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/throwable.h"
+#include "nativehelper/ScopedLocalRef.h"
+#include "object_lock.h"
+#include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
-#include "ScopedLocalRef.h"
-#include "handle_scope-inl.h"
 #include "thread.h"
 #include "thread_list.h"
 #include "thread_pool.h"
@@ -75,8 +75,8 @@
 #include "utils/dex_cache_arrays_layout-inl.h"
 #include "utils/swap_space.h"
 #include "vdex_file.h"
-#include "verifier/method_verifier.h"
 #include "verifier/method_verifier-inl.h"
+#include "verifier/method_verifier.h"
 #include "verifier/verifier_deps.h"
 #include "verifier/verifier_enums.h"
 
@@ -291,7 +291,6 @@ CompilerDriver::CompilerDriver(
       instruction_set_(instruction_set == kArm ? kThumb2 : instruction_set),
       instruction_set_features_(instruction_set_features),
       requires_constructor_barrier_lock_("constructor barrier lock"),
-      compiled_classes_lock_("compiled classes lock"),
       non_relative_linker_patch_count_(0u),
       image_classes_(image_classes),
       classes_to_compile_(compiled_classes),
@@ -1947,7 +1946,12 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
         if (compiler_only_verifies) {
           // Just update the compiled_classes_ map. The compiler doesn't need to resolve
           // the type.
-          compiled_classes_.Overwrite(ClassReference(dex_file, i), mirror::Class::kStatusVerified);
+          DexFileReference ref(dex_file, i);
+          mirror::Class::Status existing = mirror::Class::kStatusNotReady;
+          DCHECK(compiled_classes_.Get(ref, &existing)) << ref.dex_file->GetLocation();
+          ClassStateTable::InsertResult result =
+             compiled_classes_.Insert(ref, existing, mirror::Class::kStatusVerified);
+          CHECK_EQ(result, ClassStateTable::kInsertResultSuccess);
         } else {
           // Update the class status, so later compilation stages know they don't need to verify
           // the class.
@@ -1978,6 +1982,13 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
 void CompilerDriver::Verify(jobject jclass_loader,
                             const std::vector<const DexFile*>& dex_files,
                             TimingLogger* timings) {
+  // Always add the dex files to compiled_classes_. This happens for all compiler filters.
+  for (const DexFile* dex_file : dex_files) {
+    if (!compiled_classes_.HaveDexFile(dex_file)) {
+      compiled_classes_.AddDexFile(dex_file, dex_file->NumClassDefs());
+    }
+  }
+
   if (FastVerify(jclass_loader, dex_files, timings)) {
     return;
   }
@@ -2202,6 +2213,9 @@ void CompilerDriver::SetVerifiedDexFile(jobject class_loader,
                                         size_t thread_count,
                                         TimingLogger* timings) {
   TimingLogger::ScopedTiming t("Verify Dex File", timings);
+  if (!compiled_classes_.HaveDexFile(&dex_file)) {
+    compiled_classes_.AddDexFile(&dex_file, dex_file.NumClassDefs());
+  }
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   ParallelCompilationManager context(class_linker, class_loader, this, &dex_file, dex_files,
                                      thread_pool);
@@ -2248,12 +2262,13 @@ class InitializeClassVisitor : public CompilationVisitor {
     const bool is_app_image = manager_->GetCompiler()->GetCompilerOptions().IsAppImage();
 
     mirror::Class::Status old_status = klass->GetStatus();
+    // Don't initialize classes in boot space when compiling app image
+    if (is_app_image && klass->IsBootStrapClassLoaded()) {
+      // Also return early and don't store the class status in the recorded class status.
+      return;
+    }
     // Only try to initialize classes that were successfully verified.
     if (klass->IsVerified()) {
-      // Don't initialize classes in boot space when compiling app image
-      if (is_app_image && klass->IsBootStrapClassLoaded()) {
-        return;
-      }
       // Attempt to initialize the class but bail if we either need to initialize the super-class
       // or static fields.
       manager_->GetClassLinker()->EnsureInitialized(soa.Self(), klass, false, false);
@@ -2860,12 +2875,12 @@ void CompilerDriver::AddCompiledMethod(const MethodReference& method_ref,
 
 bool CompilerDriver::GetCompiledClass(ClassReference ref, mirror::Class::Status* status) const {
   DCHECK(status != nullptr);
-  MutexLock mu(Thread::Current(), compiled_classes_lock_);
-  ClassStateTable::const_iterator it = compiled_classes_.find(ref);
-  if (it == compiled_classes_.end()) {
+  // The table doesn't know if something wasn't inserted. For this case it will return
+  // kStatusNotReady. To handle this, just assume anything not verified is not compiled.
+  if (!compiled_classes_.Get(DexFileReference(ref.first, ref.second), status) ||
+      *status < mirror::Class::kStatusVerified) {
     return false;
   }
-  *status = it->second;
   return true;
 }
 
@@ -2886,15 +2901,20 @@ void CompilerDriver::RecordClassStatus(ClassReference ref, mirror::Class::Status
           << " of " << status;
   }
 
-  MutexLock mu(Thread::Current(), compiled_classes_lock_);
-  auto it = compiled_classes_.find(ref);
-  if (it == compiled_classes_.end()) {
-    compiled_classes_.Overwrite(ref, status);
-  } else if (status > it->second) {
+  ClassStateTable::InsertResult result;
+  do {
+    DexFileReference dex_ref(ref.first, ref.second);
+    mirror::Class::Status existing = mirror::Class::kStatusNotReady;
+    CHECK(compiled_classes_.Get(dex_ref, &existing)) << dex_ref.dex_file->GetLocation();
+    if (existing >= status) {
+      // Existing status is already better than we expect, break.
+      break;
+    }
     // Update the status if we now have a greater one. This happens with vdex,
     // which records a class is verified, but does not resolve it.
-    it->second = status;
-  }
+    result = compiled_classes_.Insert(dex_ref, existing, status);
+    CHECK(result != ClassStateTable::kInsertResultInvalidDexFile);
+  } while (result != ClassStateTable::kInsertResultSuccess);
 }
 
 CompiledMethod* CompilerDriver::GetCompiledMethod(MethodReference ref) const {
