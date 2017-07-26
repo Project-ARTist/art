@@ -121,6 +121,10 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
     return nullptr;
   }
 
+  // Align both capacities to page size, as that's the unit mspaces use.
+  initial_capacity = RoundDown(initial_capacity, 2 * kPageSize);
+  max_capacity = RoundDown(max_capacity, 2 * kPageSize);
+
   std::string error_str;
   // Map name specific for android_os_Debug.cpp accounting.
   // Map in low 4gb to simplify accessing root tables for x86_64.
@@ -142,22 +146,21 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
     return nullptr;
   }
 
-  // Align both capacities to page size, as that's the unit mspaces use.
-  initial_capacity = RoundDown(initial_capacity, 2 * kPageSize);
-  max_capacity = RoundDown(max_capacity, 2 * kPageSize);
-
   // Create a region for JIT data and executable code. This will be
   // laid out as:
   //
   //          +----------------+ --------------------
-  //          :                : ^                  ^
+  //          | code_sync_map_ | ^ code_sync_size   ^
+  //          |                | v                  |
+  //          +----------------+ --                 |
+  //          :                : ^                  |
   //          :  post_code_map : | post_code_size   |
   //          :   [padding]    : v                  |
   //          +----------------+ -                  |
   //          |                | ^                  |
-  //          |   code_map     | | code_size        |
+  //          |   code_map     | | code_size        | total_mapping_size
   //          |   [JIT Code]   | v                  |
-  //          +----------------+ -                  | total_mapping_size
+  //          +----------------+ -                  |
   //          :                : ^                  |
   //          :  pre_code_map  : | pre_code_size    |
   //          :   [padding]    : v                  |
@@ -167,17 +170,23 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
   //          |   [Jit Data]   | v                  v
   //          +----------------+ --------------------
   //
+  // The code_sync_map_ contains a page that we use flush CPU instruction
+  // pipelines (see FlushInstructionPipelines()).
+  //
   // The padding regions - pre_code_map and post_code_map - exist to
   // put some random distance between the writable JIT code mapping
   // and the executable mapping. The padding is discarded at the end
   // of this function.
-  size_t total_mapping_size = kMaxMapSpacingPages * kPageSize;
-  size_t data_size = RoundUp((max_capacity - total_mapping_size) / 2, kPageSize);
+  //
+  size_t data_size = (max_capacity - kMaxMapSpacingPages * kPageSize) / 2;
   size_t pre_code_size =
-      GetRandomNumber(kMinMapSpacingPages, kMaxMapSpacingPages) * kPageSize;
-  size_t code_size = max_capacity - total_mapping_size - data_size;
-  size_t post_code_size = total_mapping_size - pre_code_size;
-  DCHECK_EQ(code_size + data_size + total_mapping_size, max_capacity);
+      GetRandomNumber(kMinMapSpacingPages, kMaxMapSpacingPages - 1) * kPageSize;
+  size_t code_size = max_capacity - data_size - kMaxMapSpacingPages * kPageSize;
+  size_t code_sync_size = kPageSize;
+  size_t post_code_size = kMaxMapSpacingPages * kPageSize - pre_code_size - code_sync_size;
+  DCHECK_EQ(data_size, code_size);
+  DCHECK_EQ(pre_code_size + post_code_size + code_sync_size, kMaxMapSpacingPages * kPageSize);
+  DCHECK_EQ(data_size + pre_code_size + code_size + post_code_size + code_sync_size, max_capacity);
 
   // Create pre-code padding region after data region, discarded after
   // code and data regions are set-up.
@@ -191,7 +200,7 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
     return nullptr;
   }
   DCHECK_EQ(data_map->Size(), data_size);
-  DCHECK_EQ(pre_code_map->Size(), pre_code_size + code_size + post_code_size);
+  DCHECK_EQ(pre_code_map->Size(), pre_code_size + code_size + post_code_size + code_sync_size);
 
   // Create code region.
   unique_fd writable_code_fd;
@@ -206,7 +215,7 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
     return nullptr;
   }
   DCHECK_EQ(pre_code_map->Size(), pre_code_size);
-  DCHECK_EQ(code_map->Size(), code_size + post_code_size);
+  DCHECK_EQ(code_map->Size(), code_size + post_code_size + code_sync_size);
 
   // Padding after code region, discarded after code and data regions
   // are set-up.
@@ -220,7 +229,19 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
     return nullptr;
   }
   DCHECK_EQ(code_map->Size(), code_size);
+  DCHECK_EQ(post_code_map->Size(), post_code_size + code_sync_size);
+
+  std::unique_ptr<MemMap> code_sync_map(SplitMemMap(post_code_map.get(),
+                                                    "jit-code-sync",
+                                                    post_code_size,
+                                                    kProtCode,
+                                                    error_msg,
+                                                    use_ashmem));
+  if (code_sync_map == nullptr) {
+    return nullptr;
+  }
   DCHECK_EQ(post_code_map->Size(), post_code_size);
+  DCHECK_EQ(code_sync_map->Size(), code_sync_size);
 
   std::unique_ptr<MemMap> writable_code_map;
   if (use_two_mappings) {
@@ -246,6 +267,7 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
   return new JitCodeCache(writable_code_map.release(),
                           code_map.release(),
                           data_map.release(),
+                          code_sync_map.release(),
                           code_size,
                           data_size,
                           max_capacity,
@@ -255,6 +277,7 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
 JitCodeCache::JitCodeCache(MemMap* writable_code_map,
                            MemMap* executable_code_map,
                            MemMap* data_map,
+                           MemMap* code_sync_map,
                            size_t initial_code_capacity,
                            size_t initial_data_capacity,
                            size_t max_capacity,
@@ -265,6 +288,7 @@ JitCodeCache::JitCodeCache(MemMap* writable_code_map,
       data_map_(data_map),
       executable_code_map_(executable_code_map),
       writable_code_map_(writable_code_map),
+      code_sync_map_(code_sync_map),
       max_capacity_(max_capacity),
       current_capacity_(initial_code_capacity + initial_data_capacity),
       code_end_(initial_code_capacity),
@@ -382,7 +406,7 @@ void* JitCodeCache::ToWritableAddress(const void* executable_address) const {
 
 class ScopedCodeCacheWrite : ScopedTrace {
  public:
-  explicit ScopedCodeCacheWrite(JitCodeCache* code_cache, bool only_for_tlb_shootdown = false)
+  explicit ScopedCodeCacheWrite(JitCodeCache* code_cache)
       : ScopedTrace("ScopedCodeCacheWrite") {
     ScopedTrace trace("mprotect all");
     int prot_to_start_writing = kProtAll;
@@ -398,7 +422,7 @@ class ScopedCodeCacheWrite : ScopedTrace {
     writable_map_ = code_cache->GetWritableMemMap();
     // If we're using ScopedCacheWrite only for TLB shootdown, we limit the scope of mprotect to
     // one page.
-    size_ = only_for_tlb_shootdown ? kPageSize : writable_map_->Size();
+    size_ = writable_map_->Size();
     CHECKED_MPROTECT(writable_map_->Begin(), size_, prot_to_start_writing);
   }
   ~ScopedCodeCacheWrite() {
@@ -424,7 +448,6 @@ uint8_t* JitCodeCache::CommitCode(Thread* self,
                                   size_t fp_spill_mask,
                                   const uint8_t* code,
                                   size_t code_size,
-                                  size_t data_size,
                                   bool osr,
                                   Handle<mirror::ObjectArray<mirror::Object>> roots,
                                   bool has_should_deoptimize_flag,
@@ -439,7 +462,6 @@ uint8_t* JitCodeCache::CommitCode(Thread* self,
                                        fp_spill_mask,
                                        code,
                                        code_size,
-                                       data_size,
                                        osr,
                                        roots,
                                        has_should_deoptimize_flag,
@@ -457,7 +479,6 @@ uint8_t* JitCodeCache::CommitCode(Thread* self,
                                 fp_spill_mask,
                                 code,
                                 code_size,
-                                data_size,
                                 osr,
                                 roots,
                                 has_should_deoptimize_flag,
@@ -744,6 +765,129 @@ static void ClearMethodCounter(ArtMethod* method, bool was_warm) {
   method->SetCounter(std::min(jit_warmup_threshold - 1, 1));
 }
 
+static void FlushInstructionPiplines(uint8_t* sync_page) {
+  // After updating the JIT code cache we need to force all CPUs to
+  // flush their instruction pipelines. In the absence of system call
+  // to do this explicitly, we can achieve this indirectly by toggling
+  // permissions on an executable page. This should send an IPI to
+  // each core to update the TLB entry with the interrupt raised on
+  // each core causing the instruction pipeline to be flushed.
+  CHECKED_MPROTECT(sync_page, kPageSize, kProtAll);
+  // Ensure the sync_page is present otherwise a TLB update may not be
+  // necessary.
+  sync_page[0] = 0;
+  CHECKED_MPROTECT(sync_page, kPageSize, kProtCode);
+}
+
+#ifdef __aarch64__
+
+static void FlushJitCodeCacheRange(uint8_t* code_ptr,
+                                   uint8_t* writable_ptr,
+                                   size_t code_size) {
+  // Cache maintenance instructions can cause permission faults when a
+  // page is not present (e.g. swapped out or not backed). These
+  // faults should be handled by the kernel, but a bug in some Linux
+  // kernels may surface these permission faults to user-land which
+  // does not currently deal with them (b/63885946). To work around
+  // this, we read a value from each page to fault it in before
+  // attempting to perform cache maintenance operations.
+  //
+  // For reference, this behavior is caused by this commit:
+  // https://android.googlesource.com/kernel/msm/+/3fbe6bc28a6b9939d0650f2f17eb5216c719950c
+
+  // The cache-line size could be probed for from the CPU, but
+  // assuming a safe lower bound is safe for CPUs that have different
+  // cache-line sizes for big and little cores.
+  static const uintptr_t kSafeCacheLineSize = 32;
+
+  // Ensure stores are present in L1 data cache.
+  __asm __volatile("dsb ish" ::: "memory");
+
+  volatile uint8_t mutant;
+
+  // Push dirty cache-lines out to the point of unification (PoU). The
+  // point of unification is the first point in the cache/memory
+  // hierarchy where the instruction cache and data cache have the
+  // same view of memory. The PoU is where an instruction fetch will
+  // fetch the new code generated by the JIT.
+  //
+  // See: http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.den0024a/ch11s04.html
+  uintptr_t writable_addr = RoundDown(reinterpret_cast<uintptr_t>(writable_ptr),
+                                      kSafeCacheLineSize);
+  uintptr_t writable_end  = RoundUp(reinterpret_cast<uintptr_t>(writable_ptr) + code_size,
+                                    kSafeCacheLineSize);
+  while (writable_addr < writable_end) {
+    // Read from the cache-line to minimize the chance that a cache
+    // maintenance instruction causes a fault (see kernel bug comment
+    // above).
+    mutant = *reinterpret_cast<const uint8_t*>(writable_addr);
+
+    // Flush cache-line
+    __asm volatile("dc cvau, %0" :: "r"(writable_addr) : "memory");
+    writable_addr += kSafeCacheLineSize;
+  }
+
+  __asm __volatile("dsb ish" ::: "memory");
+
+  uintptr_t code_addr = RoundDown(reinterpret_cast<uintptr_t>(code_ptr), kSafeCacheLineSize);
+  const uintptr_t code_end = RoundUp(reinterpret_cast<uintptr_t>(code_ptr) + code_size,
+                                     kSafeCacheLineSize);
+  while (code_addr < code_end) {
+    // Read from the cache-line to minimize the chance that a cache
+    // maintenance instruction causes a fault (see kernel bug comment
+    // above).
+    mutant = *reinterpret_cast<const uint8_t*>(code_addr);
+
+    // Invalidating the data cache line is only strictly necessary
+    // when the JIT code cache has two mappings (the default). We know
+    // this cache line is clean so this is just invalidating it (using
+    // "dc ivac" would be preferable, but counts as a write and this
+    // memory may not be mapped write permission).
+    __asm volatile("dc cvau, %0" :: "r"(code_addr) : "memory");
+
+    // Invalidate the instruction cache line to force instructions in
+    // range to be re-fetched following update.
+    __asm volatile("ic ivau, %0" :: "r"(code_addr) : "memory");
+
+    code_addr += kSafeCacheLineSize;
+  }
+
+  // Wait for code cache invalidations to complete.
+  __asm __volatile("dsb ish" ::: "memory");
+
+  // Reset fetched instruction stream.
+  __asm __volatile("isb");
+}
+
+#else  // __aarch64
+
+static void FlushJitCodeCacheRange(uint8_t* code_ptr,
+                                   uint8_t* writable_ptr,
+                                   size_t code_size) {
+  if (writable_ptr != code_ptr) {
+    // When there are two mappings of the JIT code cache, RX and
+    // RW, flush the RW version first as we've just dirtied the
+    // cache lines with new code. Flushing the RX version first
+    // can cause a permission fault as the those addresses are not
+    // writable, but can appear dirty in the cache. There is a lot
+    // of potential subtlety here depending on how the cache is
+    // indexed and tagged.
+    //
+    // Flushing the RX version after the RW version is just
+    // invalidating cachelines in the instruction cache. This is
+    // necessary as the instruction cache will often have a
+    // different set of cache lines present and because the JIT
+    // code cache can start a new function at any boundary within
+    // a cache-line.
+    FlushDataCache(reinterpret_cast<char*>(writable_ptr),
+                   reinterpret_cast<char*>(writable_ptr + code_size));
+  }
+  FlushInstructionCache(reinterpret_cast<char*>(code_ptr),
+                        reinterpret_cast<char*>(code_ptr + code_size));
+}
+
+#endif  // __aarch64
+
 uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
                                           ArtMethod* method,
                                           uint8_t* stack_map,
@@ -754,7 +898,6 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
                                           size_t fp_spill_mask,
                                           const uint8_t* code,
                                           size_t code_size,
-                                          size_t data_size,
                                           bool osr,
                                           Handle<mirror::ObjectArray<mirror::Object>> roots,
                                           bool has_should_deoptimize_flag,
@@ -795,33 +938,9 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
           core_spill_mask,
           fp_spill_mask,
           code_size);
-      // Flush caches before we remove write permission because some ARMv8 Qualcomm kernels may
-      // trigger a segfault if a page fault occurs when requesting a cache maintenance operation.
-      // This is a kernel bug that we need to work around until affected devices (e.g. Nexus 5X and
-      // 6P) stop being supported or their kernels are fixed.
-      //
-      // For reference, this behavior is caused by this commit:
-      // https://android.googlesource.com/kernel/msm/+/3fbe6bc28a6b9939d0650f2f17eb5216c719950c
-      if (writable_ptr != code_ptr) {
-        // When there are two mappings of the JIT code cache, RX and
-        // RW, flush the RW version first as we've just dirtied the
-        // cache lines with new code. Flushing the RX version first
-        // can cause a permission fault as the those addresses are not
-        // writable, but can appear dirty in the cache. There is a lot
-        // of potential subtlety here depending on how the cache is
-        // indexed and tagged.
-        //
-        // Flushing the RX version after the RW version is just
-        // invalidating cachelines in the instruction cache. This is
-        // necessary as the instruction cache will often have a
-        // different set of cache lines present and because the JIT
-        // code cache can start a new function at any boundary within
-        // a cache-line.
-        FlushDataCache(reinterpret_cast<char*>(writable_ptr),
-                       reinterpret_cast<char*>(writable_ptr + code_size));
-      }
-      FlushInstructionCache(reinterpret_cast<char*>(code_ptr),
-                            reinterpret_cast<char*>(code_ptr + code_size));
+
+      FlushJitCodeCacheRange(code_ptr, writable_ptr, code_size);
+      FlushInstructionPiplines(code_sync_map_->Begin());
 
       DCHECK(!Runtime::Current()->IsAotCompiler());
       if (has_should_deoptimize_flag) {
@@ -871,13 +990,10 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
     DCHECK_EQ(FromStackMapToRoots(stack_map), roots_data);
     DCHECK_LE(roots_data, stack_map);
     FillRootTable(roots_data, roots);
-    {
-      // Flush data cache, as compiled code references literals in it.
-      // We also need a TLB shootdown to act as memory barrier across cores.
-      ScopedCodeCacheWrite ccw(this, /* only_for_tlb_shootdown */ true);
-      FlushDataCache(reinterpret_cast<char*>(roots_data),
-                     reinterpret_cast<char*>(roots_data + data_size));
-    }
+
+    // Ensure the updates to the root table are visible with a store fence.
+    QuasiAtomic::ThreadFenceSequentiallyConsistent();
+
     method_code_map_.Put(code_ptr, method);
     if (osr) {
       number_of_osr_compilations_++;
