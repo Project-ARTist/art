@@ -1176,8 +1176,8 @@ class ClassLinker {
   friend struct CompilationHelper;  // For Compile in ImageTest.
 
   // artist changes
-  friend class CodeLibEnvironment;
-  // artist changes
+  friend class CodelibSymbols;
+  // END artist changes
   friend class ImageDumper;  // for DexLock
   friend class ImageWriter;  // for GetClassRoots
   friend class JniCompilerTest;  // for GetRuntimeQuickGenericJniStub
