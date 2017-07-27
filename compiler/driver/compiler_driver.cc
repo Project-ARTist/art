@@ -24,6 +24,7 @@
 
 #ifndef __APPLE__
 #include <malloc.h>  // For mallinfo
+
 #endif
 
 #include "art_field-inl.h"
@@ -76,6 +77,8 @@
 #include "verifier/method_verifier-inl.h"
 
 #include "optimizing/artist/env/codelib_environment.h"
+#include "optimizing/artist/artist_log.h"
+
 
 namespace art {
 
@@ -487,11 +490,18 @@ void CompilerDriver::CompileAll(jobject class_loader,
   // Compile:
   // 1) Compile all classes and methods enabled for compilation. May fall back to dex-to-dex
   //    compilation.
+
+
   // <PreInit all Environments>
-  CodeLibEnvironment& env = CodeLibEnvironment::GetInstance();
-  env.PreInitializeEnvironmentCodeLib(class_loader, this, dex_files);
-  VLOG(compiler) << "CodeLib available: " << env.IsCodeLibAvailable();
+  // TODO after refactoring, this will probably be moved somewhere else
+//  CodeLibEnvironment& env = CodeLibEnvironment::GetInstance();
+//  ArtistLog::ForceVerboseLogging();
+//  VLOG(compiler) << "BEFORE CodeLib available: " << env.IsCodeLibAvailable();
+//  env.PreInitializeEnvironmentCodeLib(class_loader, dex_files);
+//  VLOG(compiler) << "CodeLib available: " << env.IsCodeLibAvailable();
   // </PreInit all Environments>
+
+
   if (!GetCompilerOptions().VerifyAtRuntime()) {
     Compile(class_loader, dex_files, timings);
   }
