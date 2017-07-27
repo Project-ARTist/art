@@ -775,6 +775,9 @@ class ClassLinker {
   // Image pointer size.
   size_t image_pointer_size_;
 
+  // artist changes
+  friend class CodelibSymbols;
+  // END artist changes
   friend class ImageWriter;  // for GetClassRoots
   friend class ImageDumper;  // for FindOpenedOatFileFromOatLocation
   friend class JniCompilerTest;  // for GetRuntimeQuickGenericJniStub

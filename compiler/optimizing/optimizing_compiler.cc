@@ -20,6 +20,7 @@
 
 #include <fstream>
 #include <stdint.h>
+#include "optimizing/artist/modules/module_manager.h"
 
 #include "art_method-inl.h"
 #include "base/arena_allocator.h"
@@ -56,12 +57,7 @@
 #include "ssa_phi_elimination.h"
 #include "ssa_liveness_analysis.h"
 #include "utils/assembler.h"
-// Artist Includes ///////////////////////////////////////////
-#include "optimizing/artist/artist.h"
-#include "optimizing/artist/modules/analyzer/logtimization.h"
-#include "optimizing/artist/modules/generic/universal_artist.h"
-#include "optimizing/artist/modules/method-tracing/trace_artist.h"
-// Artist Includes End ///////////////////////////////////////
+#include "verifier/method_verifier.h"
 
 namespace art {
 
@@ -350,12 +346,6 @@ static void RunOptimizations(HGraph* graph,
 
   IntrinsicsRecognizer intrinsics(graph, dex_compilation_unit.GetDexFile(), driver);
 
-  // artist optimization passes //////////////////////////////////////////////
-  HUniversalArtist universalArtist(graph, dex_compilation_unit, driver);
-  // HTraceArtist traceLogging(graph, dex_compilation_unit, driver);
-  // HLogtimization logtimization(graph, dex_compilation_unit, driver);
-  // /artist optimization passes //////////////////////////////////////////////
-
   HOptimization* optimizations[] = {
     &intrinsics,
     &fold1,
@@ -376,14 +366,33 @@ static void RunOptimizations(HGraph* graph,
     // The codegen has a few assumptions that only the instruction simplifier can
     // satisfy. For example, the code generator does not expect to see a
     // HTypeConversion from a type to the same type.
-    &simplify3,
-    // Artist Optimization and Instrumentation Passes
-    &universalArtist,
-    // &traceLogging,
-    // &logtimization,
+    &simplify3
   };
 
-  RunOptimizations(optimizations, arraysize(optimizations), pass_info_printer);
+
+  // add ARTist modules
+  const ModuleManager* module_manager = ModuleManager::getInstance();
+  auto modules = module_manager->getModules();
+
+  vector<HArtist*> artistPasses;
+  artistPasses.reserve(modules.size());
+  for (auto it : modules) {
+    auto id = it.first;
+    auto module = it.second;
+    auto pass = module->createPass(graph, dex_compilation_unit);
+    pass->setDexfileEnvironment(module_manager->getDexFileEnvironment());
+    auto codelib_env = module_manager->getCodelibEnvironment(id);
+    pass->setCodeLibEnvironment(codelib_env);
+    artistPasses.push_back(pass);
+  }
+
+  vector<HOptimization*> optimizations2v(std::begin(optimizations), std::end(optimizations));
+  optimizations2v.insert(optimizations2v.end(), artistPasses.begin(), artistPasses.end());
+
+  // TODO DEBUG CHECK
+  CHECK(optimizations2v.size() == 12 + artistPasses.size());
+
+  RunOptimizations(&optimizations2v[0], optimizations2v.size(), pass_info_printer);
 }
 
 // The stack map we generate must be 4-byte aligned on ARM. Since existing
@@ -426,6 +435,7 @@ CompiledMethod* OptimizingCompiler::CompileOptimized(HGraph* graph,
 
   CodeVectorAllocator allocator;
   codegen->CompileOptimized(&allocator);
+
 
   DefaultSrcMap src_mapping_table;
   if (compiler_driver->GetCompilerOptions().GetGenerateDebugInfo()) {
