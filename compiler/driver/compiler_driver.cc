@@ -27,6 +27,7 @@
 
 #ifndef __APPLE__
 #include <malloc.h>  // For mallinfo
+
 #endif
 
 #include "art_field-inl.h"
@@ -75,6 +76,8 @@
 #include "verifier/method_verifier-inl.h"
 
 #include "optimizing/artist/env/codelib_environment.h"
+#include "optimizing/artist/artist_log.h"
+
 
 namespace art {
 
@@ -506,11 +509,7 @@ void CompilerDriver::CompileAll(jobject class_loader,
       new ThreadPool("Compiler driver thread pool", thread_count_ - 1));
   VLOG(compiler) << "Before precompile " << GetMemoryUsageString(false);
   PreCompile(class_loader, dex_files, thread_pool.get(), timings);
-  // <PreInit all Environments>
-  CodeLibEnvironment& env = CodeLibEnvironment::GetInstance();
-  env.PreInitializeEnvironmentCodeLib(class_loader, this, dex_files);
-  VLOG(compiler) << "CodeLib available: " << env.IsCodeLibAvailable();
-  // </PreInit all Environments>
+
   Compile(class_loader, dex_files, thread_pool.get(), timings);
   if (dump_stats_) {
     stats_->Dump();

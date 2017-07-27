@@ -28,6 +28,12 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include <algorithm>
+#include <cstring>
+#include "optimizing/artist/artist_log.h"
+#include "optimizing/artist/modules/module_manager.h"
+#include "optimizing/artist/modules/trace/trace_module.h"
+#include "optimizing/artist/modules/logtimization/logtimization_module.h"
 
 #if defined(__linux__) && defined(__arm__)
 #include <sys/personality.h>
@@ -1377,6 +1383,23 @@ class Dex2Oat FINAL {
         VLOG(compiler) << "Below method threshold, compiling anyways";
       }
     }
+
+    /* artist setup and module management */
+
+    ArtistLog::SetupArtistLogging();
+
+    VLOG(artist) << "START ARTIST SETUP (dex2oat)";
+
+    ModuleManager* module_manager = ModuleManager::getInstance();
+
+    // TODO eventually the modules should register themselves, e.g., from their own .so
+    module_manager->registerModule("trace", new TraceModule());
+    module_manager->registerModule("logtimization", new LogtimizationModule());
+
+    // initialize modules
+    module_manager->initializeModules(dex_files_, class_loader_);
+
+    VLOG(artist) << "END ARTIST SETUP (dex2oat)";
 
     return true;
   }
