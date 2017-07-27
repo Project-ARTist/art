@@ -23,6 +23,7 @@
 #include <sstream>
 
 #include <stdint.h>
+#include "optimizing/artist/modules/module_manager.h"
 
 #include "android-base/strings.h"
 
@@ -98,13 +99,6 @@
 #include "ssa_phi_elimination.h"
 #include "utils/assembler.h"
 #include "verifier/verifier_compiler_binding.h"
-
-// Artist Includes ///////////////////////////////////////////
-#include "optimizing/artist/artist.h"
-#include "optimizing/artist/modules/generic/universal_artist.h"
-#include "optimizing/artist/modules/method-tracing/trace_artist.h"
-#include "optimizing/artist/modules/analyzer/logtimization.h"
-// Artist Includes End ///////////////////////////////////////
 
 namespace art {
 
@@ -800,12 +794,6 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
   CHAGuardOptimization* cha_guard = new (arena) CHAGuardOptimization(graph);
   CodeSinking* code_sinking = new (arena) CodeSinking(graph, stats);
 
-  // artist optimization passes //////////////////////////////////////////////
-  HUniversalArtist* universalArtist = new (arena) HUniversalArtist(graph, dex_compilation_unit, driver);
-  // HTraceArtist* traceLogging = new (arena) HTraceArtist(graph, dex_compilation_unit, driver);
-  // HLogtimization* logtimization = new (arena) HLogtimization(graph, dex_compilation_unit, driver);
-  // artist optimization passes //////////////////////////////////////////////
-
   HOptimization* optimizations1[] = {
     intrinsics,
     sharpening,
@@ -842,11 +830,31 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
     // can satisfy. For example, the code generator does not expect to see a
     // HTypeConversion from a type to the same type.
     simplify4,
-    universalArtist,
-    // traceLogging,
-    // logtimization
   };
-  RunOptimizations(optimizations2, arraysize(optimizations2), pass_observer);
+
+  // add ARTist modules
+  const ModuleManager* module_manager = ModuleManager::getInstance();
+  auto modules = module_manager->getModules();
+
+  vector<HArtist*> artistPasses;
+  artistPasses.reserve(modules.size());
+  for (auto it : modules) {
+    auto id = it.first;
+    auto module = it.second;
+    auto pass = module->createPass(graph, dex_compilation_unit);
+    pass->setDexfileEnvironment(module_manager->getDexFileEnvironment());
+    auto codelib_env = module_manager->getCodelibEnvironment(id);
+    pass->setCodeLibEnvironment(codelib_env);
+    artistPasses.push_back(pass);
+  }
+
+  vector<HOptimization*> optimizations2v(std::begin(optimizations2), std::end(optimizations2));
+  optimizations2v.insert(optimizations2v.end(), artistPasses.begin(), artistPasses.end());
+
+  // TODO DEBUG CHECK
+  CHECK(optimizations2v.size() == 12 + artistPasses.size());
+
+  RunOptimizations(&optimizations2v[0], optimizations2v.size(), pass_observer);
 
   RunArchOptimizations(driver->GetInstructionSet(), graph, codegen, pass_observer);
 }
