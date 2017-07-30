@@ -57,6 +57,7 @@ namespace mirror {
   class StackTraceElement;
 }  // namespace mirror
 
+class ClassHierarchyAnalysis;
 class ClassTable;
 template<class T> class Handle;
 class ImtConflictTable;
@@ -137,7 +138,7 @@ class ClassLinker {
   };
 
   explicit ClassLinker(InternTable* intern_table);
-  ~ClassLinker();
+  virtual ~ClassLinker();
 
   // Initialize class linker by bootstraping from dex files.
   bool InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> boot_class_path,
@@ -674,6 +675,10 @@ class ClassLinker {
   bool ValidateSuperClassDescriptors(Handle<mirror::Class> klass)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  ClassHierarchyAnalysis* GetClassHierarchyAnalysis() {
+    return cha_.get();
+  }
+
   struct DexCacheData {
     // Construct an invalid data object.
     DexCacheData()
@@ -702,6 +707,14 @@ class ClassLinker {
     ClassTable* class_table;
   };
 
+ protected:
+  virtual bool InitializeClass(Thread* self,
+                               Handle<mirror::Class> klass,
+                               bool can_run_clinit,
+                               bool can_init_parents)
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!Locks::dex_lock_);
+
  private:
   class LinkInterfaceMethodsHelper;
 
@@ -720,7 +733,7 @@ class ClassLinker {
       REQUIRES(!Locks::dex_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static void DeleteClassLoader(Thread* self, const ClassLoaderData& data)
+  void DeleteClassLoader(Thread* self, const ClassLoaderData& data)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void VisitClassesInternal(ClassVisitor* visitor)
@@ -891,12 +904,6 @@ class ClassLinker {
       REQUIRES(!Locks::dex_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  bool InitializeClass(Thread* self,
-                       Handle<mirror::Class> klass,
-                       bool can_run_clinit,
-                       bool can_init_parents)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!Locks::dex_lock_);
   bool InitializeDefaultInterfaceRecursive(Thread* self,
                                            Handle<mirror::Class> klass,
                                            bool can_run_clinit,
@@ -1252,6 +1259,8 @@ class ClassLinker {
 
   // Image pointer size.
   PointerSize image_pointer_size_;
+
+  std::unique_ptr<ClassHierarchyAnalysis> cha_;
 
   class FindVirtualMethodHolderVisitor;
 
