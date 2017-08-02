@@ -145,6 +145,10 @@ ClassLoaderContext::ExtractClassLoaderType(const std::string& class_loader_spec)
 // ClasspathElem is the path of dex/jar/apk file.
 bool ClassLoaderContext::Parse(const std::string& spec, bool parse_checksums) {
   if (spec.empty()) {
+    // By default we load the dex files in a PathClassLoader.
+    // So an empty spec is equivalent to an empty PathClassLoader (this happens when running
+    // tests)
+    class_loader_chain_.push_back(ClassLoaderInfo(kPathClassLoader));
     return true;
   }
 
@@ -265,11 +269,15 @@ std::string ClassLoaderContext::EncodeContextForOatFile(const std::string& base_
     return OatFile::kSpecialSharedLibrary;
   }
 
-  if (class_loader_chain_.empty()) {
-    return "";
-  }
-
   std::ostringstream out;
+  if (class_loader_chain_.empty()) {
+    // We can get in this situation if the context was created with a class path containing the
+    // source dex files which were later removed (happens during run-tests).
+    out << GetClassLoaderTypeName(kPathClassLoader)
+        << kClassLoaderOpeningMark
+        << kClassLoaderClosingMark;
+    return out.str();
+  }
 
   for (size_t i = 0; i < class_loader_chain_.size(); i++) {
     const ClassLoaderInfo& info = class_loader_chain_[i];
@@ -599,7 +607,8 @@ bool ClassLoaderContext::VerifyClassLoaderContextMatch(const std::string& contex
   if (expected_context.class_loader_chain_.size() != class_loader_chain_.size()) {
     LOG(WARNING) << "ClassLoaderContext size mismatch. expected="
         << expected_context.class_loader_chain_.size()
-        << ", actual=" << class_loader_chain_.size();
+        << ", actual=" << class_loader_chain_.size()
+        << " (" << context_spec << " | " << EncodeContextForOatFile("") << ")";
     return false;
   }
 
@@ -609,13 +618,15 @@ bool ClassLoaderContext::VerifyClassLoaderContextMatch(const std::string& contex
     if (info.type != expected_info.type) {
       LOG(WARNING) << "ClassLoaderContext type mismatch for position " << i
           << ". expected=" << GetClassLoaderTypeName(expected_info.type)
-          << ", found=" << GetClassLoaderTypeName(info.type);
+          << ", found=" << GetClassLoaderTypeName(info.type)
+          << " (" << context_spec << " | " << EncodeContextForOatFile("") << ")";
       return false;
     }
     if (info.classpath.size() != expected_info.classpath.size()) {
       LOG(WARNING) << "ClassLoaderContext classpath size mismatch for position " << i
             << ". expected=" << expected_info.classpath.size()
-            << ", found=" << info.classpath.size();
+            << ", found=" << info.classpath.size()
+            << " (" << context_spec << " | " << EncodeContextForOatFile("") << ")";
       return false;
     }
 
@@ -626,13 +637,15 @@ bool ClassLoaderContext::VerifyClassLoaderContextMatch(const std::string& contex
       if (info.classpath[k] != expected_info.classpath[k]) {
         LOG(WARNING) << "ClassLoaderContext classpath element mismatch for position " << i
             << ". expected=" << expected_info.classpath[k]
-            << ", found=" << info.classpath[k];
+            << ", found=" << info.classpath[k]
+            << " (" << context_spec << " | " << EncodeContextForOatFile("") << ")";
         return false;
       }
       if (info.checksums[k] != expected_info.checksums[k]) {
         LOG(WARNING) << "ClassLoaderContext classpath element checksum mismatch for position " << i
             << ". expected=" << expected_info.checksums[k]
-            << ", found=" << info.checksums[k];
+            << ", found=" << info.checksums[k]
+            << " (" << context_spec << " | " << EncodeContextForOatFile("") << ")";
         return false;
       }
     }
