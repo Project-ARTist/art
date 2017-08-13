@@ -411,17 +411,17 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("");
   UsageError("  --class-loader-context=<string spec>: a string specifying the intended");
   UsageError("      runtime loading context for the compiled dex files.");
-  UsageError("      ");
+  UsageError("");
   UsageError("      It describes how the class loader chain should be built in order to ensure");
   UsageError("      classes are resolved during dex2aot as they would be resolved at runtime.");
   UsageError("      This spec will be encoded in the oat file. If at runtime the dex file is");
   UsageError("      loaded in a different context, the oat file will be rejected.");
-  UsageError("      ");
+  UsageError("");
   UsageError("      The chain is interpreted in the natural 'parent order', meaning that class");
   UsageError("      loader 'i+1' will be the parent of class loader 'i'.");
   UsageError("      The compilation sources will be appended to the classpath of the first class");
   UsageError("      loader.");
-  UsageError("      ");
+  UsageError("");
   UsageError("      E.g. if the context is 'PCL[lib1.dex];DLC[lib2.dex]' and ");
   UsageError("      --dex-file=src.dex then dex2oat will setup a PathClassLoader with classpath ");
   UsageError("      'lib1.dex:src.dex' and set its parent to a DelegateLastClassLoader with ");
@@ -431,8 +431,11 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      with --dex-file are found in the classpath. The source dex files will be");
   UsageError("      removed from any class loader's classpath possibly resulting in empty");
   UsageError("      class loaders.");
-  UsageError("      ");
+  UsageError("");
   UsageError("      Example: --class-loader-context=PCL[lib1.dex:lib2.dex];DLC[lib3.dex]");
+  UsageError("");
+  UsageError("  --dirty-image-objects=<directory-path>: list of known dirty objects in the image.");
+  UsageError("      The image writer will group them together.");
   UsageError("");
   std::cerr << "See log for usage error information\n";
   exit(EXIT_FAILURE);
@@ -596,6 +599,7 @@ class Dex2Oat FINAL {
       compiled_methods_zip_filename_(nullptr),
       compiled_methods_filename_(nullptr),
       passes_to_run_filename_(nullptr),
+      dirty_image_objects_filename_(nullptr),
       multi_image_(false),
       is_host_(false),
       elf_writers_(),
@@ -1315,6 +1319,8 @@ class Dex2Oat FINAL {
         if (class_loader_context_ == nullptr) {
           Usage("Option --class-loader-context has an incorrect format: %s", option.data());
         }
+      } else if (option.starts_with("--dirty-image-objects=")) {
+        dirty_image_objects_filename_ = option.substr(strlen("--dirty-image-objects=")).data();
       } else if (!compiler_options_->ParseCompilerOption(option, Usage)) {
         Usage("Unknown argument %s", option.data());
       }
@@ -1516,7 +1522,8 @@ class Dex2Oat FINAL {
   dex2oat::ReturnCode Setup() {
     TimingLogger::ScopedTiming t("dex2oat Setup", timings_);
 
-    if (!PrepareImageClasses() || !PrepareCompiledClasses() || !PrepareCompiledMethods()) {
+    if (!PrepareImageClasses() || !PrepareCompiledClasses() || !PrepareCompiledMethods() ||
+        !PrepareDirtyObjects()) {
       return dex2oat::ReturnCode::kOther;
     }
 
@@ -1769,13 +1776,11 @@ class Dex2Oat FINAL {
   bool ShouldCompileDexFilesIndividually() const {
     // Compile individually if we are not building an image, not using any compilation, and are
     // using multidex.
-    // This means extract, verify, and quicken will use the individual compilation mode (to reduce
+    // This means extract, verify, and quicken, will use the individual compilation mode (to reduce
     // RAM used by the compiler).
-    // TODO: Still do it for app images to get testing coverage. Note that this will generate empty
-    // app images.
     return !IsImage() &&
         dex_files_.size() > 1 &&
-        !CompilerFilter::IsAnyCompilationEnabled(compiler_options_->GetCompilerFilter());
+        !CompilerFilter::IsAotCompilationEnabled(compiler_options_->GetCompilerFilter());
   }
 
   // Set up and create the compiler driver and then invoke it to compile all the dex files.
@@ -1851,6 +1856,16 @@ class Dex2Oat FINAL {
                                      profile_compilation_info_.get()));
     driver_->SetDexFilesForOatFile(dex_files_);
 
+    const bool compile_individually = ShouldCompileDexFilesIndividually();
+    if (compile_individually) {
+      // Set the compiler driver in the callbacks so that we can avoid re-verification. This not
+      // only helps performance but also prevents reverifying quickened bytecodes. Attempting
+      // verify quickened bytecode causes verification failures.
+      // Only set the compiler filter if we are doing separate compilation since there is a bit
+      // of overhead when checking if a class was previously verified.
+      callbacks_->SetDoesClassUnloading(true, driver_.get());
+    }
+
     // Setup vdex for compilation.
     if (!DoEagerUnquickeningOfVdex() && input_vdex_file_ != nullptr) {
       callbacks_->SetVerifierDeps(
@@ -1867,7 +1882,7 @@ class Dex2Oat FINAL {
       callbacks_->SetVerifierDeps(new verifier::VerifierDeps(dex_files_));
     }
     // Invoke the compilation.
-    if (ShouldCompileDexFilesIndividually()) {
+    if (compile_individually) {
       CompileDexFilesIndividually();
       // Return a null classloader since we already freed released it.
       return nullptr;
@@ -2004,7 +2019,8 @@ class Dex2Oat FINAL {
                                           IsAppImage(),
                                           image_storage_mode_,
                                           oat_filenames_,
-                                          dex_file_oat_index_map_));
+                                          dex_file_oat_index_map_,
+                                          dirty_image_objects_.get()));
 
       // We need to prepare method offsets in the image address space for direct method patching.
       TimingLogger::ScopedTiming t2("dex2oat Prepare image address space", timings_);
@@ -2430,6 +2446,22 @@ class Dex2Oat FINAL {
     return true;
   }
 
+  bool PrepareDirtyObjects() {
+    if (dirty_image_objects_filename_ != nullptr) {
+      dirty_image_objects_.reset(ReadCommentedInputFromFile<std::unordered_set<std::string>>(
+          dirty_image_objects_filename_,
+          nullptr));
+      if (dirty_image_objects_ == nullptr) {
+        LOG(ERROR) << "Failed to create list of dirty objects from '"
+            << dirty_image_objects_filename_ << "'";
+        return false;
+      }
+    } else {
+      dirty_image_objects_.reset(nullptr);
+    }
+    return true;
+  }
+
   void PruneNonExistentDexFiles() {
     DCHECK_EQ(dex_filenames_.size(), dex_locations_.size());
     size_t kept = 0u;
@@ -2846,9 +2878,11 @@ class Dex2Oat FINAL {
   const char* compiled_methods_zip_filename_;
   const char* compiled_methods_filename_;
   const char* passes_to_run_filename_;
+  const char* dirty_image_objects_filename_;
   std::unique_ptr<std::unordered_set<std::string>> image_classes_;
   std::unique_ptr<std::unordered_set<std::string>> compiled_classes_;
   std::unique_ptr<std::unordered_set<std::string>> compiled_methods_;
+  std::unique_ptr<std::unordered_set<std::string>> dirty_image_objects_;
   std::unique_ptr<std::vector<std::string>> passes_to_run_;
   bool multi_image_;
   bool is_host_;
@@ -2941,6 +2975,8 @@ class ScopedGlobalRef {
 
 static dex2oat::ReturnCode CompileImage(Dex2Oat& dex2oat) {
   dex2oat.LoadClassProfileDescriptors();
+  // Keep the class loader that was used for compilation live for the rest of the compilation
+  // process.
   ScopedGlobalRef class_loader(dex2oat.Compile());
 
   if (!dex2oat.WriteOutputFiles()) {
@@ -2989,6 +3025,8 @@ static dex2oat::ReturnCode CompileImage(Dex2Oat& dex2oat) {
 }
 
 static dex2oat::ReturnCode CompileApp(Dex2Oat& dex2oat) {
+  // Keep the class loader that was used for compilation live for the rest of the compilation
+  // process.
   ScopedGlobalRef class_loader(dex2oat.Compile());
 
   if (!dex2oat.WriteOutputFiles()) {
