@@ -801,7 +801,14 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
     simplify1,
     dce1,
   };
-  RunOptimizations(optimizations1, arraysize(optimizations1), pass_observer);
+
+  auto num_opts = arraysize(optimizations1);
+
+  VLOG(artist) << "Optimizing Compiler: executing " << num_opts << " optimizations.";
+
+  RunOptimizations(optimizations1, num_opts, pass_observer);
+
+  VLOG(artistd) << "Optimizing Compiler: finished optimizations.";
 
   MaybeRunInliner(graph, codegen, driver, dex_compilation_unit, pass_observer, handles);
 
@@ -832,12 +839,21 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
     simplify4,
   };
 
+  num_opts = arraysize(optimizations2);
+
+  VLOG(artist) << "Optimizing Compiler: executing " << num_opts << " optimizations.";
+
+  RunOptimizations(optimizations2, num_opts, pass_observer);
+
+  VLOG(artistd) << "Optimizing Compiler: finished optimizations.";
+
+
   // add ARTist modules
   const ModuleManager* module_manager = ModuleManager::getInstance();
   auto modules = module_manager->getModules();
 
-  vector<HArtist*> artistPasses;
-  artistPasses.reserve(modules.size());
+  vector<HArtist*> artist_passes;
+  artist_passes.reserve(modules.size());
   for (auto it : modules) {
     auto id = it.first;
     auto module = it.second;
@@ -845,16 +861,20 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
     pass->setDexfileEnvironment(module_manager->getDexFileEnvironment());
     auto codelib_env = module_manager->getCodelibEnvironment(id);
     pass->setCodeLibEnvironment(codelib_env);
-    artistPasses.push_back(pass);
+    artist_passes.push_back(pass);
   }
 
-  vector<HOptimization*> optimizations2v(std::begin(optimizations2), std::end(optimizations2));
-  optimizations2v.insert(optimizations2v.end(), artistPasses.begin(), artistPasses.end());
+  auto num_artist_opts = artist_passes.size();
 
-  // TODO DEBUG CHECK
-  CHECK(optimizations2v.size() == 12 + artistPasses.size());
+  if (num_artist_opts > 0) {
+    VLOG(artist) << "Optimizing Compiler: running " << num_artist_opts << " artist passes";
 
-  RunOptimizations(&optimizations2v[0], optimizations2v.size(), pass_observer);
+    RunOptimizations(reinterpret_cast<HOptimization**>(&artist_passes[0]), num_artist_opts, pass_observer);
+
+    VLOG(artistd) << "Optimizing Compiler: finished artist passes";
+  } else {
+    VLOG(artist) << "Optimizing Compiler: Skipping artist optimizations: No modules available.";
+  };
 
   RunArchOptimizations(driver->GetInstructionSet(), graph, codegen, pass_observer);
 }
