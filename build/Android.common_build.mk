@@ -216,6 +216,7 @@ ART_C_INCLUDES := \
 ART_C_INCLUDES += bionic/libc/private
 
 # Base set of cflags used by all things ART.
+# ARTIST CHANGE: removed -Wshadow b/c of compilation error in dependency
 art_cflags := \
   -fno-rtti \
   -std=gnu++11 \
@@ -227,7 +228,6 @@ art_cflags := \
   -fstrict-aliasing \
   -Wunreachable-code \
   -Wredundant-decls \
-  -Wshadow \
   -Wunused \
   -fvisibility=protected \
   $(art_default_gc_type_cflags)
