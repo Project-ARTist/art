@@ -67,12 +67,18 @@ template<typename T> ART_FRIEND_TEST(test_set_name, individual_test)
   TypeName() = delete;  \
   DISALLOW_COPY_AND_ASSIGN(TypeName)
 
+// ARTist change: deactivated DISALLOW_ALLOCATION for the time being (problems with module instantiation)
+// TODO: find a way to properly instantiate WITHOUT deactivating this (remove this quick-fix)
+
 // A macro to disallow new and delete operators for a class. It goes in the private: declarations.
-#define DISALLOW_ALLOCATION() \
+/*#define DISALLOW_ALLOCATION() \
   public: \
     NO_RETURN ALWAYS_INLINE void operator delete(void*, size_t) { UNREACHABLE(); } \
   private: \
     void* operator new(size_t) = delete
+*/
+#define DISALLOW_ALLOCATION()
+
 
 // The arraysize(arr) macro returns the # of elements in an array arr.
 // The expression is a compile-time constant, and therefore can be

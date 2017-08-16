@@ -1105,7 +1105,7 @@ set(SOURCE_FILES
     compiler/optimizing/artist/modules/trace/trace_module.cc
     compiler/optimizing/artist/modules/trace/trace_module.h
     compiler/optimizing/artist/modules/logtimization/logtimization_module.cc
-    compiler/optimizing/artist/modules/logtimization/logtimization_module.h compiler/optimizing/artist/env/dexfile_environment.cc compiler/optimizing/artist/env/dexfile_environment.h compiler/optimizing/artist/env/codelib_symbols.cc compiler/optimizing/artist/env/codelib_symbols.h compiler/optimizing/artist/artist_typedefs.h)
+    compiler/optimizing/artist/modules/logtimization/logtimization_module.h compiler/optimizing/artist/env/dexfile_environment.cc compiler/optimizing/artist/env/dexfile_environment.h compiler/optimizing/artist/env/codelib_symbols.cc compiler/optimizing/artist/env/codelib_symbols.h compiler/optimizing/artist/artist_typedefs.h compiler/optimizing/artist/error_handler.cc compiler/optimizing/artist/error_handler.h)
 
 
 find_package(JNI)
