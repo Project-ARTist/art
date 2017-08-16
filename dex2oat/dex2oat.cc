@@ -1383,24 +1383,6 @@ class Dex2Oat FINAL {
         VLOG(compiler) << "Below method threshold, compiling anyways";
       }
     }
-
-    /* artist setup and module management */
-
-    ArtistLog::SetupArtistLogging();
-
-    VLOG(artist) << "START ARTIST SETUP (dex2oat)";
-
-    ModuleManager* module_manager = ModuleManager::getInstance();
-
-    // TODO eventually the modules should register themselves, e.g., from their own .so
-    module_manager->registerModule("trace", new TraceModule());
-    module_manager->registerModule("logtimization", new LogtimizationModule());
-
-    // initialize modules
-    module_manager->initializeModules(dex_files_, class_loader_);
-
-    VLOG(artist) << "END ARTIST SETUP (dex2oat)";
-
     return true;
   }
 
@@ -1431,6 +1413,24 @@ class Dex2Oat FINAL {
       class_path_files.insert(class_path_files.end(), dex_files_.begin(), dex_files_.end());
 
       class_loader = class_linker->CreatePathClassLoader(self, class_path_files);
+
+
+      /* artist setup and module management */
+
+      ArtistLog::SetupArtistLogging();
+
+      VLOG(artist) << "START ARTIST SETUP (dex2oat)";
+
+      ModuleManager* module_manager = ModuleManager::getInstance();
+
+      // TODO eventually the modules should register themselves, e.g., from their own .so
+      module_manager->registerModule("trace", new TraceModule());
+      module_manager->registerModule("logtimization", new LogtimizationModule());
+
+      // initialize modules
+      module_manager->initializeModules(dex_files_, class_loader);
+
+      VLOG(artist) << "END ARTIST SETUP (dex2oat)";
     }
 
     driver_ = new CompilerDriver(compiler_options_.get(),
