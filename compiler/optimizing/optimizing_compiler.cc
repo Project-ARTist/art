@@ -379,17 +379,17 @@ static void RunOptimizations(HGraph* graph,
 
 
   // add ARTist modules
-  const ModuleManager* module_manager = ModuleManager::getInstance();
-  auto modules = module_manager->getModules();
+  const ModuleManager& module_manager = ModuleManager::getInstance();
+  auto modules = module_manager.getModules();
 
-  vector<HArtist*> artist_passes;
+  vector<shared_ptr<HArtist>> artist_passes;
   artist_passes.reserve(modules.size());
   for (auto it : modules) {
     auto id = it.first;
     auto module = it.second;
     auto pass = module->createPass(graph, dex_compilation_unit);
-    pass->setDexfileEnvironment(module_manager->getDexFileEnvironment());
-    auto codelib_env = module_manager->getCodelibEnvironment(id);
+    pass->setDexfileEnvironment(module_manager.getDexFileEnvironment());
+    auto codelib_env = module_manager.getCodelibEnvironment(id);
     pass->setCodeLibEnvironment(codelib_env);
     artist_passes.push_back(pass);
   }
@@ -399,7 +399,14 @@ static void RunOptimizations(HGraph* graph,
   if (num_artist_opts > 0) {
     VLOG(artist) << "Optimizing Compiler: running " << num_artist_opts << " artist passes";
 
-    RunOptimizations(reinterpret_cast<HOptimization**>(&artist_passes[0]), num_artist_opts, pass_info_printer);
+    vector<HOptimization*> artist_passes_transformed(artist_passes.size());
+
+    std::transform(artist_passes.begin(), artist_passes.end(), artist_passes_transformed.begin(),
+                   [](const shared_ptr<HArtist> in) {
+                     return in.get();
+                   });
+
+    RunOptimizations(&artist_passes_transformed[0], num_artist_opts, pass_info_printer);
 
     VLOG(artistd) << "Optimizing Compiler: finished artist passes";
   } else {
