@@ -158,6 +158,7 @@ set(SOURCE_FILES
     compiler/optimizing/artist/injection/byte.h
     compiler/optimizing/artist/injection/short.h
     compiler/optimizing/artist/injection/char.h
+    compiler/optimizing/artist/injection/double.h
     compiler/optimizing/artist/injection/float.h
     compiler/optimizing/artist/injection/injection.cc
     compiler/optimizing/artist/injection/injection.h

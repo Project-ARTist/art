@@ -1783,14 +1783,14 @@ class Dex2Oat FINAL {
 
     VLOG(artist) << "START ARTIST SETUP (dex2oat)";
 
-    ModuleManager* module_manager = ModuleManager::getInstance();
+    ModuleManager& module_manager = ModuleManager::getInstance();
 
     // TODO eventually the modules should register themselves, e.g., from their own .so
-    module_manager->registerModule("trace", new TraceModule());
-    module_manager->registerModule("logtimization", new LogtimizationModule());
+    module_manager.registerModule("trace", make_shared<TraceModule>());
+    module_manager.registerModule("logtimization", make_shared<LogtimizationModule>());
 
     // initialize modules
-    module_manager->initializeModules(dex_files_, class_loader_);
+    module_manager.initializeModules(dex_files_, class_loader_);
 
     VLOG(artist) << "END ARTIST SETUP (dex2oat)";
 
