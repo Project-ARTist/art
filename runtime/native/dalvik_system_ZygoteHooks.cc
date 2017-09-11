@@ -31,6 +31,8 @@
 #include "nativehelper/JNIHelp.h"
 #include "nativehelper/ScopedUtfChars.h"
 #include "non_debuggable_classes.h"
+#include "oat_file.h"
+#include "oat_file_manager.h"
 #include "scoped_thread_state_change-inl.h"
 #include "stack.h"
 #include "thread-current-inl.h"
@@ -154,20 +156,22 @@ static void CollectNonDebuggableClasses() REQUIRES(!Locks::mutator_lock_) {
   }
 }
 
-static void EnableDebugFeatures(uint32_t debug_flags) {
-  // Must match values in com.android.internal.os.Zygote.
-  enum {
-    DEBUG_ENABLE_JDWP               = 1,
-    DEBUG_ENABLE_CHECKJNI           = 1 << 1,
-    DEBUG_ENABLE_ASSERT             = 1 << 2,
-    DEBUG_ENABLE_SAFEMODE           = 1 << 3,
-    DEBUG_ENABLE_JNI_LOGGING        = 1 << 4,
-    DEBUG_GENERATE_DEBUG_INFO       = 1 << 5,
-    DEBUG_ALWAYS_JIT                = 1 << 6,
-    DEBUG_NATIVE_DEBUGGABLE         = 1 << 7,
-    DEBUG_JAVA_DEBUGGABLE           = 1 << 8,
-  };
+// Must match values in com.android.internal.os.Zygote.
+enum {
+  DEBUG_ENABLE_JDWP               = 1,
+  DEBUG_ENABLE_CHECKJNI           = 1 << 1,
+  DEBUG_ENABLE_ASSERT             = 1 << 2,
+  DEBUG_ENABLE_SAFEMODE           = 1 << 3,
+  DEBUG_ENABLE_JNI_LOGGING        = 1 << 4,
+  DEBUG_GENERATE_DEBUG_INFO       = 1 << 5,
+  DEBUG_ALWAYS_JIT                = 1 << 6,
+  DEBUG_NATIVE_DEBUGGABLE         = 1 << 7,
+  DEBUG_JAVA_DEBUGGABLE           = 1 << 8,
+  DISABLE_VERIFIER                = 1 << 9,
+  ONLY_USE_SYSTEM_OAT_FILES       = 1 << 10,
+};
 
+static void EnableDebugFeatures(uint32_t debug_flags) {
   Runtime* const runtime = Runtime::Current();
   if ((debug_flags & DEBUG_ENABLE_CHECKJNI) != 0) {
     JavaVMExt* vm = runtime->GetJavaVM();
@@ -260,13 +264,21 @@ static jlong ZygoteHooks_nativePreFork(JNIEnv* env, jclass) {
 static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
                                             jclass,
                                             jlong token,
-                                            jint debug_flags,
+                                            jint flags,
                                             jboolean is_system_server,
                                             jstring instruction_set) {
   Thread* thread = reinterpret_cast<Thread*>(token);
   // Our system thread ID, etc, has changed so reset Thread state.
   thread->InitAfterFork();
-  EnableDebugFeatures(debug_flags);
+  EnableDebugFeatures(flags);
+
+  if ((flags & DISABLE_VERIFIER) != 0) {
+    Runtime::Current()->DisableVerifier();
+  }
+
+  if ((flags & ONLY_USE_SYSTEM_OAT_FILES) != 0) {
+    Runtime::Current()->GetOatFileManager().SetOnlyUseSystemOatFiles();
+  }
 
   // Update tracing.
   if (Trace::GetMethodTracingMode() != TracingMode::kTracingInactive) {
