@@ -2289,10 +2289,6 @@ void Runtime::FixupConflictTables() {
   }
 }
 
-void Runtime::DisableVerifier() {
-  verify_ = verifier::VerifyMode::kNone;
-}
-
 bool Runtime::IsVerificationEnabled() const {
   return verify_ == verifier::VerifyMode::kEnable ||
       verify_ == verifier::VerifyMode::kSoftFail;

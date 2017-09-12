@@ -508,7 +508,6 @@ class Runtime {
     return !implicit_so_checks_;
   }
 
-  void DisableVerifier();
   bool IsVerificationEnabled() const;
   bool IsVerificationSoftFail() const;
 
