@@ -32,7 +32,9 @@ art_global_defaults {
         "-fstrict-aliasing",
         "-Wunreachable-code",
         "-Wredundant-decls",
-        "-Wshadow",
+        // ARTIST CHANGE: removed -Wshadow b/c of compilation error in dependency
+        // "-Wshadow",
+        "-DBUILD_NOUGAT",
         "-Wunused",
         "-fvisibility=protected",
 

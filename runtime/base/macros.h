@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2010 The Android Open Source Project
  *
+ * Changes Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -37,14 +39,18 @@ template<typename T> ART_FRIEND_TEST(test_set_name, individual_test)
 
 // A macro to disallow new and delete operators for a class. It goes in the private: declarations.
 // NOTE: Providing placement new (and matching delete) for constructing container elements.
-#define DISALLOW_ALLOCATION() \
-  public: \
-    NO_RETURN ALWAYS_INLINE void operator delete(void*, size_t) { UNREACHABLE(); } \
-    ALWAYS_INLINE void* operator new(size_t, void* ptr) noexcept { return ptr; } \
-    ALWAYS_INLINE void operator delete(void*, void*) noexcept { } \
-  private: \
-    void* operator new(size_t) = delete  // NOLINT
-
+// <ARTist change>
+//   deactivated DISALLOW_ALLOCATION for the time being (problems with module instantiation)
+// TODO: find a way to properly instantiate WITHOUT deactivating this (remove this quick-fix)
+//#define DISALLOW_ALLOCATION() \
+//  public: \
+//    NO_RETURN ALWAYS_INLINE void operator delete(void*, size_t) { UNREACHABLE(); } \
+//    ALWAYS_INLINE void* operator new(size_t, void* ptr) noexcept { return ptr; } \
+//    ALWAYS_INLINE void operator delete(void*, void*) noexcept { } \
+//  private: \
+//    void* operator new(size_t) = delete  // NOLINT
+#define DISALLOW_ALLOCATION()
+// </ARTist change>
 #define SIZEOF_MEMBER(t, f) sizeof((reinterpret_cast<t*>(4096))->f)  // NOLINT
 
 #define OFFSETOF_MEMBER(t, f) \

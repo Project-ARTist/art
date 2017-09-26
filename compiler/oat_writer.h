@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2011 The Android Open Source Project
  *
+ * Changes Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -113,7 +115,7 @@ class OatWriter {
     kDefault = kCreate
   };
 
-  OatWriter(bool compiling_boot_image, TimingLogger* timings, ProfileCompilationInfo* info);
+  OatWriter(bool compiling_boot_image, TimingLogger* timings, ProfileCompilationInfo* info, std::vector<const char*>* dex_locations = nullptr);
 
   // To produce a valid oat file, the user must first add sources with any combination of
   //   - AddDexFileSource(),
@@ -310,6 +312,7 @@ class OatWriter {
 
   bool RecordOatDataOffset(OutputStream* out);
   bool ReadDexFileHeader(File* oat_file, OatDexFile* oat_dex_file);
+  bool RewriteLocationChecksum();
   bool ValidateDexFileHeader(const uint8_t* raw_header, const char* location);
   bool WriteOatDexFiles(OutputStream* oat_rodata);
   bool WriteTypeLookupTables(OutputStream* oat_rodata,
@@ -333,6 +336,7 @@ class OatWriter {
   std::vector<std::unique_ptr<File>> raw_dex_files_;
   std::vector<std::unique_ptr<ZipArchive>> zip_archives_;
   std::vector<std::unique_ptr<ZipEntry>> zipped_dex_files_;
+  std::vector<const char*>* dex_locations_;
 
   // Using std::list<> which doesn't move elements around on push/emplace_back().
   // We need this because we keep plain pointers to the strings' c_str().

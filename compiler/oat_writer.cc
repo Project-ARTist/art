@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2011 The Android Open Source Project
  *
+ * Changes Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -283,6 +285,7 @@ OatWriter::OatWriter(bool compiling_boot_image, TimingLogger* timings, ProfileCo
     raw_dex_files_(),
     zip_archives_(),
     zipped_dex_files_(),
+    dex_locations_(dex_locations),
     zipped_dex_file_locations_(),
     compiler_driver_(nullptr),
     image_writer_(nullptr),
@@ -2694,6 +2697,18 @@ bool OatWriter::WriteDexFile(OutputStream* out,
   return true;
 }
 
+bool OatWriter::RewriteLocationChecksum() {
+  // const bool rewrite_location_checksum = GetCompilerDriver()->GetCompilerOptions().GetRewriteLocationChecksum();
+  if (dex_locations_ != nullptr
+      && dex_locations_->size() > 0) {
+    VLOG(artistd) << "RewriteLocationChecksum() true";
+    return true;
+  } else {
+    VLOG(artistd) << "RewriteLocationChecksum() false";
+    return false;
+  }
+}
+
 bool OatWriter::WriteOatDexFiles(OutputStream* rodata) {
   TimingLogger::ScopedTiming split("WriteOatDexFiles", timings_);
 
@@ -2701,6 +2716,16 @@ bool OatWriter::WriteOatDexFiles(OutputStream* rodata) {
   if (initial_offset == static_cast<off_t>(-1)) {
     LOG(ERROR) << "Failed to get current position in " << rodata->GetLocation();
     return false;
+  }
+
+  VLOG(artistd) << "WriteOatDexFiles()";
+  VLOG(artistd) << "WriteOatDexFiles() " << reinterpret_cast<const void*>(GetCompilerDriver()) << std::flush;
+
+  VLOG(artist) << "WriteOatDexFiles() BootImage: " << this->compiling_boot_image_;
+  if (dex_locations_ != nullptr) {
+    VLOG(artist) << "WriteOatDexFiles() BootImage: " << this->dex_locations_->size();
+  } else {
+    VLOG(artist) << "WriteOatDexFiles() BootImage: 0";
   }
 
   // Seek to the start of OatDexFiles, i.e. to the end of the OatHeader.  If there are
@@ -2715,11 +2740,52 @@ bool OatWriter::WriteOatDexFiles(OutputStream* rodata) {
     return false;
   }
 
+  // Probe Dex Checksums
+  std::vector<uint32_t> dex_checksums;
+  if (RewriteLocationChecksum()) {
+    VLOG(artist) << "Rewriting DexLocation Checksum";
+    std::vector<std::unique_ptr<const DexFile>> temp_dex_files;
+    for (auto && dexLoc : *dex_locations_) {
+      VLOG(artistd) << "WriteOatDexFiles() DexLocation: " << dexLoc;
+      std::string openErrors;
+      bool openSuccess = DexFile::Open(dexLoc, dexLoc, &openErrors, &temp_dex_files);
+      if (openSuccess) {
+        VLOG(artistd) << "WriteOatDexFiles() DexLocation: " << dexLoc << " SUCCESS! [Files: " << temp_dex_files.size() << "]";
+      } else {
+        VLOG(artist) << "WriteOatDexFiles() DexLocation: " << dexLoc << " FAILED: " << openErrors;
+      }
+    }
+    for (auto && tmpDexFile : temp_dex_files) {
+      const DexFile* dexPointer = tmpDexFile.get();
+      VLOG(artist) << "WriteOatDexFiles() DexFile Location: " << dexPointer->GetLocation() << " ["
+                   << std::hex << dexPointer->GetLocationChecksum() << "]";
+      dex_checksums.push_back(dexPointer->GetLocationChecksum());
+      tmpDexFile.release();
+    }
+  }
+  // /Probe Dex Checksums
+
   for (size_t i = 0, size = oat_dex_files_.size(); i != size; ++i) {
     OatDexFile* oat_dex_file = &oat_dex_files_[i];
 
     DCHECK_EQ(oat_data_offset_ + oat_dex_file->offset_,
               static_cast<size_t>(rodata->Seek(0, kSeekCurrent)));
+
+    // Rewrite Dex Checksums
+    if (RewriteLocationChecksum()) {
+      VLOG(artist) << "Rewriting DexLocation Checksum";
+      VLOG(artist) << "WriteOatDexFiles() Rewrite DexLocationChecksum old: " << std::hex
+                   << oat_dex_file->dex_file_location_checksum_;
+
+      if (i < dex_checksums.size()) {
+        oat_dex_file->dex_file_location_checksum_ = dex_checksums.at(i);
+      } else {
+        oat_dex_file->dex_file_location_checksum_ = dex_checksums.back();
+      }
+      VLOG(artist) << "WriteOatDexFiles() Rewrite DexLocationChecksum new: " << std::hex
+                   << oat_dex_file->dex_file_location_checksum_;
+    }
+    // /Rewrite Dex Checksums
 
     // Write OatDexFile.
     if (!oat_dex_file->Write(this, rodata)) {
@@ -2734,7 +2800,7 @@ bool OatWriter::WriteOatDexFiles(OutputStream* rodata) {
                 << " Expected: " << initial_offset << " File: " << rodata->GetLocation();
     return false;
   }
-
+  VLOG(artistd) << "WriteOatDexFiles() DONE";
   return true;
 }
 

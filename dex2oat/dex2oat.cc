@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2011 The Android Open Source Project
  *
+ * Changes Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -86,6 +88,13 @@
 #include "verifier/verifier_deps.h"
 #include "well_known_classes.h"
 #include "zip_archive.h"
+
+#include <algorithm>
+#include <cstring>
+#include "optimizing/artist/artist_log.h"
+#include "optimizing/artist/modules/module_manager.h"
+#include "optimizing/artist/modules/trace/trace_module.h"
+#include "optimizing/artist/modules/logtimization/logtimization_module.h"
 
 namespace art {
 
@@ -268,6 +277,10 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      Default: default");
   UsageError("");
   UsageError("  --compile-pic: Force indirect use of code, methods, and classes");
+  UsageError("      Default: disabled");
+  UsageError("");
+  UsageError("  --checksum-rewriting: Force dex2oat to write a fake location checksum (write the original");
+  UsageError("      checksum instead of the correct location checksum of the modified APK file)");
   UsageError("      Default: disabled");
   UsageError("");
   UsageError("  --compiler-backend=(Quick|Optimizing): select compiler backend");
@@ -549,6 +562,7 @@ class Dex2Oat FINAL {
       rodata_(),
       image_writer_(nullptr),
       driver_(nullptr),
+      rewrite_dex_location_checksums_(false),
       opened_dex_files_maps_(),
       opened_dex_files_(),
       no_inline_from_dex_files_(),
@@ -1248,6 +1262,8 @@ class Dex2Oat FINAL {
         force_determinism_ = true;
       } else if (option.starts_with("--classpath-dir=")) {
         classpath_dir_ = option.substr(strlen("--classpath-dir=")).data();
+      } else if (option == "--checksum-rewriting") {
+        rewrite_dex_location_checksums_ = true;
       } else if (!compiler_options_->ParseCompilerOption(option, Usage)) {
         Usage("Unknown argument %s", option.data());
       }
@@ -1476,6 +1492,21 @@ class Dex2Oat FINAL {
       return dex2oat::ReturnCode::kOther;
     }
 
+    if (dex_locations_.size() == dex_filenames_.size()) {
+      for (uint32_t i = 0; i < dex_locations_.size(); i++) {
+        VLOG(artist) << "DexLocation: " << dex_locations_.at(i) << " <> " << dex_filenames_.at(i);
+        if (rewrite_dex_location_checksums_) {
+          if (strcmp(dex_locations_.at(i), dex_filenames_.at(i)) != 0) {
+            VLOG(artist) << "> Rewriting Dex LocationChecksum";
+            rewrite_dex_location_checksums_ = true;
+          } else {
+            VLOG(artist) << "> NOT Rewriting Dex LocationChecksum";
+          }
+          break;
+        }
+      }
+    }
+
     CreateOatWriters();
     if (!AddDexFileSources()) {
       return dex2oat::ReturnCode::kOther;
@@ -1673,6 +1704,23 @@ class Dex2Oat FINAL {
       // compilation and verification.
       verification_results_->AddDexFile(dex_file);
     }
+
+    /* artist setup and module management */
+
+    ArtistLog::SetupArtistLogging();
+
+    VLOG(artist) << "START ARTIST SETUP (dex2oat)";
+
+    ModuleManager& module_manager = ModuleManager::getInstance();
+
+    // TODO eventually the modules should register themselves, e.g., from their own .so
+    module_manager.registerModule("trace", make_shared<TraceModule>());
+    module_manager.registerModule("logtimization", make_shared<LogtimizationModule>());
+
+    // initialize modules
+    module_manager.initializeModules(dex_files_, class_loader_);
+
+    VLOG(artist) << "END ARTIST SETUP (dex2oat)";
 
     return dex2oat::ReturnCode::kNoFailure;
   }
@@ -2381,8 +2429,11 @@ class Dex2Oat FINAL {
                                                      oat_file.get()));
       elf_writers_.back()->Start();
       const bool do_dexlayout = DoDexLayoutOptimizations();
-      oat_writers_.emplace_back(new OatWriter(
-          IsBootImage(), timings_, do_dexlayout ? profile_compilation_info_.get() : nullptr));
+      if (rewrite_dex_location_checksums_) {
+        oat_writers_.emplace_back(new OatWriter(IsBootImage(), timings_, (do_dexlayout ? profile_compilation_info_.get() : nullptr), &dex_locations_));
+      } else {
+        oat_writers_.emplace_back(new OatWriter(IsBootImage(), timings_, (do_dexlayout ? profile_compilation_info_.get() : nullptr)));
+      }
     }
   }
 
@@ -2751,6 +2802,8 @@ class Dex2Oat FINAL {
   std::vector<std::unique_ptr<OutputStream>> vdex_out_;
   std::unique_ptr<ImageWriter> image_writer_;
   std::unique_ptr<CompilerDriver> driver_;
+
+  bool rewrite_dex_location_checksums_;
 
   std::vector<std::unique_ptr<MemMap>> opened_dex_files_maps_;
   std::vector<std::unique_ptr<OatFile>> opened_oat_files_;

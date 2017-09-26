@@ -32,6 +32,13 @@ class ArenaObject {
     return allocator->Alloc(size, kAllocKind);
   }
 
+  // <ARTist> CHANGE:
+  // FIXME: added default operator new implementation to be able to circumvent arena allocation (quick-fix)
+  void* operator new(size_t size) {
+    return ::operator new(size);
+  }
+  // </ARTist> CHANGE:
+
   static void* operator new(size_t size, ScopedArenaAllocator* arena) {
     return arena->Alloc(size, kAllocKind);
   }

@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2011 The Android Open Source Project
  *
+ * Changes Copyright (C) 2017 CISPA (https://cispa.saarland), Saarland University
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -413,6 +415,8 @@ bool ParsedOptions::ProcessSpecialOptions(const RuntimeOptions& options,
 
 // Intended for local changes only.
 static void MaybeOverrideVerbosity() {
+  // gLogVerbosity.artist = true;  // TODO: don't check this in!
+  //  gLogVerbosity.artistd = true;  // TODO: don't check this in!
   //  gLogVerbosity.class_linker = true;  // TODO: don't check this in!
   //  gLogVerbosity.collector = true;  // TODO: don't check this in!
   //  gLogVerbosity.compiler = true;  // TODO: don't check this in!
