@@ -34,7 +34,7 @@ art_global_defaults {
         "-Wredundant-decls",
         // ARTIST CHANGE: removed -Wshadow b/c of compilation error in dependency
         // "-Wshadow",
-        "-DBUILD_NOUGAT",
+        "-DBUILD_OREO",
         "-Wunused",
         "-fvisibility=protected",
 

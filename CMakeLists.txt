@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.6)
+
 project(art)
 
+set(CMAKE_CXX_STANDARD 11)  # enable C++11 standard
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
 
 set(SOURCE_FILES
@@ -1375,6 +1377,8 @@ set(SOURCE_FILES
     tools/jfuzz/jfuzz.cc
 )
 
+add_definitions(-DHAVE_ANDROID_OS)
+#add_definitions(-DBUILD_OREO)
 
 find_package(JNI)
 
@@ -1384,49 +1388,51 @@ if (JNI_FOUND)
 endif()
 
 include_directories(
-        .
-        art
-        cmdline
-        compiler
-        compiler/debug
-        compiler/dex
-        compiler/driver
-        compiler/dwarf
-        compiler/jit
-        compiler/jni
-        compiler/linker
-        compiler/optimizing
-        compiler/optimizing/artist
-        compiler/optimizing/artist/codelib
-        compiler/optimizing/artist/injection
-        compiler/optimizing/artist/modules/logtimization
-        compiler/optimizing/artist/modules/generic
-        compiler/optimizing/artist/modules/trace
-        compiler/trampolines
-        compiler/utils
-        dalvikvm
-        dex2oat
-        dex2oat/include
-        dexdump
-        dexlayout
-        dexlist
-        dexoptanalyzer
-        disassembler
-        imgdiag
-        libart_fake
-        oatdump
-        patchoat
-        profman
-        runtime
-        sigchainlib
-        tools
-        tools/cpp-define-generator
-        tools/dmtracedump
-        tools/jfuzz
-        .../libnativehelper/include/nativehelper/
-        ${JNI_INCLUDE_DIRS}
+    ../libnativehelper/include/nativehelper
+    ../system/core/base/include
+    .
+    art
+    cmdline
+    compiler
+    compiler/debug
+    compiler/dex
+    compiler/driver
+    compiler/dwarf
+    compiler/jit
+    compiler/jni
+    compiler/linker
+    compiler/optimizing
+    compiler/optimizing/artist
+    compiler/optimizing/artist/codelib
+    compiler/optimizing/artist/injection
+    compiler/optimizing/artist/modules/logtimization
+    compiler/optimizing/artist/modules/generic
+    compiler/optimizing/artist/modules/trace
+    compiler/trampolines
+    compiler/utils
+    dalvikvm
+    dex2oat
+    dex2oat/include
+    dexdump
+    dexlayout
+    dexlist
+    dexoptanalyzer
+    disassembler
+    imgdiag
+    libart_fake
+    oatdump
+    patchoat
+    profman
+    runtime
+    sigchainlib
+    tools
+    tools/cpp-define-generator
+    tools/dmtracedump
+    tools/jfuzz
+    ${JNI_INCLUDE_DIRS}
 )
 
 add_definitions(-DHAVE_ANDROID_OS)
+add_definitions(-DBUILD_OREO)
 
 add_executable(art ${SOURCE_FILES})

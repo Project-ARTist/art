@@ -42,13 +42,13 @@ template<typename T> ART_FRIEND_TEST(test_set_name, individual_test)
 // <ARTist change>
 //   deactivated DISALLOW_ALLOCATION for the time being (problems with module instantiation)
 // TODO: find a way to properly instantiate WITHOUT deactivating this (remove this quick-fix)
-//#define DISALLOW_ALLOCATION() \
-//  public: \
-//    NO_RETURN ALWAYS_INLINE void operator delete(void*, size_t) { UNREACHABLE(); } \
-//    ALWAYS_INLINE void* operator new(size_t, void* ptr) noexcept { return ptr; } \
-//    ALWAYS_INLINE void operator delete(void*, void*) noexcept { } \
-//  private: \
-//    void* operator new(size_t) = delete  // NOLINT
+//  #define DISALLOW_ALLOCATION() \
+//    public: \
+//      NO_RETURN ALWAYS_INLINE void operator delete(void*, size_t) { UNREACHABLE(); } \
+//      ALWAYS_INLINE void* operator new(size_t, void* ptr) noexcept { return ptr; } \
+//      ALWAYS_INLINE void operator delete(void*, void*) noexcept { } \
+//    private: \
+//      void* operator new(size_t) = delete  // NOLINT
 #define DISALLOW_ALLOCATION()
 // </ARTist change>
 #define SIZEOF_MEMBER(t, f) sizeof((reinterpret_cast<t*>(4096))->f)  // NOLINT

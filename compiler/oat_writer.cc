@@ -279,7 +279,7 @@ class OatWriter::OatDexFile {
   DCHECK_EQ(static_cast<off_t>(file_offset + offset_), out->Seek(0, kSeekCurrent)) \
     << "file_offset=" << file_offset << " offset_=" << offset_
 
-OatWriter::OatWriter(bool compiling_boot_image, TimingLogger* timings, ProfileCompilationInfo* info)
+OatWriter::OatWriter(bool compiling_boot_image, TimingLogger* timings, ProfileCompilationInfo* info, std::vector<const char*>* dex_locations)
   : write_state_(WriteState::kAddingDexFileSources),
     timings_(timings),
     raw_dex_files_(),
@@ -2748,7 +2748,13 @@ bool OatWriter::WriteOatDexFiles(OutputStream* rodata) {
     for (auto && dexLoc : *dex_locations_) {
       VLOG(artistd) << "WriteOatDexFiles() DexLocation: " << dexLoc;
       std::string openErrors;
-      bool openSuccess = DexFile::Open(dexLoc, dexLoc, &openErrors, &temp_dex_files);
+      bool verify_checksum = false;
+      bool openSuccess = DexFile::Open(
+          dexLoc,
+          std::string(dexLoc),
+          verify_checksum,
+          &openErrors,
+          &temp_dex_files);
       if (openSuccess) {
         VLOG(artistd) << "WriteOatDexFiles() DexLocation: " << dexLoc << " SUCCESS! [Files: " << temp_dex_files.size() << "]";
       } else {

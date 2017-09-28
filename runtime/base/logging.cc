@@ -52,10 +52,10 @@ const char* ProgramInvocationName() {
   return (gProgramInvocationName.get() != nullptr) ? gProgramInvocationName->c_str() : "art";
 }
 
-//const char* ProgramInvocationShortName() {
-//  return (gProgramInvocationShortName.get() != nullptr) ? gProgramInvocationShortName->c_str()
+//  const char* ProgramInvocationShortName() {
+//    return (gProgramInvocationShortName.get() != nullptr) ? gProgramInvocationShortName->c_str()
 //                                                        : "art";
-//}
+//  }
 
 const char* ProgramInvocationShortName() {
   return (gProgramInvocationShortName.get() != nullptr) ? "dex2artist"
