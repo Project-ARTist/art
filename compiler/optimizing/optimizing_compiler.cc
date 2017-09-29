@@ -855,8 +855,11 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
   vector<shared_ptr<HArtist>> artist_passes;
   artist_passes.reserve(modules.size());
   for (auto it : modules) {
-    auto id = it.first;
     auto module = it.second;
+    if (!module->isEnabled()) {
+      continue;
+    }
+    auto id = it.first;
     auto pass = module->createPass(graph, dex_compilation_unit);
     pass->setDexfileEnvironment(module_manager.getDexFileEnvironment());
     auto codelib_env = module_manager.getCodelibEnvironment(id);
