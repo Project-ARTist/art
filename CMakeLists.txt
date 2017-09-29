@@ -1752,6 +1752,7 @@ set(SOURCE_FILES
     tools/dmtracedump/createtesttrace.cc
     compiler/optimizing/artist/modules/module_manager.cc
     compiler/optimizing/artist/modules/module_manager.h
+    compiler/optimizing/artist/modules/module.cc
     compiler/optimizing/artist/modules/module.h
     compiler/optimizing/artist/modules/trace/trace_module.cc
     compiler/optimizing/artist/modules/trace/trace_module.h
