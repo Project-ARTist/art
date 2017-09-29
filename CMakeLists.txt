@@ -1,12 +1,16 @@
 cmake_minimum_required(VERSION 3.6)
 project(art)
 
+set(CMAKE_CXX_STANDARD 11)  # enable C++11 standard
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
 
 set(SOURCE_FILES
     benchmark/jni-perf/perf_jni.cc
     benchmark/jobject-benchmark/jobject_benchmark.cc
     benchmark/scoped-primitive-array/scoped_primitive_array.cc
+    cmake-build-debug/CMakeFiles/3.8.2/CompilerIdC/CMakeCCompilerId.c
+    cmake-build-debug/CMakeFiles/3.8.2/CompilerIdCXX/CMakeCXXCompilerId.cpp
+    cmake-build-debug/CMakeFiles/feature_tests.c
     cmdline/cmdline.h
     cmdline/cmdline_parse_result.h
     cmdline/cmdline_parser.h
@@ -88,30 +92,30 @@ set(SOURCE_FILES
     compiler/jit/jit_compiler.h
     compiler/jni/jni_cfi_test.cc
     compiler/jni/jni_compiler_test.cc
-    compiler/jni/quick/arm/calling_convention_arm.cc
-    compiler/jni/quick/arm/calling_convention_arm.h
     compiler/jni/quick/arm64/calling_convention_arm64.cc
     compiler/jni/quick/arm64/calling_convention_arm64.h
+    compiler/jni/quick/arm/calling_convention_arm.cc
+    compiler/jni/quick/arm/calling_convention_arm.h
     compiler/jni/quick/calling_convention.cc
     compiler/jni/quick/calling_convention.h
     compiler/jni/quick/jni_compiler.cc
     compiler/jni/quick/jni_compiler.h
-    compiler/jni/quick/mips/calling_convention_mips.cc
-    compiler/jni/quick/mips/calling_convention_mips.h
     compiler/jni/quick/mips64/calling_convention_mips64.cc
     compiler/jni/quick/mips64/calling_convention_mips64.h
+    compiler/jni/quick/mips/calling_convention_mips.cc
+    compiler/jni/quick/mips/calling_convention_mips.h
     compiler/jni/quick/x86/calling_convention_x86.cc
     compiler/jni/quick/x86/calling_convention_x86.h
     compiler/jni/quick/x86_64/calling_convention_x86_64.cc
     compiler/jni/quick/x86_64/calling_convention_x86_64.h
+    compiler/linker/arm64/relative_patcher_arm64.cc
+    compiler/linker/arm64/relative_patcher_arm64.h
+    compiler/linker/arm64/relative_patcher_arm64_test.cc
     compiler/linker/arm/relative_patcher_arm_base.cc
     compiler/linker/arm/relative_patcher_arm_base.h
     compiler/linker/arm/relative_patcher_thumb2.cc
     compiler/linker/arm/relative_patcher_thumb2.h
     compiler/linker/arm/relative_patcher_thumb2_test.cc
-    compiler/linker/arm64/relative_patcher_arm64.cc
-    compiler/linker/arm64/relative_patcher_arm64.h
-    compiler/linker/arm64/relative_patcher_arm64_test.cc
     compiler/linker/buffered_output_stream.cc
     compiler/linker/buffered_output_stream.h
     compiler/linker/error_delaying_output_stream.h
@@ -145,18 +149,24 @@ set(SOURCE_FILES
     compiler/optimizing/artist/artist_log.h
     compiler/optimizing/artist/artist_method_visitor.cc
     compiler/optimizing/artist/artist_method_visitor.h
+    compiler/optimizing/artist/artist_typedefs.h
     compiler/optimizing/artist/artist_utils.cc
     compiler/optimizing/artist/artist_utils.h
     compiler/optimizing/artist/blacklist.cc
     compiler/optimizing/artist/blacklist.h
-        compiler/optimizing/artist/env/codelib_environment.cc
-        compiler/optimizing/artist/env/codelib_environment.h
-        compiler/optimizing/artist/env/codelib.h
-        compiler/optimizing/artist/env/java_env.cc
-        compiler/optimizing/artist/env/java_env.h
+    compiler/optimizing/artist/env/codelib.h
+    compiler/optimizing/artist/env/codelib_environment.cc
+    compiler/optimizing/artist/env/codelib_environment.h
+    compiler/optimizing/artist/env/codelib_symbols.cc
+    compiler/optimizing/artist/env/codelib_symbols.h
+    compiler/optimizing/artist/env/dexfile_environment.cc
+    compiler/optimizing/artist/env/dexfile_environment.h
+    compiler/optimizing/artist/env/java_env.cc
+    compiler/optimizing/artist/env/java_env.h
+    compiler/optimizing/artist/error_handler.cc
+    compiler/optimizing/artist/error_handler.h
     compiler/optimizing/artist/injection/boolean.h
     compiler/optimizing/artist/injection/byte.h
-    compiler/optimizing/artist/injection/short.h
     compiler/optimizing/artist/injection/char.h
     compiler/optimizing/artist/injection/double.h
     compiler/optimizing/artist/injection/float.h
@@ -172,9 +182,12 @@ set(SOURCE_FILES
     compiler/optimizing/artist/injection/permissions.cc
     compiler/optimizing/artist/injection/permissions.h
     compiler/optimizing/artist/injection/primitives.h
+    compiler/optimizing/artist/injection/short.h
     compiler/optimizing/artist/injection/string.h
     compiler/optimizing/artist/injection/target.cc
     compiler/optimizing/artist/injection/target.h
+    compiler/optimizing/artist/injection/universal_artist.cc
+    compiler/optimizing/artist/injection/universal_artist.h
     compiler/optimizing/artist/injection/visitor_keys.cc
     compiler/optimizing/artist/injection/visitor_keys.h
     compiler/optimizing/artist/method_info.cc
@@ -183,12 +196,17 @@ set(SOURCE_FILES
     compiler/optimizing/artist/method_info_factory.h
     compiler/optimizing/artist/modules/logtimization/logtimization_artist.cc
     compiler/optimizing/artist/modules/logtimization/logtimization_artist.h
-    compiler/optimizing/artist/injection/universal_artist.cc
-    compiler/optimizing/artist/injection/universal_artist.h
+    compiler/optimizing/artist/modules/logtimization/logtimization_module.cc
+    compiler/optimizing/artist/modules/logtimization/logtimization_module.h
+    compiler/optimizing/artist/modules/module.h
+    compiler/optimizing/artist/modules/module_manager.cc
+    compiler/optimizing/artist/modules/module_manager.h
     compiler/optimizing/artist/modules/trace/trace_artist.cc
     compiler/optimizing/artist/modules/trace/trace_artist.h
     compiler/optimizing/artist/modules/trace/trace_codelib.cc
     compiler/optimizing/artist/modules/trace/trace_codelib.h
+    compiler/optimizing/artist/modules/trace/trace_module.cc
+    compiler/optimizing/artist/modules/trace/trace_module.h
     compiler/optimizing/artist/param_finder.cc
     compiler/optimizing/artist/param_finder.h
     compiler/optimizing/artist/verbose_printer.cc
@@ -203,14 +221,14 @@ set(SOURCE_FILES
     compiler/optimizing/bytecode_utils.h
     compiler/optimizing/code_generator.cc
     compiler/optimizing/code_generator.h
-    compiler/optimizing/code_generator_arm.cc
-    compiler/optimizing/code_generator_arm.h
     compiler/optimizing/code_generator_arm64.cc
     compiler/optimizing/code_generator_arm64.h
-    compiler/optimizing/code_generator_mips.cc
-    compiler/optimizing/code_generator_mips.h
+    compiler/optimizing/code_generator_arm.cc
+    compiler/optimizing/code_generator_arm.h
     compiler/optimizing/code_generator_mips64.cc
     compiler/optimizing/code_generator_mips64.h
+    compiler/optimizing/code_generator_mips.cc
+    compiler/optimizing/code_generator_mips.h
     compiler/optimizing/code_generator_utils.cc
     compiler/optimizing/code_generator_utils.h
     compiler/optimizing/code_generator_x86.cc
@@ -251,23 +269,23 @@ set(SOURCE_FILES
     compiler/optimizing/instruction_builder.h
     compiler/optimizing/instruction_simplifier.cc
     compiler/optimizing/instruction_simplifier.h
-    compiler/optimizing/instruction_simplifier_arm.cc
-    compiler/optimizing/instruction_simplifier_arm.h
     compiler/optimizing/instruction_simplifier_arm64.cc
     compiler/optimizing/instruction_simplifier_arm64.h
+    compiler/optimizing/instruction_simplifier_arm.cc
+    compiler/optimizing/instruction_simplifier_arm.h
     compiler/optimizing/instruction_simplifier_shared.cc
     compiler/optimizing/instruction_simplifier_shared.h
     compiler/optimizing/intrinsics.cc
     compiler/optimizing/intrinsics.h
-    compiler/optimizing/intrinsics_arm.cc
-    compiler/optimizing/intrinsics_arm.h
     compiler/optimizing/intrinsics_arm64.cc
     compiler/optimizing/intrinsics_arm64.h
+    compiler/optimizing/intrinsics_arm.cc
+    compiler/optimizing/intrinsics_arm.h
     compiler/optimizing/intrinsics_list.h
-    compiler/optimizing/intrinsics_mips.cc
-    compiler/optimizing/intrinsics_mips.h
     compiler/optimizing/intrinsics_mips64.cc
     compiler/optimizing/intrinsics_mips64.h
+    compiler/optimizing/intrinsics_mips.cc
+    compiler/optimizing/intrinsics_mips.h
     compiler/optimizing/intrinsics_utils.h
     compiler/optimizing/intrinsics_x86.cc
     compiler/optimizing/intrinsics_x86.h
@@ -286,9 +304,9 @@ set(SOURCE_FILES
     compiler/optimizing/locations.h
     compiler/optimizing/nodes.cc
     compiler/optimizing/nodes.h
-    compiler/optimizing/nodes_arm.h
     compiler/optimizing/nodes_arm64.cc
     compiler/optimizing/nodes_arm64.h
+    compiler/optimizing/nodes_arm.h
     compiler/optimizing/nodes_shared.h
     compiler/optimizing/nodes_test.cc
     compiler/optimizing/nodes_x86.h
@@ -334,11 +352,17 @@ set(SOURCE_FILES
     compiler/optimizing/suspend_check_test.cc
     compiler/trampolines/trampoline_compiler.cc
     compiler/trampolines/trampoline_compiler.h
-    compiler/utils/arm/assembler_arm.cc
-    compiler/utils/arm/assembler_arm.h
+    compiler/utils/arm64/assembler_arm64.cc
+    compiler/utils/arm64/assembler_arm64.h
+    compiler/utils/arm64/constants_arm64.h
+    compiler/utils/arm64/managed_register_arm64.cc
+    compiler/utils/arm64/managed_register_arm64.h
+    compiler/utils/arm64/managed_register_arm64_test.cc
     compiler/utils/arm/assembler_arm32.cc
     compiler/utils/arm/assembler_arm32.h
     compiler/utils/arm/assembler_arm32_test.cc
+    compiler/utils/arm/assembler_arm.cc
+    compiler/utils/arm/assembler_arm.h
     compiler/utils/arm/assembler_arm_test.h
     compiler/utils/arm/assembler_thumb2.cc
     compiler/utils/arm/assembler_thumb2.h
@@ -347,12 +371,6 @@ set(SOURCE_FILES
     compiler/utils/arm/managed_register_arm.cc
     compiler/utils/arm/managed_register_arm.h
     compiler/utils/arm/managed_register_arm_test.cc
-    compiler/utils/arm64/assembler_arm64.cc
-    compiler/utils/arm64/assembler_arm64.h
-    compiler/utils/arm64/constants_arm64.h
-    compiler/utils/arm64/managed_register_arm64.cc
-    compiler/utils/arm64/managed_register_arm64.h
-    compiler/utils/arm64/managed_register_arm64_test.cc
     compiler/utils/array_ref.h
     compiler/utils/assembler.cc
     compiler/utils/assembler.h
@@ -366,18 +384,18 @@ set(SOURCE_FILES
     compiler/utils/intrusive_forward_list_test.cc
     compiler/utils/label.h
     compiler/utils/managed_register.h
-    compiler/utils/mips/assembler_mips.cc
-    compiler/utils/mips/assembler_mips.h
-    compiler/utils/mips/assembler_mips_test.cc
-    compiler/utils/mips/constants_mips.h
-    compiler/utils/mips/managed_register_mips.cc
-    compiler/utils/mips/managed_register_mips.h
     compiler/utils/mips64/assembler_mips64.cc
     compiler/utils/mips64/assembler_mips64.h
     compiler/utils/mips64/assembler_mips64_test.cc
     compiler/utils/mips64/constants_mips64.h
     compiler/utils/mips64/managed_register_mips64.cc
     compiler/utils/mips64/managed_register_mips64.h
+    compiler/utils/mips/assembler_mips.cc
+    compiler/utils/mips/assembler_mips.h
+    compiler/utils/mips/assembler_mips_test.cc
+    compiler/utils/mips/constants_mips.h
+    compiler/utils/mips/managed_register_mips.cc
+    compiler/utils/mips/managed_register_mips.h
     compiler/utils/stack_checks.h
     compiler/utils/string_reference.h
     compiler/utils/swap_space.cc
@@ -410,10 +428,10 @@ set(SOURCE_FILES
     dexlist/dexlist_test.cc
     disassembler/disassembler.cc
     disassembler/disassembler.h
-    disassembler/disassembler_arm.cc
-    disassembler/disassembler_arm.h
     disassembler/disassembler_arm64.cc
     disassembler/disassembler_arm64.h
+    disassembler/disassembler_arm.cc
+    disassembler/disassembler_arm.h
     disassembler/disassembler_mips.cc
     disassembler/disassembler_mips.h
     disassembler/disassembler_x86.cc
@@ -430,6 +448,18 @@ set(SOURCE_FILES
     profman/profile_assistant_test.cc
     profman/profman.cc
     runtime/arch/arch_test.cc
+    runtime/arch/arm64/asm_support_arm64.h
+    runtime/arch/arm64/context_arm64.cc
+    runtime/arch/arm64/context_arm64.h
+    runtime/arch/arm64/entrypoints_init_arm64.cc
+    runtime/arch/arm64/fault_handler_arm64.cc
+    runtime/arch/arm64/instruction_set_features_arm64.cc
+    runtime/arch/arm64/instruction_set_features_arm64.h
+    runtime/arch/arm64/instruction_set_features_arm64_test.cc
+    runtime/arch/arm64/quick_method_frame_info_arm64.h
+    runtime/arch/arm64/registers_arm64.cc
+    runtime/arch/arm64/registers_arm64.h
+    runtime/arch/arm64/thread_arm64.cc
     runtime/arch/arm/asm_support_arm.h
     runtime/arch/arm/context_arm.cc
     runtime/arch/arm/context_arm.h
@@ -443,18 +473,6 @@ set(SOURCE_FILES
     runtime/arch/arm/registers_arm.cc
     runtime/arch/arm/registers_arm.h
     runtime/arch/arm/thread_arm.cc
-    runtime/arch/arm64/asm_support_arm64.h
-    runtime/arch/arm64/context_arm64.cc
-    runtime/arch/arm64/context_arm64.h
-    runtime/arch/arm64/entrypoints_init_arm64.cc
-    runtime/arch/arm64/fault_handler_arm64.cc
-    runtime/arch/arm64/instruction_set_features_arm64.cc
-    runtime/arch/arm64/instruction_set_features_arm64.h
-    runtime/arch/arm64/instruction_set_features_arm64_test.cc
-    runtime/arch/arm64/quick_method_frame_info_arm64.h
-    runtime/arch/arm64/registers_arm64.cc
-    runtime/arch/arm64/registers_arm64.h
-    runtime/arch/arm64/thread_arm64.cc
     runtime/arch/context.cc
     runtime/arch/context.h
     runtime/arch/instruction_set.cc
@@ -466,6 +484,18 @@ set(SOURCE_FILES
     runtime/arch/memcmp16.cc
     runtime/arch/memcmp16.h
     runtime/arch/memcmp16_test.cc
+    runtime/arch/mips64/asm_support_mips64.h
+    runtime/arch/mips64/context_mips64.cc
+    runtime/arch/mips64/context_mips64.h
+    runtime/arch/mips64/entrypoints_init_mips64.cc
+    runtime/arch/mips64/fault_handler_mips64.cc
+    runtime/arch/mips64/instruction_set_features_mips64.cc
+    runtime/arch/mips64/instruction_set_features_mips64.h
+    runtime/arch/mips64/instruction_set_features_mips64_test.cc
+    runtime/arch/mips64/quick_method_frame_info_mips64.h
+    runtime/arch/mips64/registers_mips64.cc
+    runtime/arch/mips64/registers_mips64.h
+    runtime/arch/mips64/thread_mips64.cc
     runtime/arch/mips/asm_support_mips.h
     runtime/arch/mips/context_mips.cc
     runtime/arch/mips/context_mips.h
@@ -479,18 +509,6 @@ set(SOURCE_FILES
     runtime/arch/mips/registers_mips.cc
     runtime/arch/mips/registers_mips.h
     runtime/arch/mips/thread_mips.cc
-    runtime/arch/mips64/asm_support_mips64.h
-    runtime/arch/mips64/context_mips64.cc
-    runtime/arch/mips64/context_mips64.h
-    runtime/arch/mips64/entrypoints_init_mips64.cc
-    runtime/arch/mips64/fault_handler_mips64.cc
-    runtime/arch/mips64/instruction_set_features_mips64.cc
-    runtime/arch/mips64/instruction_set_features_mips64.h
-    runtime/arch/mips64/instruction_set_features_mips64_test.cc
-    runtime/arch/mips64/quick_method_frame_info_mips64.h
-    runtime/arch/mips64/registers_mips64.cc
-    runtime/arch/mips64/registers_mips64.h
-    runtime/arch/mips64/thread_mips64.cc
     runtime/arch/stub_test.cc
     runtime/arch/x86/asm_support_x86.h
     runtime/arch/x86/context_x86.cc
@@ -1132,17 +1150,12 @@ set(SOURCE_FILES
     sigchainlib/sigchain.cc
     sigchainlib/sigchain.h
     sigchainlib/sigchain_dummy.cc
+    test/common/runtime_state.cc
+    test/common/stack_inspect.cc
     tools/dmtracedump/createtesttrace.cc
     tools/dmtracedump/profile.h
     tools/dmtracedump/tracedump.cc
-    compiler/optimizing/artist/modules/module_manager.cc
-    compiler/optimizing/artist/modules/module_manager.h
-    compiler/optimizing/artist/modules/module.h
-    compiler/optimizing/artist/modules/trace/trace_module.cc
-    compiler/optimizing/artist/modules/trace/trace_module.h
-    compiler/optimizing/artist/modules/logtimization/logtimization_module.cc
-    compiler/optimizing/artist/modules/logtimization/logtimization_module.h compiler/optimizing/artist/env/dexfile_environment.cc compiler/optimizing/artist/env/dexfile_environment.h compiler/optimizing/artist/env/codelib_symbols.cc compiler/optimizing/artist/env/codelib_symbols.h compiler/optimizing/artist/artist_typedefs.h compiler/optimizing/artist/error_handler.cc compiler/optimizing/artist/error_handler.h)
-
+)
 
 find_package(JNI)
 
@@ -1152,36 +1165,36 @@ if (JNI_FOUND)
 endif()
 
 include_directories(
-        .
-        art
-        cmdline
-        compiler
-        compiler/dex
-        compiler/driver
-        compiler/dwarf
-        compiler/jit
-        compiler/jni
-        compiler/linker
-        compiler/optimizing
-        compiler/optimizing/artist
-        compiler/optimizing/artist/codelib
-        compiler/optimizing/artist/injection
-        compiler/optimizing/artist/modules/logtimization
-        compiler/optimizing/artist/modules/generic
-        compiler/optimizing/artist/modules/trace
-        compiler/trampolines
-        compiler/utils
-        dalvikvm
-        dex2oat
-        disassembler
-        imgdiag
-        oatdump
-        patchoat
-        runtime
-        sigchainlib
-        tools
-        .../libnativehelper/include/nativehelper/
-        ${JNI_INCLUDE_DIRS}
+    .
+    art
+    cmdline
+    compiler
+    compiler/dex
+    compiler/driver
+    compiler/dwarf
+    compiler/jit
+    compiler/jni
+    compiler/linker
+    compiler/optimizing
+    compiler/optimizing/artist
+    compiler/optimizing/artist/env
+    compiler/optimizing/artist/injection
+    compiler/optimizing/artist/modules/analyzer
+    compiler/optimizing/artist/modules/generic
+    compiler/optimizing/artist/modules/method-tracing
+    compiler/trampolines
+    compiler/utils
+    dalvikvm
+    dex2oat
+    disassembler
+    imgdiag
+    oatdump
+    patchoat
+    runtime
+    sigchainlib
+    tools
+    .../libnativehelper/include/nativehelper/
+    ${JNI_INCLUDE_DIRS}
 )
 
 add_definitions(-DHAVE_ANDROID_OS)
