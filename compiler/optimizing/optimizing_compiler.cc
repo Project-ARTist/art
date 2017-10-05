@@ -797,7 +797,12 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
     simplify1,
     dce1,
   };
-  RunOptimizations(optimizations1, arraysize(optimizations1), pass_observer);
+  auto num_opts = arraysize(optimizations1);
+  VLOG(artist) << "Optimizing Compiler: executing " << num_opts << " optimizations.";
+
+  RunOptimizations(optimizations1, num_opts, pass_observer);
+
+  VLOG(artistd) << "Optimizing Compiler: finished optimizations.";
 
   MaybeRunInliner(graph, codegen, driver, dex_compilation_unit, pass_observer, handles);
 
@@ -826,8 +831,55 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
     // HTypeConversion from a type to the same type.
     simplify4,
   };
-  RunOptimizations(optimizations2, arraysize(optimizations2), pass_observer);
+  num_opts = arraysize(optimizations2);
 
+  VLOG(artist) << "Optimizing Compiler: executing " << num_opts << " optimizations.";
+
+  RunOptimizations(optimizations2, num_opts, pass_observer);
+
+  VLOG(artistd) << "Optimizing Compiler: finished optimizations.";
+
+
+  // add ARTist modules
+  const ModuleManager& module_manager = ModuleManager::getInstance();
+  auto modules = module_manager.getModules();
+
+  vector<shared_ptr<HArtist>> artist_passes;
+  artist_passes.reserve(modules.size());
+
+  VLOG(artist) << "Optimizing Compiler: ARTist modules " << modules.size();
+
+  for (auto it : modules) {
+    auto module = it.second;
+    if (!module->isEnabled()) {
+      continue;
+    }
+    auto id = it.first;
+    auto pass = module->createPass(graph, dex_compilation_unit);
+    pass->setDexfileEnvironment(module_manager.getDexFileEnvironment());
+    auto codelib_env = module_manager.getCodelibEnvironment(id);
+    pass->setCodeLibEnvironment(codelib_env);
+    artist_passes.push_back(pass);
+  }
+
+  auto num_artist_opts = artist_passes.size();
+
+  if (num_artist_opts > 0) {
+    VLOG(artist) << "Optimizing Compiler: running " << num_artist_opts << " artist passes";
+
+    vector<HOptimization*> artist_passes_transformed(artist_passes.size());
+
+    std::transform(artist_passes.begin(), artist_passes.end(), artist_passes_transformed.begin(),
+                   [](const shared_ptr<HArtist> in) {
+                     return in.get();
+                   });
+
+    RunOptimizations(&artist_passes_transformed[0], num_artist_opts, pass_observer);
+
+    VLOG(artistd) << "Optimizing Compiler: finished artist passes";
+  } else {
+    VLOG(artist) << "Optimizing Compiler: Skipping artist optimizations: No modules available.";
+  };
   RunArchOptimizations(driver->GetInstructionSet(), graph, codegen, pass_observer);
 }
 

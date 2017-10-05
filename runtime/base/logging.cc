@@ -49,17 +49,11 @@ const char* GetCmdLine() {
 }
 
 const char* ProgramInvocationName() {
-  return (gProgramInvocationName.get() != nullptr) ? gProgramInvocationName->c_str() : "art";
+  return ProgramInvocationShortName();
 }
 
-//  const char* ProgramInvocationShortName() {
-//    return (gProgramInvocationShortName.get() != nullptr) ? gProgramInvocationShortName->c_str()
-//                                                        : "art";
-//  }
-
 const char* ProgramInvocationShortName() {
-  return (gProgramInvocationShortName.get() != nullptr) ? "dex2artist"
-                                                        : "dex2artist";
+  return "dex2artist";
 }
 
 void InitLogging(char* argv[], AbortFunction& abort_function) {
@@ -78,13 +72,11 @@ void InitLogging(char* argv[], AbortFunction& abort_function) {
       gCmdLine->append(" ");
       gCmdLine->append(argv[i]);
     }
-    gProgramInvocationName.reset(new std::string(argv[0]));
-    const char* last_slash = strrchr(argv[0], '/');
-    gProgramInvocationShortName.reset(new std::string((last_slash != nullptr) ? last_slash + 1
-                                                                           : argv[0]));
+    gProgramInvocationName.reset(new std::string(ProgramInvocationShortName()));
+    gProgramInvocationShortName.reset(new std::string(ProgramInvocationShortName()));
   } else {
     // TODO: fall back to /proc/self/cmdline when argv is null on Linux.
-    gCmdLine.reset(new std::string("<unset>"));
+    gCmdLine.reset(new std::string(ProgramInvocationShortName()));
   }
 
 #ifdef ART_TARGET_ANDROID
