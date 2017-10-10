@@ -1377,9 +1377,6 @@ set(SOURCE_FILES
     tools/jfuzz/jfuzz.cc
 )
 
-add_definitions(-DHAVE_ANDROID_OS)
-#add_definitions(-DBUILD_OREO)
-
 find_package(JNI)
 
 if (JNI_FOUND)
@@ -1433,6 +1430,9 @@ include_directories(
 )
 
 add_definitions(-DHAVE_ANDROID_OS)
+add_definitions(-DART_TARGET_ANDROID)
 add_definitions(-DBUILD_OREO)
+# add_definitions(-DBUILD_NOUGAT)
+# add_definitions(-DBUILD_MARSHMALLOW)
 
 add_executable(art ${SOURCE_FILES})
