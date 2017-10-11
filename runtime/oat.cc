@@ -477,6 +477,16 @@ bool OatHeader::IsConcurrentCopying() const {
   return IsKeyEnabled(OatHeader::kConcurrentCopying);
 }
 
+void OatHeader::ArtistFixDexFileCount() {
+  if (this->dex_file_count_ >= 2) {
+    VLOG(artist) << "ARTist Fixing Dexfile count, was: " << this->dex_file_count_;
+    --this->dex_file_count_;
+    VLOG(artist) << "ARTist Fixing Dexfile count, now: " << this->dex_file_count_;
+  } else {
+    VLOG(artist) << "ARTist NOT FIXINF Dexfile count, is " << this->dex_file_count_;
+  }
+}
+
 bool OatHeader::IsNativeDebuggable() const {
   return IsKeyEnabled(OatHeader::kNativeDebuggableKey);
 }

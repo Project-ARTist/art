@@ -114,6 +114,7 @@ class PACKED(4) OatHeader {
   bool IsNativeDebuggable() const;
   CompilerFilter::Filter GetCompilerFilter() const;
   bool IsConcurrentCopying() const;
+  void ArtistFixDexFileCount();
 
  private:
   bool KeyHasValue(const char* key, const char* value, size_t value_size) const;
