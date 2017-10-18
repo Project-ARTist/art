@@ -171,6 +171,11 @@ static constexpr double kLowMemoryMinLoadFactor = 0.5;
 static constexpr double kLowMemoryMaxLoadFactor = 0.8;
 static constexpr double kNormalMinLoadFactor = 0.4;
 static constexpr double kNormalMaxLoadFactor = 0.7;
+
+// Extra added to the default heap growth multiplier. Used to adjust the GC ergonomics for the read
+// barrier config.
+static constexpr double kExtraDefaultHeapGrowthMultiplier = kUseReadBarrier ? 1.0 : 0.0;
+
 Runtime* Runtime::instance_ = nullptr;
 
 struct TraceConfig {
@@ -1135,6 +1140,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   zygote_max_failed_boots_ = runtime_options.GetOrDefault(Opt::ZygoteMaxFailedBoots);
   experimental_flags_ = runtime_options.GetOrDefault(Opt::Experimental);
   is_low_memory_mode_ = runtime_options.Exists(Opt::LowMemoryMode);
+  madvise_random_access_ = runtime_options.GetOrDefault(Opt::MadviseRandomAccess);
 
   plugins_ = runtime_options.ReleaseOrDefault(Opt::Plugins);
   agents_ = runtime_options.ReleaseOrDefault(Opt::AgentPath);
@@ -1143,13 +1149,22 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   //   agents_.push_back(lib);
   // }
 
+  float foreground_heap_growth_multiplier;
+  if (is_low_memory_mode_ && !runtime_options.Exists(Opt::ForegroundHeapGrowthMultiplier)) {
+    // If low memory mode, use 1.0 as the multiplier by default.
+    foreground_heap_growth_multiplier = 1.0f;
+  } else {
+    foreground_heap_growth_multiplier =
+        runtime_options.GetOrDefault(Opt::ForegroundHeapGrowthMultiplier) +
+            kExtraDefaultHeapGrowthMultiplier;
+  }
   XGcOption xgc_option = runtime_options.GetOrDefault(Opt::GcOption);
   heap_ = new gc::Heap(runtime_options.GetOrDefault(Opt::MemoryInitialSize),
                        runtime_options.GetOrDefault(Opt::HeapGrowthLimit),
                        runtime_options.GetOrDefault(Opt::HeapMinFree),
                        runtime_options.GetOrDefault(Opt::HeapMaxFree),
                        runtime_options.GetOrDefault(Opt::HeapTargetUtilization),
-                       runtime_options.GetOrDefault(Opt::ForegroundHeapGrowthMultiplier),
+                       foreground_heap_growth_multiplier,
                        runtime_options.GetOrDefault(Opt::MemoryMaximumSize),
                        runtime_options.GetOrDefault(Opt::NonMovingSpaceCapacity),
                        runtime_options.GetOrDefault(Opt::Image),
