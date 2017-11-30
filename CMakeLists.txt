@@ -173,6 +173,7 @@ set(SOURCE_FILES
     compiler/optimizing/artist/artist_method_visitor.h
     compiler/optimizing/artist/artist_utils.cc
     compiler/optimizing/artist/artist_utils.h
+<<<<<<< HEAD
     compiler/optimizing/artist/blacklist.cc
     compiler/optimizing/artist/blacklist.h
     compiler/optimizing/artist/env/artist_environment.cc
@@ -182,6 +183,13 @@ set(SOURCE_FILES
     compiler/optimizing/artist/env/codelib.h
     compiler/optimizing/artist/env/java_env.cc
     compiler/optimizing/artist/env/java_env.h
+=======
+        compiler/optimizing/artist/env/codelib_environment.cc
+        compiler/optimizing/artist/env/codelib_environment.h
+        compiler/optimizing/artist/env/codelib.h
+        compiler/optimizing/artist/env/java_env.cc
+        compiler/optimizing/artist/env/java_env.h
+>>>>>>> 796fcc0... Support for Project-ARTist/meta#9
     compiler/optimizing/artist/injection/boolean.h
     compiler/optimizing/artist/injection/byte.h
     compiler/optimizing/artist/injection/short.h
@@ -1757,7 +1765,17 @@ set(SOURCE_FILES
     compiler/optimizing/artist/modules/trace/trace_module.cc
     compiler/optimizing/artist/modules/trace/trace_module.h
     compiler/optimizing/artist/modules/logtimization/logtimization_module.cc
-    compiler/optimizing/artist/modules/logtimization/logtimization_module.h compiler/optimizing/artist/env/dexfile_environment.cc compiler/optimizing/artist/env/dexfile_environment.h compiler/optimizing/artist/env/codelib_symbols.cc compiler/optimizing/artist/env/codelib_symbols.h compiler/optimizing/artist/artist_typedefs.h compiler/optimizing/artist/error_handler.cc compiler/optimizing/artist/error_handler.h)
+    compiler/optimizing/artist/modules/logtimization/logtimization_module.h \
+    compiler/optimizing/artist/env/dexfile_environment.cc
+    compiler/optimizing/artist/env/dexfile_environment.h
+    compiler/optimizing/artist/env/codelib_symbols.cc
+    compiler/optimizing/artist/env/codelib_symbols.h
+    compiler/optimizing/artist/artist_typedefs.h
+    compiler/optimizing/artist/error_handler.cc
+    compiler/optimizing/artist/error_handler.h
+    compiler/optimizing/artist/filtering/filter.h
+    compiler/optimizing/artist/filtering/method_name_filters.cc
+    compiler/optimizing/artist/filtering/method_name_filters.h)
 
 
 find_package(JNI)
@@ -1780,10 +1798,11 @@ include_directories(
         compiler/linker
         compiler/optimizing
         compiler/optimizing/artist
-        compiler/optimizing/artist/codelib
+        compiler/optimizing/artist/env
+        compiler/optimizing/artist/filtering
         compiler/optimizing/artist/injection
+        compiler/optimizing/artist/modules
         compiler/optimizing/artist/modules/logtimization
-        compiler/optimizing/artist/modules/generic
         compiler/optimizing/artist/modules/trace
         compiler/trampolines
         compiler/utils
