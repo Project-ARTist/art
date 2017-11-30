@@ -23,6 +23,7 @@
 #include <sstream>
 
 #include <stdint.h>
+#include "optimizing/artist/method_info_factory.h"
 #include "optimizing/artist/modules/module_manager.h"
 
 #include "android-base/strings.h"
@@ -852,15 +853,23 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
   const ModuleManager& module_manager = ModuleManager::getInstance();
   auto modules = module_manager.getModules();
 
+  auto method_info = MethodInfoFactory::obtain(graph, dex_compilation_unit);
+
   vector<shared_ptr<HArtist>> artist_passes;
   artist_passes.reserve(modules.size());
   for (auto it : modules) {
     auto module = it.second;
+    // ignore disabled modules
     if (!module->isEnabled()) {
       continue;
     }
+    // ask module whether it wants to run for this method
+    auto filter = module->getMethodFilter();
+    if (filter && !filter->accept(method_info)) {
+      continue;
+    }
     auto id = it.first;
-    auto pass = module->createPass(graph, dex_compilation_unit);
+    auto pass = module->createPass(method_info);
     pass->setDexfileEnvironment(module_manager.getDexFileEnvironment());
     auto codelib_env = module_manager.getCodelibEnvironment(id);
     pass->setCodeLibEnvironment(codelib_env);
