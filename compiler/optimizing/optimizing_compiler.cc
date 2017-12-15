@@ -586,8 +586,8 @@ static void RunOptimizations(HGraph* graph,
 
   auto method_info = MethodInfoFactory::obtain(graph, dex_compilation_unit);
 
-  vector<shared_ptr<HArtist>> artist_passes;
-  artist_passes.reserve(modules.size());
+  vector<HOptimization*> artist_passes;
+
   for (auto it : modules) {
     auto module = it.second;
     // ignore disabled modules
@@ -600,9 +600,11 @@ static void RunOptimizations(HGraph* graph,
       continue;
     }
     auto id = it.first;
+
     auto pass = module->createPass(method_info);
-    pass->setDexfileEnvironment(module_manager.getDexFileEnvironment());
+    auto dexfile_env = module_manager.getDexFileEnvironment();
     auto codelib_env = module_manager.getCodelibEnvironment(id);
+    pass->setDexfileEnvironment(dexfile_env);
     pass->setCodeLibEnvironment(codelib_env);
     artist_passes.push_back(pass);
   }
@@ -612,14 +614,7 @@ static void RunOptimizations(HGraph* graph,
   if (num_artist_opts > 0) {
     VLOG(artist) << "Optimizing Compiler: running " << num_artist_opts << " artist passes";
 
-    vector<HOptimization*> artist_passes_transformed(artist_passes.size());
-
-    std::transform(artist_passes.begin(), artist_passes.end(), artist_passes_transformed.begin(),
-                   [](const shared_ptr<HArtist> in) {
-                     return in.get();
-                   });
-
-    RunOptimizations(&artist_passes_transformed[0], num_artist_opts, pass_observer);
+    RunOptimizations(&artist_passes[0], num_artist_opts, pass_observer);
 
     VLOG(artistd) << "Optimizing Compiler: finished artist passes";
   } else {
