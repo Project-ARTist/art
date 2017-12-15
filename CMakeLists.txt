@@ -420,7 +420,6 @@ set(SOURCE_FILES
     compiler/utils/x86_64/managed_register_x86_64_test.cc
     dalvikvm/dalvikvm.cc
     dex2oat/dex2oat.cc
-    dex2oat/dex2oat_test.cc
     dexdump/dexdump.cc
     dexdump/dexdump.h
     dexdump/dexdump_main.cc
@@ -1470,19 +1469,10 @@ set(SOURCE_FILES
     compiler/optimizing/artist/artist_utils.cc
     compiler/optimizing/artist/param_finder.h
     compiler/optimizing/artist/verbose_printer.h
-    compiler/optimizing/artist/blacklist.h
     compiler/optimizing/artist/env/java_env.cc
-    compiler/optimizing/artist/env/analyzer_environment.h
     compiler/optimizing/artist/env/codelib_environment.h
     compiler/optimizing/artist/env/java_env.h
-    compiler/optimizing/artist/env/analyzer_environment.cc
     compiler/optimizing/artist/env/codelib_environment.cc
-    compiler/optimizing/artist/env/artist_environment.h
-    compiler/optimizing/artist/env/artist_environment.cc
-    compiler/optimizing/artist/modules/method-tracing/trace_artist.h
-    compiler/optimizing/artist/modules/method-tracing/trace_artist.cc
-    compiler/optimizing/artist/modules/analyzer/logtimization.h
-    compiler/optimizing/artist/modules/analyzer/logtimization.cc
     compiler/optimizing/artist/artist_utils.h
     compiler/optimizing/artist/artist_method_visitor.h
     compiler/optimizing/artist/artist_log.h
@@ -1490,7 +1480,6 @@ set(SOURCE_FILES
     compiler/optimizing/artist/param_finder.cc
     compiler/optimizing/artist/artist_log.cc
     compiler/optimizing/artist/artist.h
-    compiler/optimizing/artist/blacklist.cc
     compiler/optimizing/artist/artist_method_visitor.cc
     compiler/optimizing/builder.h
     compiler/optimizing/parallel_move_test.cc
@@ -1750,7 +1739,7 @@ set(SOURCE_FILES
     compiler/optimizing/artist/modules/trace/trace_module.cc
     compiler/optimizing/artist/modules/trace/trace_module.h
     compiler/optimizing/artist/modules/logtimization/logtimization_module.cc
-    compiler/optimizing/artist/modules/logtimization/logtimization_module.h \
+    compiler/optimizing/artist/modules/logtimization/logtimization_module.h
     compiler/optimizing/artist/env/dexfile_environment.cc
     compiler/optimizing/artist/env/dexfile_environment.h
     compiler/optimizing/artist/env/codelib_symbols.cc
