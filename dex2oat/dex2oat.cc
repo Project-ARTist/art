@@ -31,10 +31,10 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
+#include <dlfcn.h>
+#include <string.h>
 #include "optimizing/artist/artist_log.h"
 #include "optimizing/artist/modules/module_manager.h"
-#include "optimizing/artist/modules/trace/trace_module.h"
-#include "optimizing/artist/modules/logtimization/logtimization_module.h"
 
 #if defined(__linux__) && defined(__arm__)
 #include <sys/personality.h>
@@ -1068,6 +1068,12 @@ class Dex2Oat FINAL {
     std::unique_ptr<ParserOptions> parser_options(new ParserOptions());
     compiler_options_.reset(new CompilerOptions());
 
+    // ARTist logging and module management
+    ArtistLog::SetupArtistLogging();
+    VLOG(artist) << "START ARTIST SETUP (dex2oat)";
+    ModuleManager& module_manager = ModuleManager::getInstance();
+    int loadedModulesCounter = 0;
+
     for (int i = 0; i < argc; i++) {
       const StringPiece option(argv[i]);
       const bool log_options = false;
@@ -1185,6 +1191,9 @@ class Dex2Oat FINAL {
         force_determinism_ = true;
       } else if (option == "--checksum-rewriting") {
         rewrite_dex_location_checksums_ = true;
+      } else if (option.starts_with("--artist-module=")) {
+        const char* module_so_path = option.substr(strlen("--artist-module=")).data();
+        loadArtistModule(module_manager, module_so_path, loadedModulesCounter);
       } else if (!compiler_options_->ParseCompilerOption(option, Usage)) {
         Usage("Unknown argument %s", option.data());
       }
@@ -1194,6 +1203,37 @@ class Dex2Oat FINAL {
 
     // Insert some compiler things.
     InsertCompileOptions(argc, argv);
+  }
+
+  void loadArtistModule(ModuleManager& module_manager, const char* module_so_path, int& counter) {
+    shared_ptr<Module> module = loadSoModule(module_so_path);
+    if (module) {
+      module_manager.registerModule("loaded_module_" + std::to_string(counter), module);
+      VLOG(artist) << "Loaded ARTist module #" + std::to_string(++counter);
+    }
+  }
+
+  shared_ptr<Module> loadSoModule(const char* module_path) {
+    void* module_so = dlopen(module_path, RTLD_LAZY);
+
+    if (!module_so) {
+      VLOG(artist) << "Cannot load library: " << dlerror() << '\n';
+      return nullptr;
+    }
+
+    // reset errors
+    dlerror();
+
+    // load the symbols
+    create_t* create_module = reinterpret_cast<create_t*>(dlsym(module_so, "create"));
+    const char* dlsym_error = dlerror();
+    if (dlsym_error) {
+      VLOG(artist) << "Cannot load symbol create: " << dlsym_error << '\n';
+      return nullptr;
+    }
+
+    // create an instance of the class
+    return create_module();
   }
 
   // Check whether the oat output files are writable, and open them for later. Also open a swap
@@ -1532,24 +1572,41 @@ class Dex2Oat FINAL {
                                         soa.Decode<mirror::ClassLoader*>(class_loader_))));
     }
 
-    /* artist setup and module management */
+    initializeArtist();
 
-    ArtistLog::SetupArtistLogging();
+    return true;
+  }
 
-    VLOG(artist) << "START ARTIST SETUP (dex2oat)";
-
+  void initializeArtist() {
     ModuleManager& module_manager = ModuleManager::getInstance();
-
-    // TODO eventually the modules should register themselves, e.g., from their own .so
-    module_manager.registerModule("trace", make_shared<TraceModule>());
-    module_manager.registerModule("logtimization", make_shared<LogtimizationModule>());
 
     // initialize modules
     module_manager.initializeModules(dex_files_, class_loader_);
 
     VLOG(artist) << "END ARTIST SETUP (dex2oat)";
+  }
 
-    return true;
+  shared_ptr<Module> loadArtistModule(const char* module_path) {
+    void* module_so = dlopen(module_path, RTLD_LAZY);
+
+    if (!module_so) {
+      VLOG(artist) << "Cannot load library: " << dlerror() << '\n';
+      return nullptr;
+    }
+
+    // reset errors
+    dlerror();
+
+    // load the symbols
+    create_t* create_module = reinterpret_cast<create_t*>(dlsym(module_so, "create"));
+    const char* dlsym_error = dlerror();
+    if (dlsym_error) {
+      VLOG(artist) << "Cannot load symbol create: " << dlsym_error << '\n';
+      return nullptr;
+    }
+
+    // create an instance of the class
+    return create_module();
   }
 
   // If we need to keep the oat file open for the image writer.
