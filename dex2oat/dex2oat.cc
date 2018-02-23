@@ -36,8 +36,8 @@
 #include "optimizing/artist/api/io/artist_log.h"
 #include "optimizing/artist/api/io/error_handler.h"
 #include "optimizing/artist/api/modules/module_manager.h"
-#include "optimizing/artist/internal/modules/trace/trace_module.h"
-#include "optimizing/artist/internal/modules/logtimization/logtimization_module.h"
+#include <dlfcn.h>
+#include <string.h>
 
 #if defined(__linux__) && defined(__arm__)
 #include <sys/personality.h>
@@ -1339,6 +1339,9 @@ class Dex2Oat FINAL {
         dirty_image_objects_filename_ = option.substr(strlen("--dirty-image-objects=")).data();
       } else if (option == "--checksum-rewriting") {
         rewrite_dex_location_checksums_ = true;
+      } else if (option.starts_with("--artist-module=")) {
+        const char* module_so_path = option.substr(strlen("--artist-module=")).data();
+        module_paths.push_back(module_so_path);
       } else if (!compiler_options_->ParseCompilerOption(option, Usage)) {
         Usage("Unknown argument %s", option.data());
       }
@@ -1348,6 +1351,54 @@ class Dex2Oat FINAL {
 
     // Insert some compiler things.
     InsertCompileOptions(argc, argv);
+  }
+
+  void loadArtistModules(string base_path) {
+    ModuleManager& module_manager = ModuleManager::getInstance();
+
+    for (auto module_so_path : module_paths) {
+      auto result = loadSoModule(module_so_path.data(), base_path);
+      auto id = result.first;
+      auto module = result.second;
+      if (module) {
+        module_manager.registerModule(id, module);
+        VLOG(artist) << "Loaded ARTist module " + id;
+      }
+    }
+  }
+
+  std::pair<ModuleId, shared_ptr<Module>> loadSoModule(const char* module_path, string base_path) {
+    void* module_so = dlopen(module_path, RTLD_LAZY);
+
+    if (!module_so) {
+      VLOG(artist) << "Cannot load library: " << dlerror() << '\n';
+      return std::pair<ModuleId, shared_ptr<Module>>("<invalid>", nullptr);
+    }
+
+    // reset errors
+    dlerror();
+
+    // load the symbols
+    get_id_t* get_id = reinterpret_cast<get_id_t*>(dlsym(module_so, "get_id"));
+    const char* dlsym_error = dlerror();
+    if (dlsym_error) {
+      VLOG(artist) << "Cannot load symbol 'get_id': " << dlsym_error << '\n';
+      return std::pair<ModuleId, shared_ptr<Module>>("<invalid>", nullptr);
+    }
+
+    ModuleId id = get_id();
+
+    // load the symbols
+    create_t* create_module = reinterpret_cast<create_t*>(dlsym(module_so, "create"));
+    dlsym_error = dlerror();
+    if (dlsym_error) {
+      VLOG(artist) << "Cannot load symbol 'create' for module " << id << " : " << dlsym_error << '\n';
+      return std::pair<ModuleId, shared_ptr<Module>>(id, nullptr);
+    }
+
+    // create an instance of the class
+    auto module = create_module(base_path.empty() ? nullptr : FilesystemHelper::createForModule(base_path, id));
+    return std::pair<ModuleId, shared_ptr<Module>>(id, module);
   }
 
   // Check whether the oat output files are writable, and open them for later. Also open a swap
@@ -1780,7 +1831,6 @@ class Dex2Oat FINAL {
       }
     }
 
-
     /* artist setup and module management */
     VLOG(artist) << "START ARTIST SETUP (dex2oat)";
 
@@ -1821,23 +1871,12 @@ class Dex2Oat FINAL {
     }
 
     // initialize modules
-
-    // TODO eventually the modules should register themselves, e.g., from their own .so
-    ModuleManager& module_manager = ModuleManager::getInstance();
-    auto trace_id = "trace";
-    auto logtimization_id = "logtimization";
-
-    module_manager.registerModule(trace_id, make_shared<TraceModule>(
-        fs_support ? FilesystemHelper::createForModule(base_path, trace_id) : nullptr));
-    module_manager.registerModule(logtimization_id, make_shared<LogtimizationModule>(
-        fs_support ? FilesystemHelper::createForModule(base_path, logtimization_id) : nullptr));
-
-    module_manager.initializeModules(dex_files_, class_loader_);
-
-    VLOG(artist) << "END ARTIST SETUP (dex2oat)";
+    loadArtistModules(base_path);
+    ModuleManager::getInstance().initializeModules(dex_files_, class_loader_);
 
     return dex2oat::ReturnCode::kNoFailure;
   }
+
 
   // If we need to keep the oat file open for the image writer.
   bool ShouldKeepOatFileOpen() const {
@@ -3031,6 +3070,9 @@ class Dex2Oat FINAL {
   std::unique_ptr<CumulativeLogger> compiler_phases_timings_;
   std::vector<std::vector<const DexFile*>> dex_files_per_oat_file_;
   std::unordered_map<const DexFile*, size_t> dex_file_oat_index_map_;
+
+  // Module paths
+  std::vector<std::string> module_paths;
 
   // Backing storage.
   std::vector<std::string> char_backing_storage_;
