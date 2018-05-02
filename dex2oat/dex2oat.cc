@@ -28,6 +28,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
+#include "optimizing/artist/filesystem_helper.h"
 #include "optimizing/artist/artist_log.h"
 #include "optimizing/artist/modules/module_manager.h"
 #include "optimizing/artist/modules/trace/trace_module.h"
@@ -1500,17 +1501,21 @@ class Dex2Oat FINAL {
                                         soa.Decode<mirror::ClassLoader*>(class_loader_))));
     }
 
+
     /* artist setup and module management */
+    VLOG(artist) << "START ARTIST SETUP (dex2oat)";
 
     ArtistLog::SetupArtistLogging();
 
-    VLOG(artist) << "START ARTIST SETUP (dex2oat)";
-
-    ModuleManager& module_manager = ModuleManager::getInstance();
+    // TODO hardcoded for now... To fix this, we need to know what we are currently compiling (app, system server, boot.oat)
+    string base_path(FilesystemHelper::DEFAULT_APP);
 
     // TODO eventually the modules should register themselves, e.g., from their own .so
-    module_manager.registerModule("trace", make_shared<TraceModule>());
-    module_manager.registerModule("logtimization", make_shared<LogtimizationModule>());
+    ModuleManager& module_manager = ModuleManager::getInstance();
+    auto trace_id = "trace";
+    module_manager.registerModule(trace_id, make_shared<TraceModule>(FilesystemHelper::createForModule(base_path, trace_id)));
+    auto logtimization_id = "logtimization";
+    module_manager.registerModule(logtimization_id, make_shared<LogtimizationModule>(FilesystemHelper::createForModule(base_path, logtimization_id)));
 
     // initialize modules
     module_manager.initializeModules(dex_files_, class_loader_);

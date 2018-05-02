@@ -173,23 +173,6 @@ set(SOURCE_FILES
     compiler/optimizing/artist/artist_method_visitor.h
     compiler/optimizing/artist/artist_utils.cc
     compiler/optimizing/artist/artist_utils.h
-<<<<<<< HEAD
-    compiler/optimizing/artist/blacklist.cc
-    compiler/optimizing/artist/blacklist.h
-    compiler/optimizing/artist/env/artist_environment.cc
-    compiler/optimizing/artist/env/artist_environment.h
-    compiler/optimizing/artist/env/codelib_environment.cc
-    compiler/optimizing/artist/env/codelib_environment.h
-    compiler/optimizing/artist/env/codelib.h
-    compiler/optimizing/artist/env/java_env.cc
-    compiler/optimizing/artist/env/java_env.h
-=======
-        compiler/optimizing/artist/env/codelib_environment.cc
-        compiler/optimizing/artist/env/codelib_environment.h
-        compiler/optimizing/artist/env/codelib.h
-        compiler/optimizing/artist/env/java_env.cc
-        compiler/optimizing/artist/env/java_env.h
->>>>>>> 796fcc0... Support for Project-ARTist/meta#9
     compiler/optimizing/artist/injection/boolean.h
     compiler/optimizing/artist/injection/byte.h
     compiler/optimizing/artist/injection/short.h
@@ -1758,6 +1741,8 @@ set(SOURCE_FILES
     tools/dmtracedump/tracedump.cc
     tools/dmtracedump/profile.h
     tools/dmtracedump/createtesttrace.cc
+    compiler/optimizing/artist/filesystem_helper.cc
+    compiler/optimizing/artist/filesystem_helper.h
     compiler/optimizing/artist/modules/module_manager.cc
     compiler/optimizing/artist/modules/module_manager.h
     compiler/optimizing/artist/modules/module.cc
