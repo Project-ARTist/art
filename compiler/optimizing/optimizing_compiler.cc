@@ -25,6 +25,7 @@
 #include <stdint.h>
 #include "optimizing/artist/method_info_factory.h"
 #include "optimizing/artist/modules/module_manager.h"
+#include "optimizing/artist/filesystem_helper.h"
 
 #include "android-base/strings.h"
 

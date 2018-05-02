@@ -1133,6 +1133,8 @@ set(SOURCE_FILES
     tools/dmtracedump/createtesttrace.cc
     tools/dmtracedump/profile.h
     tools/dmtracedump/tracedump.cc
+    compiler/optimizing/artist/filesystem_helper.cc
+    compiler/optimizing/artist/filesystem_helper.h
     compiler/optimizing/artist/modules/module_manager.cc
     compiler/optimizing/artist/modules/module_manager.h
     compiler/optimizing/artist/modules/module.cc
