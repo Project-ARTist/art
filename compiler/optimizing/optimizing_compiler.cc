@@ -595,12 +595,8 @@ static void RunOptimizations(HGraph* graph,
     }
 
     // ask module whether it wants to run for this method
-    auto blackList = module->getMethodFilters().first;
-    if (blackList && !blackList->accept(method_info)) {
-      continue;
-    }
-    auto whiteList = module->getMethodFilters().second;
-    if (whiteList && !whiteList->accept(method_info)) {
+    auto filter = module->getMethodFilter();
+    if (filter && !filter->accept(method_info)) {
       continue;
     }
 
