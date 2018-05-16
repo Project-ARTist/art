@@ -63,8 +63,12 @@ const char* GetCmdLine() {
   return (gCmdLine.get() != nullptr) ? gCmdLine->c_str() : nullptr;
 }
 
+// const char* ProgramInvocationName() {
+//  return (gProgramInvocationName.get() != nullptr) ? gProgramInvocationName->c_str() : "art";
+// }
+
 const char* ProgramInvocationName() {
-  return (gProgramInvocationName.get() != nullptr) ? gProgramInvocationName->c_str() : "art";
+  return "dex2artist";
 }
 
 // const char* ProgramInvocationShortName() {
@@ -73,8 +77,7 @@ const char* ProgramInvocationName() {
 // }
 
 const char* ProgramInvocationShortName() {
-  return (gProgramInvocationShortName.get() != nullptr) ? "dex2artist"
-                                                        : "dex2artist";
+  return "dex2artist";
 }
 
 void InitLogging(char* argv[]) {
