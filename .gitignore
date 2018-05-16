@@ -1,5 +1,5 @@
 .idea
 JIT_ART
-compiler/optimizing/artist.bak
 make.sh
 cmake-build-debug
+compiler/optimizing/artist.bak
