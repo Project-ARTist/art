@@ -593,11 +593,13 @@ static void RunOptimizations(HGraph* graph,
     if (!module->isEnabled()) {
       continue;
     }
+
     // ask module whether it wants to run for this method
     auto filter = module->getMethodFilter();
     if (filter && !filter->accept(method_info)) {
       continue;
     }
+
     auto id = it.first;
     auto pass = module->createPass(method_info);
     pass->setDexfileEnvironment(module_manager.getDexFileEnvironment());
