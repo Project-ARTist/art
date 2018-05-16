@@ -3,3 +3,5 @@ JIT_ART
 .idea
 cmake-build-debug
 make.sh
+compiler/optimizing/artist
+compiler/optimizing/artist.bak
