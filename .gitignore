@@ -2,4 +2,5 @@
 JIT_ART
 make.sh
 cmake-build-debug
+compiler/optimizing/artist
 compiler/optimizing/artist.bak
