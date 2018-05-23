@@ -806,11 +806,7 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
 
   auto num_opts = arraysize(optimizations1);
 
-  VLOG(artist) << "Optimizing Compiler: executing " << num_opts << " optimizations.";
-
   RunOptimizations(optimizations1, num_opts, pass_observer);
-
-  VLOG(artistd) << "Optimizing Compiler: finished optimizations.";
 
   MaybeRunInliner(graph, codegen, driver, dex_compilation_unit, pass_observer, handles);
 
@@ -843,12 +839,7 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
 
   num_opts = arraysize(optimizations2);
 
-  VLOG(artist) << "Optimizing Compiler: executing " << num_opts << " optimizations.";
-
   RunOptimizations(optimizations2, num_opts, pass_observer);
-
-  VLOG(artistd) << "Optimizing Compiler: finished optimizations.";
-
 
   // add ARTist modules
   const ModuleManager& module_manager = ModuleManager::getInstance();
@@ -857,6 +848,7 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
   auto method_info = MethodInfoFactory::obtain(graph, dex_compilation_unit);
 
   vector<HOptimization*> artist_passes;
+
 
   for (auto it : modules) {
     auto module = it.second;
@@ -882,13 +874,11 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
   auto num_artist_opts = artist_passes.size();
 
   if (num_artist_opts > 0) {
-    VLOG(artist) << "Optimizing Compiler: running " << num_artist_opts << " artist passes";
+    VLOG(artistd) << "Optimizing Compiler: running " << num_artist_opts << " artist passes";
 
     RunOptimizations(&artist_passes[0], num_artist_opts, pass_observer);
-
-    VLOG(artistd) << "Optimizing Compiler: finished artist passes";
   } else {
-    VLOG(artist) << "Optimizing Compiler: Skipping artist optimizations: No modules available.";
+    VLOG(artistd) << "Optimizing Compiler: Skipping artist optimizations: No modules available.";
   };
 
   RunArchOptimizations(driver->GetInstructionSet(), graph, codegen, pass_observer);
