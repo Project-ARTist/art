@@ -15,6 +15,7 @@
  */
 
 #include <inttypes.h>
+#include <private/android_filesystem_config.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -28,6 +29,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
+#include "optimizing/artist/error_handler.h"
 #include "optimizing/artist/filesystem_helper.h"
 #include "optimizing/artist/artist_log.h"
 #include "optimizing/artist/modules/module_manager.h"
@@ -1507,17 +1509,52 @@ class Dex2Oat FINAL {
 
     ArtistLog::SetupArtistLogging();
 
-    // TODO hardcoded for now... To fix this, we need to know what we are currently compiling (app, system server, boot.oat)
-    string base_path(FilesystemHelper::DEFAULT_APP);
+    // check what kind of compilation this is
+
+    bool fs_support = true;
+    string base_path;
+
+    // probe for android build system environment variable
+    auto out_dir = std::getenv("OUT");
+    // get user id
+    auto uid = getuid();
+
+    if (IsBootImage() && out_dir) {  // compiling AOSP on the build machine (system compiler)
+      VLOG(artist) << "Compiling the boot image on the host machine (AOSP build)";
+      base_path = out_dir;
+      base_path += "/artist";
+    } else if (uid == 0) {  // ArtistGui uses root to execute dex2oat (ArtistGui compiler)
+      VLOG(artist) << "Compiling apps with ArtistGui (asset compiler)";
+      base_path = FilesystemHelper::DEFAULT_APP;
+    } else if (uid >= AID_SYSTEM && uid < AID_SHELL) {  // compiling as the system compiler on device, e.g., during boot
+      VLOG(artist) << "system server or other system component (system compiler)";
+      fs_support = false;  // TODO check SELinux policy to see whether dex2oat may write anything at all
+      VLOG(artist) << "Deactivating the filesystem helper: Currently not supported for the system compiler";
+//      base_path = FilesystemHelper::DEFAULT_SYS;
+    } else if (!IsImage()) {  // compiling system/default apps (system compiler)
+      VLOG(artist) << "Compiling a system/default app (system compiler)";
+      fs_support = false;  // TODO check SELinux policy to see whether dex2oat may write anything at all
+      VLOG(artist) << "Deactivating the filesystem helper: Currently not supported for the system compiler";
+//      base_path = FilesystemHelper::DEFAULT_SYS;
+    } else {
+      string msg("Unrecognized setup: not compiling boot image, uid ");
+      msg += uid;
+      msg += " is not in the system range and not compiling AOSP on a build machine.";
+      ErrorHandler::abortCompilation(msg);
+    }
+
+    // initialize modules
 
     // TODO eventually the modules should register themselves, e.g., from their own .so
     ModuleManager& module_manager = ModuleManager::getInstance();
     auto trace_id = "trace";
-    module_manager.registerModule(trace_id, make_shared<TraceModule>(FilesystemHelper::createForModule(base_path, trace_id)));
     auto logtimization_id = "logtimization";
-    module_manager.registerModule(logtimization_id, make_shared<LogtimizationModule>(FilesystemHelper::createForModule(base_path, logtimization_id)));
 
-    // initialize modules
+    module_manager.registerModule(trace_id, make_shared<TraceModule>(
+        fs_support ? FilesystemHelper::createForModule(base_path, trace_id) : nullptr));
+    module_manager.registerModule(logtimization_id, make_shared<LogtimizationModule>(
+        fs_support ? FilesystemHelper::createForModule(base_path, logtimization_id) : nullptr));
+
     module_manager.initializeModules(dex_files_, class_loader_);
 
     VLOG(artist) << "END ARTIST SETUP (dex2oat)";
@@ -2700,11 +2737,14 @@ static int dex2oat(int argc, char** argv) {
   //   3) Compiling with --host
   //   4) Compiling on the host (not a target build)
   // Otherwise, print a stripped command line.
-  if (kIsDebugBuild || dex2oat->IsBootImage() || dex2oat->IsHost() || !kIsTargetBuild) {
+
+// ARTist: Always print the full command line
+//  if (kIsDebugBuild || dex2oat->IsBootImage() || dex2oat->IsHost() || !kIsTargetBuild) {
     LOG(INFO) << CommandLine();
-  } else {
-    LOG(INFO) << StrippedCommandLine();
-  }
+    UNUSED(StrippedCommandLine());
+//  } else {
+//    LOG(INFO) << StrippedCommandLine();
+//  }
 
   if (!dex2oat->Setup()) {
     dex2oat->EraseOatFiles();
