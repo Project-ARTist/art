@@ -32,12 +32,12 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
-#include "optimizing/artist/error_handler.h"
-#include "optimizing/artist/filesystem_helper.h"
-#include "optimizing/artist/artist_log.h"
-#include "optimizing/artist/modules/module_manager.h"
-#include "optimizing/artist/modules/trace/trace_module.h"
-#include "optimizing/artist/modules/logtimization/logtimization_module.h"
+#include "optimizing/artist/api/io/filesystem_helper.h"
+#include "optimizing/artist/api/io/artist_log.h"
+#include "optimizing/artist/api/io/error_handler.h"
+#include "optimizing/artist/api/modules/module_manager.h"
+#include "optimizing/artist/internal/modules/trace/trace_module.h"
+#include "optimizing/artist/internal/modules/logtimization/logtimization_module.h"
 
 #if defined(__linux__) && defined(__arm__)
 #include <sys/personality.h>

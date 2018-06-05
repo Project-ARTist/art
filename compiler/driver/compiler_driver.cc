@@ -83,8 +83,8 @@
 #include "verifier/verifier_deps.h"
 #include "verifier/verifier_enums.h"
 
-#include "optimizing/artist/env/codelib_environment.h"
-#include "optimizing/artist/artist_log.h"
+#include "optimizing/artist/api/env/codelib_environment.h"
+#include "optimizing/artist/api/io/artist_log.h"
 
 
 namespace art {

@@ -139,58 +139,52 @@ set(SOURCE_FILES
     compiler/oat_test.cc
     compiler/oat_writer.cc
     compiler/oat_writer.h
-    compiler/optimizing/artist/artist.cc
-    compiler/optimizing/artist/artist.h
-    compiler/optimizing/artist/artist_log.cc
-    compiler/optimizing/artist/artist_log.h
-    compiler/optimizing/artist/artist_method_visitor.cc
-    compiler/optimizing/artist/artist_method_visitor.h
-    compiler/optimizing/artist/artist_utils.cc
-    compiler/optimizing/artist/artist_utils.h
-        compiler/optimizing/artist/env/codelib_environment.cc
-        compiler/optimizing/artist/env/codelib_environment.h
-        compiler/optimizing/artist/env/codelib.h
-        compiler/optimizing/artist/env/java_env.cc
-        compiler/optimizing/artist/env/java_env.h
-    compiler/optimizing/artist/injection/boolean.h
-    compiler/optimizing/artist/injection/byte.h
-    compiler/optimizing/artist/injection/short.h
-    compiler/optimizing/artist/injection/char.h
-    compiler/optimizing/artist/injection/double.h
-    compiler/optimizing/artist/injection/float.h
-    compiler/optimizing/artist/injection/injection.cc
-    compiler/optimizing/artist/injection/injection.h
-    compiler/optimizing/artist/injection/injection_visitor.cc
-    compiler/optimizing/artist/injection/injection_visitor.h
-    compiler/optimizing/artist/injection/integer.h
-    compiler/optimizing/artist/injection/long.h
-    compiler/optimizing/artist/injection/object.h
-    compiler/optimizing/artist/injection/parameter.cc
-    compiler/optimizing/artist/injection/parameter.h
-    compiler/optimizing/artist/injection/permissions.cc
-    compiler/optimizing/artist/injection/permissions.h
-    compiler/optimizing/artist/injection/primitives.h
-    compiler/optimizing/artist/injection/string.h
-    compiler/optimizing/artist/injection/target.cc
-    compiler/optimizing/artist/injection/target.h
-    compiler/optimizing/artist/injection/visitor_keys.cc
-    compiler/optimizing/artist/injection/visitor_keys.h
-    compiler/optimizing/artist/method_info.cc
-    compiler/optimizing/artist/method_info.h
-    compiler/optimizing/artist/method_info_factory.cc
-    compiler/optimizing/artist/method_info_factory.h
-    compiler/optimizing/artist/modules/logtimization/logtimization_artist.cc
-    compiler/optimizing/artist/modules/logtimization/logtimization_artist.h
-    compiler/optimizing/artist/injection/universal_artist.cc
-    compiler/optimizing/artist/injection/universal_artist.h
-    compiler/optimizing/artist/modules/trace/trace_artist.cc
-    compiler/optimizing/artist/modules/trace/trace_artist.h
-    compiler/optimizing/artist/modules/trace/trace_codelib.cc
-    compiler/optimizing/artist/modules/trace/trace_codelib.h
-    compiler/optimizing/artist/param_finder.cc
-    compiler/optimizing/artist/param_finder.h
-    compiler/optimizing/artist/verbose_printer.cc
-    compiler/optimizing/artist/verbose_printer.h
+    compiler/optimizing/artist/api/modules/artist.cc
+    compiler/optimizing/artist/api/modules/artist.h
+    compiler/optimizing/artist/api/io/artist_log.cc
+    compiler/optimizing/artist/api/io/artist_log.h
+    compiler/optimizing/artist/api/utils/artist_utils.cc
+    compiler/optimizing/artist/api/utils/artist_utils.h
+        compiler/optimizing/artist/api/env/codelib_environment.cc
+        compiler/optimizing/artist/api/env/codelib_environment.h
+        compiler/optimizing/artist/api/modules/codelib.h
+        compiler/optimizing/artist/api/env/java_env.cc
+        compiler/optimizing/artist/api/env/java_env.h
+    compiler/optimizing/artist/api/injection/boolean.h
+    compiler/optimizing/artist/api/injection/byte.h
+    compiler/optimizing/artist/api/injection/short.h
+    compiler/optimizing/artist/api/injection/char.h
+    compiler/optimizing/artist/api/injection/double.h
+    compiler/optimizing/artist/api/injection/float.h
+    compiler/optimizing/artist/api/injection/injection.cc
+    compiler/optimizing/artist/api/injection/injection.h
+    compiler/optimizing/artist/internal/injection/injection_visitor.cc
+    compiler/optimizing/artist/internal/injection/injection_visitor.h
+    compiler/optimizing/artist/api/injection/integer.h
+    compiler/optimizing/artist/api/injection/long.h
+    compiler/optimizing/artist/api/injection/parameter.cc
+    compiler/optimizing/artist/api/injection/parameter.h
+    compiler/optimizing/artist/api/injection/primitives.h
+    compiler/optimizing/artist/api/injection/target.cc
+    compiler/optimizing/artist/api/injection/target.h
+    compiler/optimizing/artist/internal/injection/visitor_keys.cc
+    compiler/optimizing/artist/internal/injection/visitor_keys.h
+    compiler/optimizing/artist/api/modules/method_info.cc
+    compiler/optimizing/artist/api/modules/method_info.h
+    compiler/optimizing/artist/api/modules/method_info_factory.cc
+    compiler/optimizing/artist/api/modules/method_info_factory.h
+        compiler/optimizing/artist/internal/modules/logtimization/logtimization_artist.cc
+        compiler/optimizing/artist/internal/modules/logtimization/logtimization_artist.h
+    compiler/optimizing/artist/api/injection/injection_artist.cc
+    compiler/optimizing/artist/api/injection/injection_artist.h
+        compiler/optimizing/artist/internal/modules/trace/trace_artist.cc
+        compiler/optimizing/artist/internal/modules/trace/trace_artist.h
+        compiler/optimizing/artist/internal/modules/trace/trace_codelib.cc
+        compiler/optimizing/artist/internal/modules/trace/trace_codelib.h
+    compiler/optimizing/artist/internal/utils/param_finder.cc
+    compiler/optimizing/artist/internal/utils/param_finder.h
+    compiler/optimizing/artist/api/io/verbose_printer.cc
+    compiler/optimizing/artist/api/io/verbose_printer.h
     compiler/optimizing/block_builder.cc
     compiler/optimizing/block_builder.h
     compiler/optimizing/bounds_check_elimination.cc
@@ -1133,26 +1127,27 @@ set(SOURCE_FILES
     tools/dmtracedump/createtesttrace.cc
     tools/dmtracedump/profile.h
     tools/dmtracedump/tracedump.cc
-    compiler/optimizing/artist/filesystem_helper.cc
-    compiler/optimizing/artist/filesystem_helper.h
-    compiler/optimizing/artist/modules/module_manager.cc
-    compiler/optimizing/artist/modules/module_manager.h
-    compiler/optimizing/artist/modules/module.cc
-    compiler/optimizing/artist/modules/module.h
-    compiler/optimizing/artist/modules/trace/trace_module.cc
-    compiler/optimizing/artist/modules/trace/trace_module.h
-    compiler/optimizing/artist/modules/logtimization/logtimization_module.cc
-    compiler/optimizing/artist/modules/logtimization/logtimization_module.h
-    compiler/optimizing/artist/env/dexfile_environment.cc
-    compiler/optimizing/artist/env/dexfile_environment.h
-    compiler/optimizing/artist/env/codelib_symbols.cc
-    compiler/optimizing/artist/env/codelib_symbols.h
-    compiler/optimizing/artist/artist_typedefs.h
-    compiler/optimizing/artist/error_handler.cc
-    compiler/optimizing/artist/error_handler.h
-    compiler/optimizing/artist/filtering/filter.h
-    compiler/optimizing/artist/filtering/method_name_filters.cc
-    compiler/optimizing/artist/filtering/method_name_filters.h)
+    compiler/optimizing/artist/api/io/filesystem_helper.cc
+    compiler/optimizing/artist/api/io/filesystem_helper.h
+    compiler/optimizing/artist/api/modules/module_manager.cc
+    compiler/optimizing/artist/api/modules/module_manager.h
+    compiler/optimizing/artist/api/modules/module.cc
+    compiler/optimizing/artist/api/modules/module.h
+    compiler/optimizing/artist/internal/modules/trace/trace_module.cc
+    compiler/optimizing/artist/internal/modules/trace/trace_module.h
+    compiler/optimizing/artist/internal/modules/logtimization/logtimization_module.cc
+    compiler/optimizing/artist/internal/modules/logtimization/logtimization_module.h
+    compiler/optimizing/artist/api/env/dexfile_environment.cc
+    compiler/optimizing/artist/api/env/dexfile_environment.h
+    compiler/optimizing/artist/api/env/codelib_symbols.cc
+    compiler/optimizing/artist/api/env/codelib_symbols.h
+    compiler/optimizing/artist/api/env/artist_typedefs.h
+    compiler/optimizing/artist/api/io/error_handler.cc
+    compiler/optimizing/artist/api/io/error_handler.h
+    compiler/optimizing/artist/api/filtering/filter.h
+    compiler/optimizing/artist/api/filtering/method_name_filters.cc
+    compiler/optimizing/artist/api/filtering/method_name_filters.h
+        )
 
 
 find_package(JNI)
@@ -1175,12 +1170,13 @@ include_directories(
         compiler/linker
         compiler/optimizing
         compiler/optimizing/artist
-        compiler/optimizing/artist/env
-        compiler/optimizing/artist/filtering
-        compiler/optimizing/artist/injection
-        compiler/optimizing/artist/modules
-        compiler/optimizing/artist/modules/logtimization
-        compiler/optimizing/artist/modules/trace
+        compiler/optimizing/artist/api/env
+        compiler/optimizing/artist/api/filtering
+        compiler/optimizing/artist/api/injection
+        compiler/optimizing/artist/internal/injection
+        compiler/optimizing/artist/internal/modules
+        compiler/optimizing/artist/internal/modules/logtimization
+        compiler/optimizing/artist/internal/modules/trace
         compiler/trampolines
         compiler/utils
         dalvikvm
