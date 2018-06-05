@@ -21,9 +21,9 @@
 #include <fstream>
 #include <memory>
 #include <stdint.h>
-#include "optimizing/artist/method_info_factory.h"
-#include "optimizing/artist/modules/module_manager.h"
-#include "optimizing/artist/filesystem_helper.h"
+#include "optimizing/artist/api/modules/method_info_factory.h"
+#include "optimizing/artist/api/modules/module_manager.h"
+#include "optimizing/artist/api/io/filesystem_helper.h"
 
 #ifdef ART_ENABLE_CODEGEN_arm
 #include "dex_cache_array_fixups_arm.h"
