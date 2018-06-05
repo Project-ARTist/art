@@ -76,8 +76,8 @@
 #include "verifier/method_verifier.h"
 #include "verifier/method_verifier-inl.h"
 
-#include "optimizing/artist/env/codelib_environment.h"
-#include "optimizing/artist/artist_log.h"
+#include "optimizing/artist/api/env/codelib_environment.h"
+#include "optimizing/artist/api/io/artist_log.h"
 
 
 namespace art {
