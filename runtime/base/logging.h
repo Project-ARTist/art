@@ -110,7 +110,7 @@ extern const char* ProgramInvocationShortName();
 // VLOG(jni) << "A JNI operation was performed";
 #define VLOG(module) \
   if (VLOG_IS_ON(module)) \
-    ::art::LogMessage(__FILE__, __LINE__, INFO, -1).stream()
+    ::art::LogMessage(__FILE__, __LINE__, ::art::INFO, -1).stream()
 
 // Return the stream associated with logging for the given module.
 #define VLOG_STREAM(module) ::art::LogMessage(__FILE__, __LINE__, INFO, -1).stream()
