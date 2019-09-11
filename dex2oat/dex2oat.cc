@@ -1870,9 +1870,7 @@ class Dex2Oat FINAL {
       ErrorHandler::abortCompilation(msg);
     }
 
-    // initialize modules
     loadArtistModules(base_path);
-    ModuleManager::getInstance().initializeModules(dex_files_, class_loader_);
 
     return dex2oat::ReturnCode::kNoFailure;
   }
@@ -2036,6 +2034,9 @@ class Dex2Oat FINAL {
     if (!IsBootImage()) {
       class_loader = class_loader_context_->CreateClassLoader(dex_files_);
     }
+
+    // initialize modules
+    ModuleManager::getInstance().initializeModules(dex_files_, class_loader);
 
     // Register dex caches and key them to the class loader so that they only unload when the
     // class loader unloads.
